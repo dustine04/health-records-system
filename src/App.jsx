@@ -8,6 +8,9 @@ import MidwifeDashboard from "./pages/MidwifeDashboard";
 import BnsDashboard from "./pages/BnsDashboard";
 import BhwDashboard from "./pages/BhwDashboard";
 import Users from "./pages/admin/Users";
+import Workers from "./pages/midwife/Workers";
+import District from "./pages/admin/District";
+import Barangay from "./pages/admin/Barangay";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 function App() {
@@ -36,6 +39,24 @@ function App() {
           }
         />
 
+        <Route
+          path="/dashboard/admin/districts"
+          element={
+            <ProtectedRoute allowedRoles={["cho_admin"]}>
+              <District />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/admin/barangays"
+          element={
+            <ProtectedRoute allowedRoles={["cho_admin"]}>
+              <Barangay />
+            </ProtectedRoute>
+          }
+        />
+
         {/* Nurse */}
         <Route
           path="/dashboard/nurse"
@@ -52,6 +73,14 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["midwife"]}>
               <MidwifeDashboard />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/midwife/workers"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <Workers />
             </ProtectedRoute>
           }
         />
