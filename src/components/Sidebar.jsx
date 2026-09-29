@@ -123,8 +123,8 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         icon: LayoutDashboard,
       },
       {
-        name: "Residents",
-        path: "/dashboard/bns/residents",
+        name: "households",
+        path: "/dashboard/bns/households",
         icon: UserRound,
       },
       {
@@ -151,8 +151,8 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         icon: LayoutDashboard,
       },
       {
-        name: "Residents",
-        path: "/dashboard/bhw/residents",
+        name: "Household",
+        path: "/dashboard/bhw/households",
         icon: UserRound,
       },
       {

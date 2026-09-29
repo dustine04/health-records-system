@@ -12,7 +12,8 @@ import Workers from "./pages/midwife/Workers";
 import District from "./pages/admin/District";
 import Barangay from "./pages/admin/Barangay";
 import ProtectedRoute from "./components/ProtectedRoute";
-
+import BhwHousehold from "./pages/bhw/BhwHousehold";
+import BnsHousehold from "./pages/bns/BnsHousehold";
 function App() {
   return (
     <BrowserRouter>
@@ -101,6 +102,23 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["bhw"]}>
               <BhwDashboard />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/bhw/households"
+          element={
+            <ProtectedRoute allowedRoles={["bhw"]}>
+              <BhwHousehold />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/bns/households"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <BnsHousehold />
             </ProtectedRoute>
           }
         />
