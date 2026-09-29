@@ -1,20 +1,187 @@
+import { useEffect, useState } from "react";
 import {
-  FileText,
-  Send,
-  UserRound,
+  Users,
+  Home,
+  MapPin,
   ClipboardList,
-  ArrowRight,
+  Send,
   Plus,
+  ArrowRight,
+  Activity,
 } from "lucide-react";
 
 import { useNavigate } from "react-router-dom";
 import DashboardLayout from "../components/DashboardLayout";
+import { supabase } from "../lib/supabase";
 
 function BhwDashboard() {
   const navigate = useNavigate();
 
   const storedUser = localStorage.getItem("user");
   const user = storedUser ? JSON.parse(storedUser) : null;
+
+  const [loading, setLoading] = useState(true);
+
+  const [assignedAreas, setAssignedAreas] = useState([]);
+
+  const [stats, setStats] = useState({
+    households: 0,
+    residents: 0,
+    healthRecords: 0,
+    submitted: 0,
+  });
+
+  useEffect(() => {
+    if (user?.id) {
+      fetchDashboardData();
+    }
+  }, [user?.id]);
+
+  // =========================================================
+  // FETCH DASHBOARD DATA
+  // =========================================================
+
+  const fetchDashboardData = async () => {
+    try {
+      setLoading(true);
+
+      // -----------------------------------------------------
+      // 1. GET BHW ASSIGNED PUROK/SITIO
+      // -----------------------------------------------------
+
+      const { data: assignments, error: assignmentError } = await supabase
+        .from("worker_area_assignments")
+        .select(
+          `
+            local_area_id,
+            local_areas (
+              id,
+              name,
+              type,
+              barangay_id,
+              barangays (
+                id,
+                name
+              )
+            )
+          `,
+        )
+        .eq("worker_id", user.id)
+        .eq("is_active", true);
+
+      if (assignmentError) throw assignmentError;
+
+      const areas = (assignments || [])
+        .map((item) => item.local_areas)
+        .filter(Boolean);
+
+      setAssignedAreas(areas);
+
+      // -----------------------------------------------------
+      // 2. GET HOUSEHOLDS IN ASSIGNED AREAS
+      // -----------------------------------------------------
+
+      let householdCount = 0;
+      let residentCount = 0;
+      let householdIds = [];
+
+      const areaIds = areas.map((area) => area.id);
+
+      if (areaIds.length > 0) {
+        const { data: households, error: householdError } = await supabase
+          .from("households")
+          .select("id")
+          .in("local_area_id", areaIds);
+
+        if (householdError) throw householdError;
+
+        householdIds = (households || []).map((household) => household.id);
+
+        householdCount = householdIds.length;
+      }
+
+      // -----------------------------------------------------
+      // 3. GET RESIDENT COUNT
+      // -----------------------------------------------------
+
+      if (householdIds.length > 0) {
+        const { data: residents, error: residentError } = await supabase
+          .from("residents")
+          .select("id")
+          .in("household_id", householdIds);
+
+        if (residentError) throw residentError;
+
+        residentCount = (residents || []).length;
+      }
+
+      // -----------------------------------------------------
+      // 4. GET HEALTH RECORD COUNT
+      // -----------------------------------------------------
+      //
+      // Current schema:
+      // health_records.recorded_by = BHW user ID
+      //
+      // -----------------------------------------------------
+
+      let healthRecordCount = 0;
+
+      const { count: recordCount, error: recordsError } = await supabase
+        .from("health_records")
+        .select("id", {
+          count: "exact",
+          head: true,
+        })
+        .eq("recorded_by", user.id);
+
+      if (recordsError) {
+        console.error("Error loading health records:", recordsError);
+      } else {
+        healthRecordCount = recordCount || 0;
+      }
+
+      // -----------------------------------------------------
+      // 5. GET SUBMITTED COUNT
+      // -----------------------------------------------------
+      //
+      // Current schema:
+      // submissions.submitted_by = BHW user ID
+      //
+      // -----------------------------------------------------
+
+      let submittedCount = 0;
+
+      const { count: submissionCount, error: submissionsError } = await supabase
+        .from("submissions")
+        .select("id", {
+          count: "exact",
+          head: true,
+        })
+        .eq("submitted_by", user.id);
+
+      if (submissionsError) {
+        console.error("Error loading submissions:", submissionsError);
+      } else {
+        submittedCount = submissionCount || 0;
+      }
+
+      // -----------------------------------------------------
+      // UPDATE STATS
+      // -----------------------------------------------------
+
+      setStats({
+        households: householdCount,
+        residents: residentCount,
+        healthRecords: healthRecordCount,
+        submitted: submittedCount,
+      });
+    } catch (error) {
+      console.error("Error loading BHW dashboard:", error);
+      alert(error.message || "Failed to load dashboard data.");
+    } finally {
+      setLoading(false);
+    }
+  };
 
   if (!user) {
     return null;
@@ -23,129 +190,248 @@ function BhwDashboard() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* Welcome Section */}
+        {/* =====================================================
+            WELCOME
+        ===================================================== */}
+
         <div>
-          <h2 className="text-2xl sm:text-3xl font-bold text-gray-800">
+          <h2 className="text-2xl font-bold text-gray-800 sm:text-3xl">
             Welcome, {user.first_name}! 👋
           </h2>
 
-          <p className="text-gray-500 mt-1">
-            Barangay Health Worker — Health Records
+          <p className="mt-1 text-gray-500">
+            Barangay Health Worker — Community Health Monitoring
           </p>
         </div>
 
-        {/* Statistics */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 lg:gap-6">
-          {/* My Health Records */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5 sm:p-6 shadow-sm">
+        {/* =====================================================
+            ASSIGNED AREA
+        ===================================================== */}
+
+        <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm sm:p-6">
+          <div className="flex items-start gap-4">
+            <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-xl bg-teal-50">
+              <MapPin size={24} className="text-teal-600" />
+            </div>
+
+            <div className="flex-1">
+              <p className="text-sm font-medium text-gray-500">
+                My Assigned Area
+              </p>
+
+              {loading ? (
+                <div className="mt-2 h-6 w-56 animate-pulse rounded bg-gray-100" />
+              ) : assignedAreas.length === 0 ? (
+                <>
+                  <h3 className="mt-1 text-lg font-semibold text-gray-800 sm:text-xl">
+                    No Assigned Area
+                  </h3>
+
+                  <p className="mt-1 text-sm text-gray-500">
+                    You currently don't have an assigned Purok/Sitio.
+                  </p>
+                </>
+              ) : (
+                <div className="mt-3 space-y-3">
+                  {assignedAreas.map((area) => (
+                    <div
+                      key={area.id}
+                      className="rounded-lg border border-teal-100 bg-teal-50/50 px-4 py-3"
+                    >
+                      <h3 className="text-base font-semibold text-gray-800 sm:text-lg">
+                        {area.barangays?.name || "Unknown Barangay"}
+                      </h3>
+
+                      <p className="mt-1 text-sm text-gray-600">
+                        {area.type === "purok"
+                          ? "Purok"
+                          : area.type === "sitio"}{" "}
+                        {area.name}
+                      </p>
+                    </div>
+                  ))}
+
+                  <p className="text-xs text-gray-400">
+                    {assignedAreas.length} assigned area
+                    {assignedAreas.length !== 1 ? "s" : ""}
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* =====================================================
+            STATISTICS
+        ===================================================== */}
+
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 lg:gap-6">
+          {/* HOUSEHOLDS */}
+          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">
-                  My Health Records
+                <p className="text-sm font-medium text-gray-500">Households</p>
+
+                <p className="mt-2 text-3xl font-bold text-gray-800">
+                  {loading ? "..." : stats.households}
                 </p>
 
-                <p className="text-3xl font-bold text-gray-800 mt-2">0</p>
-
-                <p className="text-xs text-gray-400 mt-1">
-                  Records you've encoded
+                <p className="mt-1 text-xs text-gray-400">
+                  In your assigned area
                 </p>
               </div>
 
-              <div className="w-12 h-12 rounded-xl bg-teal-50 flex items-center justify-center">
-                <FileText size={24} className="text-teal-600" />
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-50">
+                <Home size={24} className="text-blue-600" />
               </div>
             </div>
           </div>
 
-          {/* Submitted Records */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5 sm:p-6 shadow-sm">
+          {/* RESIDENTS */}
+          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-gray-500">
-                  Submitted Records
+                <p className="text-sm font-medium text-gray-500">Residents</p>
+
+                <p className="mt-2 text-3xl font-bold text-gray-800">
+                  {loading ? "..." : stats.residents}
                 </p>
 
-                <p className="text-3xl font-bold text-gray-800 mt-2">0</p>
-
-                <p className="text-xs text-gray-400 mt-1">
-                  Records submitted for review
+                <p className="mt-1 text-xs text-gray-400">
+                  Registered residents
                 </p>
               </div>
 
-              <div className="w-12 h-12 rounded-xl bg-blue-50 flex items-center justify-center">
-                <Send size={24} className="text-blue-600" />
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-purple-50">
+                <Users size={24} className="text-purple-600" />
+              </div>
+            </div>
+          </div>
+
+          {/* HEALTH RECORDS */}
+          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-500">
+                  Health Records
+                </p>
+
+                <p className="mt-2 text-3xl font-bold text-gray-800">
+                  {loading ? "..." : stats.healthRecords}
+                </p>
+
+                <p className="mt-1 text-xs text-gray-400">Records encoded</p>
+              </div>
+
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-teal-50">
+                <Activity size={24} className="text-teal-600" />
+              </div>
+            </div>
+          </div>
+
+          {/* SUBMITTED */}
+          <div className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-gray-500">Submitted</p>
+
+                <p className="mt-2 text-3xl font-bold text-gray-800">
+                  {loading ? "..." : stats.submitted}
+                </p>
+
+                <p className="mt-1 text-xs text-gray-400">Sent to Midwife</p>
+              </div>
+
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-green-50">
+                <Send size={24} className="text-green-600" />
               </div>
             </div>
           </div>
         </div>
 
-        {/* Quick Actions */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          {/* Add Record */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+        {/* =====================================================
+            QUICK ACTIONS
+        ===================================================== */}
+
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          {/* HOUSEHOLDS */}
+          <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
             <div className="flex items-start gap-4">
-              <div className="w-11 h-11 rounded-xl bg-teal-50 flex items-center justify-center flex-shrink-0">
-                <Plus size={22} className="text-teal-600" />
+              <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-blue-50">
+                <Home size={22} className="text-blue-600" />
               </div>
 
               <div className="flex-1">
                 <h3 className="text-lg font-semibold text-gray-800">
-                  Add Health Record
+                  Households
                 </h3>
 
-                <p className="text-sm text-gray-500 mt-1">
-                  Encode health information collected from residents.
+                <p className="mt-1 text-sm text-gray-500">
+                  Register and manage households within your assigned
+                  Purok/Sitio.
                 </p>
 
                 <button
-                  onClick={() => navigate("/dashboard/bhw/add-record")}
-                  className="
-                    mt-4
-                    inline-flex items-center gap-2
-                    bg-teal-600
-                    hover:bg-teal-700
-                    text-white
-                    text-sm font-medium
-                    px-4 py-2.5
-                    rounded-lg
-                    transition
-                  "
+                  onClick={() => navigate("/dashboard/bhw/households")}
+                  className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-blue-600 transition hover:text-blue-700"
                 >
-                  <Plus size={17} />
-                  Add Record
+                  Manage Households
+                  <ArrowRight size={16} />
                 </button>
               </div>
             </div>
           </div>
 
-          {/* Residents */}
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6">
+          {/* ADD HEALTH RECORD */}
+          <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
             <div className="flex items-start gap-4">
-              <div className="w-11 h-11 rounded-xl bg-blue-50 flex items-center justify-center flex-shrink-0">
-                <UserRound size={22} className="text-blue-600" />
+              <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-teal-50">
+                <Plus size={22} className="text-teal-600" />
               </div>
 
               <div className="flex-1">
                 <h3 className="text-lg font-semibold text-gray-800">
-                  Residents
+                  Record Health Information
                 </h3>
 
-                <p className="text-sm text-gray-500 mt-1">
-                  View residents and manage their health information.
+                <p className="mt-1 text-sm text-gray-500">
+                  Record health information collected during household visits
+                  and community monitoring.
                 </p>
 
                 <button
-                  onClick={() => navigate("/dashboard/bhw/residents")}
-                  className="
-                    mt-4
-                    inline-flex items-center gap-2
-                    text-sm font-medium
-                    text-blue-600
-                    hover:text-blue-700
-                    transition
-                  "
+                  onClick={() => navigate("/dashboard/bhw/add-record")}
+                  className="mt-4 inline-flex items-center gap-2 rounded-lg bg-teal-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-teal-700"
                 >
-                  View Residents
+                  <Plus size={17} />
+                  Add Health Record
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* SUBMIT RECORDS */}
+          <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+            <div className="flex items-start gap-4">
+              <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-green-50">
+                <Send size={22} className="text-green-600" />
+              </div>
+
+              <div className="flex-1">
+                <h3 className="text-lg font-semibold text-gray-800">
+                  Submit to Midwife
+                </h3>
+
+                <p className="mt-1 text-sm text-gray-500">
+                  Review your encoded records and submit them to the assigned
+                  Midwife for review.
+                </p>
+
+                <button
+                  onClick={() => navigate("/dashboard/bhw/submissions")}
+                  className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-green-600 transition hover:text-green-700"
+                >
+                  View Submissions
                   <ArrowRight size={16} />
                 </button>
               </div>
@@ -153,45 +439,47 @@ function BhwDashboard() {
           </div>
         </div>
 
-        {/* Recent Submissions */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm">
-          <div className="px-6 py-5 border-b border-gray-200">
+        {/* =====================================================
+            RECENT HEALTH RECORDS
+        ===================================================== */}
+
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+          <div className="border-b border-gray-200 px-6 py-5">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-gray-100">
                 <ClipboardList size={20} className="text-gray-500" />
               </div>
 
               <div>
                 <h3 className="text-lg font-semibold text-gray-800">
-                  Recent Submissions
+                  Recent Health Records
                 </h3>
 
-                <p className="text-sm text-gray-500 mt-0.5">
-                  Your recently submitted health records.
+                <p className="mt-0.5 text-sm text-gray-500">
+                  Recently encoded health information from your assigned area.
                 </p>
               </div>
             </div>
           </div>
 
           <div className="p-8 text-center">
-            <div className="w-12 h-12 mx-auto rounded-full bg-gray-100 flex items-center justify-center">
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-gray-100">
               <ClipboardList size={22} className="text-gray-400" />
             </div>
 
-            <p className="text-gray-500 text-sm mt-3">No submissions yet.</p>
+            <p className="mt-3 text-sm text-gray-500">
+              {stats.healthRecords > 0
+                ? `${stats.healthRecords} health record${
+                    stats.healthRecords !== 1 ? "s" : ""
+                  } encoded.`
+                : "No health records yet."}
+            </p>
 
             <button
-              onClick={() => navigate("/dashboard/bhw/submissions")}
-              className="
-                mt-3
-                inline-flex items-center gap-2
-                text-sm font-medium
-                text-teal-600
-                hover:text-teal-700
-                transition
-              "
+              onClick={() => navigate("/dashboard/bhw/records")}
+              className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-teal-600 transition hover:text-teal-700"
             >
-              View My Submissions
+              View Health Records
               <ArrowRight size={16} />
             </button>
           </div>
