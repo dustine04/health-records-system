@@ -14,6 +14,11 @@ import Barangay from "./pages/admin/Barangay";
 import ProtectedRoute from "./components/ProtectedRoute";
 import BhwHousehold from "./pages/bhw/BhwHousehold";
 import BnsHousehold from "./pages/bns/BnsHousehold";
+import ChildMonitoring from "./pages/bns/ChildMonitoring";
+import ChildRegistration from "./pages/bns/ChildRegistration";
+import BhwPregnantWomen from "./pages/bhw/BhwPregnantWomen";
+import BhwPregnantMonitoring from "./pages/bhw/BhwPregnantMonitoring";
+
 function App() {
   return (
     <BrowserRouter>
@@ -114,11 +119,47 @@ function App() {
             </ProtectedRoute>
           }
         />
+
+        <Route
+          path="/dashboard/bhw/pregnant-women"
+          element={
+            <ProtectedRoute allowedRoles={["bhw"]}>
+              <BhwPregnantWomen />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/bhw/pregnant-monitoring"
+          element={
+            <ProtectedRoute allowedRoles={["bhw"]}>
+              <BhwPregnantMonitoring />
+            </ProtectedRoute>
+          }
+        />
+
         <Route
           path="/dashboard/bns/households"
           element={
             <ProtectedRoute allowedRoles={["bns"]}>
               <BnsHousehold />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/bns/child-registration"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <ChildRegistration />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/bns/child-monitoring"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <ChildMonitoring />
             </ProtectedRoute>
           }
         />

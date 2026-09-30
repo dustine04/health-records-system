@@ -1,6 +1,7 @@
 import {
   LayoutDashboard,
   Users,
+  Activity,
   Map,
   FileText,
   ClipboardList,
@@ -11,6 +12,7 @@ import {
   Building2,
   UserRound,
   Menu,
+  Baby,
 } from "lucide-react";
 
 import { useNavigate, useLocation } from "react-router-dom";
@@ -128,9 +130,14 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         icon: UserRound,
       },
       {
-        name: "Health Records",
-        path: "/dashboard/bns/records",
-        icon: FileText,
+        name: "Child Registration",
+        path: "/dashboard/bns/child-registration",
+        icon: Baby,
+      },
+      {
+        name: "Child Monitoring",
+        path: "/dashboard/bns/child-Monitoring",
+        icon: Activity,
       },
       {
         name: "Add Record",
@@ -154,6 +161,16 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         name: "Household",
         path: "/dashboard/bhw/households",
         icon: UserRound,
+      },
+      {
+        name: "Pregnant Women",
+        path: "/dashboard/bhw/pregnant-women",
+        icon: Baby,
+      },
+      {
+        name: "Pregnant Monitoring",
+        path: "/dashboard/bhw/pregnant-monitoring",
+        icon: HeartPulse,
       },
       {
         name: "Health Records",
