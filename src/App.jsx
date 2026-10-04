@@ -7,26 +7,39 @@ import NurseDashboard from "./pages/NurseDashboard";
 import MidwifeDashboard from "./pages/MidwifeDashboard";
 import BnsDashboard from "./pages/BnsDashboard";
 import BhwDashboard from "./pages/BhwDashboard";
+
 import Users from "./pages/admin/Users";
 import Workers from "./pages/midwife/Workers";
 import District from "./pages/admin/District";
 import Barangay from "./pages/admin/Barangay";
+
 import ProtectedRoute from "./components/ProtectedRoute";
+
 import BhwHousehold from "./pages/bhw/BhwHousehold";
 import BnsHousehold from "./pages/bns/BnsHousehold";
+
 import ChildMonitoring from "./pages/bns/ChildMonitoring";
 import ChildRegistration from "./pages/bns/ChildRegistration";
+
 import BhwPregnantWomen from "./pages/bhw/BhwPregnantWomen";
 import BhwPregnantMonitoring from "./pages/bhw/BhwPregnantMonitoring";
+
+import Profile from "./pages/Profile";
 
 function App() {
   return (
     <BrowserRouter>
       <Routes>
-        {/* Login */}
+        {/* =====================================================
+            LOGIN
+        ===================================================== */}
+
         <Route path="/" element={<Login />} />
 
-        {/* Admin */}
+        {/* =====================================================
+            ADMIN
+        ===================================================== */}
+
         <Route
           path="/dashboard/admin"
           element={
@@ -63,7 +76,20 @@ function App() {
           }
         />
 
-        {/* Nurse */}
+        {/* Admin Profile */}
+        <Route
+          path="/dashboard/admin/profile"
+          element={
+            <ProtectedRoute allowedRoles={["cho_admin"]}>
+              <Profile />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* =====================================================
+            NURSE
+        ===================================================== */}
+
         <Route
           path="/dashboard/nurse"
           element={
@@ -73,7 +99,20 @@ function App() {
           }
         />
 
-        {/* Midwife */}
+        {/* Nurse Profile */}
+        <Route
+          path="/dashboard/nurse/profile"
+          element={
+            <ProtectedRoute allowedRoles={["nurse"]}>
+              <Profile />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* =====================================================
+            MIDWIFE
+        ===================================================== */}
+
         <Route
           path="/dashboard/midwife"
           element={
@@ -82,6 +121,7 @@ function App() {
             </ProtectedRoute>
           }
         />
+
         <Route
           path="/dashboard/midwife/workers"
           element={
@@ -91,7 +131,20 @@ function App() {
           }
         />
 
-        {/* BNS */}
+        {/* Midwife Profile */}
+        <Route
+          path="/dashboard/midwife/profile"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <Profile />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* =====================================================
+            BNS
+        ===================================================== */}
+
         <Route
           path="/dashboard/bns"
           element={
@@ -101,7 +154,47 @@ function App() {
           }
         />
 
-        {/* BHW */}
+        <Route
+          path="/dashboard/bns/households"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <BnsHousehold />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/bns/child-registration"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <ChildRegistration />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/bns/child-monitoring"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <ChildMonitoring />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* BNS Profile */}
+        <Route
+          path="/dashboard/bns/profile"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <Profile />
+            </ProtectedRoute>
+          }
+        />
+
+        {/* =====================================================
+            BHW
+        ===================================================== */}
+
         <Route
           path="/dashboard/bhw"
           element={
@@ -138,28 +231,12 @@ function App() {
           }
         />
 
+        {/* BHW Profile */}
         <Route
-          path="/dashboard/bns/households"
+          path="/dashboard/bhw/profile"
           element={
-            <ProtectedRoute allowedRoles={["bns"]}>
-              <BnsHousehold />
-            </ProtectedRoute>
-          }
-        />
-
-        <Route
-          path="/dashboard/bns/child-registration"
-          element={
-            <ProtectedRoute allowedRoles={["bns"]}>
-              <ChildRegistration />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/dashboard/bns/child-monitoring"
-          element={
-            <ProtectedRoute allowedRoles={["bns"]}>
-              <ChildMonitoring />
+            <ProtectedRoute allowedRoles={["bhw"]}>
+              <Profile />
             </ProtectedRoute>
           }
         />

@@ -23,6 +23,26 @@ import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
 
 const emptyForms = {
+  newborn: {
+    place_of_delivery: "",
+    delivery_date: "",
+    birth_weight_kg: "",
+
+    home_visit_24hrs_date: "",
+    home_visit_1week_date: "",
+    home_visit_2_3weeks_date: "",
+    home_visit_4_6weeks_date: "",
+
+    family_planning_method: "",
+
+    newborn_screening_done: false,
+    newborn_screening_date: "",
+    newborn_screening_result: "",
+
+    exclusive_breastfeeding: "",
+
+    remarks: "",
+  },
   monitoring: {
     monitoring_date: "",
     weight_kg: "",
@@ -73,31 +93,42 @@ const emptyForms = {
 };
 
 const sectionConfig = {
+  newborn: {
+    title: "Newborn Tracking",
+    icon: Baby,
+    table: "child_newborn_tracking",
+  },
+
   monitoring: {
     title: "Growth Monitoring",
     icon: Activity,
     table: "child_monitoring",
   },
+
   immunization: {
     title: "Immunization",
     icon: Syringe,
     table: "child_immunization",
   },
+
   feeding: {
     title: "Breastfeeding & Complementary Feeding",
     icon: Apple,
     table: "child_feeding",
   },
+
   micronutrients: {
     title: "Micronutrient Supplementation",
     icon: Pill,
     table: "child_micronutrients",
   },
+
   deworming: {
     title: "Deworming",
     icon: ShieldCheck,
     table: "child_deworming",
   },
+
   followup: {
     title: "SOAP / Follow-up",
     icon: ClipboardList,
@@ -160,6 +191,7 @@ export default function ChildMonitoring() {
   const [activeSection, setActiveSection] = useState("monitoring");
 
   const [records, setRecords] = useState({
+    newborn: [],
     monitoring: [],
     immunization: [],
     feeding: [],
@@ -361,7 +393,14 @@ export default function ChildMonitoring() {
       setLoadingRecords(true);
 
       const childHealthRecordId = child.health_record.id;
-
+      // ---------------------------------------------------------
+      // Newborn Tracking
+      // ---------------------------------------------------------
+      const newbornPromise = supabase
+        .from("child_newborn_tracking")
+        .select("*")
+        .eq("child_health_record_id", childHealthRecordId)
+        .maybeSingle();
       // ---------------------------------------------------------
       // Growth Monitoring
       // child_monitoring.child_health_record_id references
@@ -431,6 +470,7 @@ export default function ChildMonitoring() {
         });
 
       const [
+        newbornResult,
         monitoringResult,
         immunizationResult,
         feedingResult,
@@ -438,6 +478,7 @@ export default function ChildMonitoring() {
         dewormingResult,
         followupResult,
       ] = await Promise.all([
+        newbornPromise,
         monitoringPromise,
         immunizationPromise,
         feedingPromise,
@@ -445,7 +486,7 @@ export default function ChildMonitoring() {
         dewormingPromise,
         followupPromise,
       ]);
-
+      if (newbornResult.error) throw newbornResult.error;
       if (monitoringResult.error) throw monitoringResult.error;
       if (immunizationResult.error) throw immunizationResult.error;
       if (feedingResult.error) throw feedingResult.error;
@@ -454,6 +495,7 @@ export default function ChildMonitoring() {
       if (followupResult.error) throw followupResult.error;
 
       setRecords({
+        newborn: newbornResult.data ? [newbornResult.data] : [],
         monitoring: monitoringResult.data || [],
         immunization: immunizationResult.data || [],
         feeding: feedingResult.data || [],
@@ -549,7 +591,49 @@ export default function ChildMonitoring() {
 
       let table = sectionConfig[activeSection].table;
       let data = {};
+      // =========================================================
+      // NEWBORN TRACKING
+      // =========================================================
+      if (activeSection === "newborn") {
+        data = {
+          child_health_record_id: childHealthRecordId,
 
+          place_of_delivery: form.place_of_delivery.trim() || null,
+
+          delivery_date: form.delivery_date || null,
+
+          birth_weight_kg: form.birth_weight_kg
+            ? Number(form.birth_weight_kg)
+            : null,
+
+          home_visit_24hrs_date: form.home_visit_24hrs_date || null,
+
+          home_visit_1week_date: form.home_visit_1week_date || null,
+
+          home_visit_2_3weeks_date: form.home_visit_2_3weeks_date || null,
+
+          home_visit_4_6weeks_date: form.home_visit_4_6weeks_date || null,
+
+          family_planning_method: form.family_planning_method.trim() || null,
+
+          newborn_screening_done: Boolean(form.newborn_screening_done),
+
+          newborn_screening_date: form.newborn_screening_date || null,
+
+          newborn_screening_result:
+            form.newborn_screening_result.trim() || null,
+
+          exclusive_breastfeeding:
+            form.exclusive_breastfeeding === ""
+              ? null
+              : form.exclusive_breastfeeding === "Yes",
+
+          remarks: form.remarks.trim() || null,
+
+          created_by: user.id,
+          updated_at: new Date().toISOString(),
+        };
+      }
       // =========================================================
       // GROWTH MONITORING
       // =========================================================
@@ -679,13 +763,26 @@ export default function ChildMonitoring() {
 
       let result;
 
-      if (editingRecord) {
-        result = await supabase
-          .from(table)
-          .update(data)
-          .eq("id", editingRecord.id);
+      if (activeSection === "newborn") {
+        if (editingRecord) {
+          result = await supabase
+            .from(table)
+            .update(data)
+            .eq("id", editingRecord.id);
+        } else {
+          result = await supabase.from(table).upsert(data, {
+            onConflict: "child_health_record_id",
+          });
+        }
       } else {
-        result = await supabase.from(table).insert(data);
+        if (editingRecord) {
+          result = await supabase
+            .from(table)
+            .update(data)
+            .eq("id", editingRecord.id);
+        } else {
+          result = await supabase.from(table).insert(data);
+        }
       }
 
       if (result.error) {
@@ -1133,6 +1230,14 @@ function SectionContent({ section, records, onAdd, onEdit, onDelete }) {
         </div>
       ) : (
         <div className="overflow-hidden rounded-xl border border-gray-200">
+          {section === "newborn" && (
+            <NewbornTrackingTable
+              records={records}
+              onEdit={onEdit}
+              onDelete={onDelete}
+            />
+          )}
+
           {section === "monitoring" && (
             <MonitoringTable
               records={records}
@@ -1211,7 +1316,107 @@ function TableActions({ record, onEdit, onDelete }) {
     </div>
   );
 }
+function NewbornTrackingTable({ records, onEdit, onDelete }) {
+  const record = records[0];
 
+  if (!record) {
+    return null;
+  }
+
+  const visits = [
+    {
+      label: ">24 hrs",
+      date: record.home_visit_24hrs_date,
+    },
+    {
+      label: "1st week",
+      date: record.home_visit_1week_date,
+    },
+    {
+      label: "2–3 weeks",
+      date: record.home_visit_2_3weeks_date,
+    },
+    {
+      label: "4–6 weeks",
+      date: record.home_visit_4_6weeks_date,
+    },
+  ];
+
+  return (
+    <div className="p-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {visits.map((visit) => (
+          <div
+            key={visit.label}
+            className="rounded-xl border border-gray-200 bg-gray-50 p-4"
+          >
+            <p className="text-xs font-semibold uppercase text-gray-400">
+              {visit.label}
+            </p>
+
+            <p className="mt-2 font-medium text-gray-800">
+              {visit.date ? formatDate(visit.date) : "Not recorded"}
+            </p>
+
+            <span
+              className={`mt-2 inline-block rounded-full px-2.5 py-1 text-xs font-medium ${
+                visit.date
+                  ? "bg-green-100 text-green-700"
+                  : "bg-yellow-100 text-yellow-700"
+              }`}
+            >
+              {visit.date ? "Completed" : "Pending"}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-5 grid gap-4 sm:grid-cols-2">
+        <div className="rounded-xl border border-gray-200 p-4">
+          <p className="text-xs text-gray-400">Birth Weight</p>
+
+          <p className="mt-1 font-semibold text-gray-800">
+            {record.birth_weight_kg != null
+              ? `${record.birth_weight_kg} kg`
+              : "-"}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 p-4">
+          <p className="text-xs text-gray-400">Newborn Screening</p>
+
+          <p className="mt-1 font-semibold text-gray-800">
+            {record.newborn_screening_done ? "Completed" : "Not completed"}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 p-4">
+          <p className="text-xs text-gray-400">Exclusive Breastfeeding</p>
+
+          <p className="mt-1 font-semibold text-gray-800">
+            {record.exclusive_breastfeeding === true
+              ? "Yes"
+              : record.exclusive_breastfeeding === false
+                ? "No"
+                : "-"}
+          </p>
+        </div>
+
+        <div className="rounded-xl border border-gray-200 p-4">
+          <p className="text-xs text-gray-400">Family Planning</p>
+
+          <p className="mt-1 font-semibold text-gray-800">
+            {record.family_planning_method || "-"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5 flex justify-end gap-2">
+        <TableActions record={record} onEdit={onEdit} onDelete={onDelete} />
+      </div>
+    </div>
+  );
+}
 /* =============================================================
    GROWTH MONITORING TABLE
 ============================================================= */
@@ -1530,6 +1735,180 @@ function FollowupTable({ records, onEdit, onDelete }) {
 ============================================================= */
 
 function RecordForm({ section, form, onChange }) {
+  if (section === "newborn") {
+    return (
+      <div className="space-y-6">
+        {/* =========================================
+          DELIVERY INFORMATION
+      ========================================== */}
+        <div>
+          <h3 className="mb-3 text-sm font-bold text-gray-800">
+            Delivery Information
+          </h3>
+
+          <div className="grid gap-5 sm:grid-cols-2">
+            <InputField
+              label="Place of Delivery"
+              name="place_of_delivery"
+              value={form.place_of_delivery}
+              onChange={onChange}
+              placeholder="e.g. Ormoc District Hospital"
+            />
+
+            <InputField
+              label="Date of Delivery"
+              name="delivery_date"
+              type="date"
+              value={form.delivery_date}
+              onChange={onChange}
+            />
+
+            <InputField
+              label="Birth Weight (kg)"
+              name="birth_weight_kg"
+              type="number"
+              step="0.01"
+              value={form.birth_weight_kg}
+              onChange={onChange}
+              placeholder="e.g. 2.90"
+            />
+          </div>
+        </div>
+
+        {/* =========================================
+          HOME VISITS
+      ========================================== */}
+        <div>
+          <h3 className="mb-3 text-sm font-bold text-gray-800">
+            Postpartum & Newborn Home Visits
+          </h3>
+
+          <div className="grid gap-5 sm:grid-cols-2">
+            <InputField
+              label=">24 Hours"
+              name="home_visit_24hrs_date"
+              type="date"
+              value={form.home_visit_24hrs_date}
+              onChange={onChange}
+            />
+
+            <InputField
+              label="1st Week"
+              name="home_visit_1week_date"
+              type="date"
+              value={form.home_visit_1week_date}
+              onChange={onChange}
+            />
+
+            <InputField
+              label="2–3 Weeks"
+              name="home_visit_2_3weeks_date"
+              type="date"
+              value={form.home_visit_2_3weeks_date}
+              onChange={onChange}
+            />
+
+            <InputField
+              label="4–6 Weeks"
+              name="home_visit_4_6weeks_date"
+              type="date"
+              value={form.home_visit_4_6weeks_date}
+              onChange={onChange}
+            />
+          </div>
+        </div>
+
+        {/* =========================================
+          NEWBORN SCREENING
+      ========================================== */}
+        <div>
+          <h3 className="mb-3 text-sm font-bold text-gray-800">
+            Newborn Screening
+          </h3>
+
+          <div className="space-y-5">
+            <SelectField
+              label="Newborn Screening"
+              name="newborn_screening_done"
+              value={form.newborn_screening_done ? "Yes" : "No"}
+              onChange={(e) => {
+                const value = e.target.value;
+
+                onChange({
+                  target: {
+                    name: "newborn_screening_done",
+                    value: value === "Yes",
+                  },
+                });
+              }}
+              options={["Yes", "No"]}
+            />
+
+            <InputField
+              label="Screening Date"
+              name="newborn_screening_date"
+              type="date"
+              value={form.newborn_screening_date}
+              onChange={onChange}
+            />
+
+            <TextAreaField
+              label="Screening Result / Remarks"
+              name="newborn_screening_result"
+              value={form.newborn_screening_result}
+              onChange={onChange}
+              placeholder="Enter screening result or relevant notes..."
+            />
+          </div>
+        </div>
+
+        {/* =========================================
+          BREASTFEEDING
+      ========================================== */}
+        <div>
+          <h3 className="mb-3 text-sm font-bold text-gray-800">
+            Exclusive Breastfeeding
+          </h3>
+
+          <SelectField
+            label="EBF"
+            name="exclusive_breastfeeding"
+            value={form.exclusive_breastfeeding}
+            onChange={onChange}
+            options={["Yes", "No"]}
+          />
+        </div>
+
+        {/* =========================================
+          FAMILY PLANNING
+      ========================================== */}
+        <div>
+          <h3 className="mb-3 text-sm font-bold text-gray-800">
+            Family Planning
+          </h3>
+
+          <InputField
+            label="Family Planning Method"
+            name="family_planning_method"
+            value={form.family_planning_method}
+            onChange={onChange}
+            placeholder="e.g. None, Condom, Pills, Implant..."
+          />
+        </div>
+
+        {/* =========================================
+          REMARKS
+      ========================================== */}
+        <TextAreaField
+          label="Remarks"
+          name="remarks"
+          value={form.remarks}
+          onChange={onChange}
+          placeholder="Additional notes..."
+        />
+      </div>
+    );
+  }
   if (section === "monitoring") {
     return (
       <div className="grid gap-5 sm:grid-cols-2">

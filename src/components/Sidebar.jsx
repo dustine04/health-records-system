@@ -30,6 +30,10 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
 
   const role = user.role;
 
+  // =========================================================
+  // ROLE NAMES
+  // =========================================================
+
   const roleNames = {
     cho_admin: "CHO Administrator",
     nurse: "Nurse",
@@ -37,6 +41,35 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
     bns: "Barangay Nutrition Scholar",
     bhw: "Barangay Health Worker",
   };
+
+  // =========================================================
+  // PROFILE ROUTES
+  // =========================================================
+
+  const profileRoutes = {
+    cho_admin: "/dashboard/admin/profile",
+    nurse: "/dashboard/nurse/profile",
+    midwife: "/dashboard/midwife/profile",
+    bns: "/dashboard/bns/profile",
+    bhw: "/dashboard/bhw/profile",
+  };
+
+  // =========================================================
+  // GO TO PROFILE
+  // =========================================================
+
+  const handleProfileClick = () => {
+    const profilePath = profileRoutes[role];
+
+    if (profilePath) {
+      navigate(profilePath);
+      setMobileOpen(false);
+    }
+  };
+
+  // =========================================================
+  // MENU ITEMS
+  // =========================================================
 
   const menus = {
     cho_admin: [
@@ -125,7 +158,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         icon: LayoutDashboard,
       },
       {
-        name: "households",
+        name: "Households",
         path: "/dashboard/bns/households",
         icon: UserRound,
       },
@@ -136,7 +169,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
       },
       {
         name: "Child Monitoring",
-        path: "/dashboard/bns/child-Monitoring",
+        path: "/dashboard/bns/child-monitoring",
         icon: Activity,
       },
       {
@@ -192,6 +225,10 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
 
   const menuItems = menus[role] || [];
 
+  // =========================================================
+  // LOGOUT
+  // =========================================================
+
   const handleLogout = () => {
     localStorage.removeItem("user");
     setMobileOpen(false);
@@ -201,64 +238,70 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
   return (
     <aside
       className={`
-    z-50
-    bg-white
-    border-r border-gray-200
-    flex flex-col
-    flex-shrink-0
+        z-50
+        bg-white
+        border-r border-gray-200
+        flex flex-col
+        flex-shrink-0
 
-    transition-all
-    duration-300
-    ease-in-out
+        transition-all
+        duration-300
+        ease-in-out
 
-    min-h-screen
+        min-h-screen
 
-    lg:relative
+        lg:relative
 
-    ${collapsed ? "lg:w-20" : "lg:w-64"}
+        ${collapsed ? "lg:w-20" : "lg:w-64"}
 
-    fixed
-    left-0
-    top-0
-    h-screen
+        fixed
+        left-0
+        top-0
+        h-screen
 
-    ${mobileOpen ? "translate-x-0" : "-translate-x-full"}
+        ${mobileOpen ? "translate-x-0" : "-translate-x-full"}
 
-    lg:translate-x-0
-    lg:h-auto
-  `}
+        lg:translate-x-0
+        lg:h-auto
+      `}
     >
-      {/* Logo / Header */}
+      {/* =====================================================
+          LOGO / HEADER
+      ===================================================== */}
+
       <div
         className="
-    h-20
-    border-b border-gray-200
-    flex items-center
-    relative
-    flex-shrink-0
-    transition-all duration-300
-  "
+          h-20
+          border-b border-gray-200
+          flex items-center
+          relative
+          flex-shrink-0
+          transition-all duration-300
+        "
       >
         {/* ================= DESKTOP ================= */}
+
         <div className="hidden lg:block w-full h-full">
           {!collapsed ? (
             <>
               {/* Logo */}
+
               <div className="absolute left-5 top-1/2 -translate-y-1/2 flex items-center gap-3">
                 <div
                   className="
-              w-11 h-11
-              min-w-11
-              rounded-xl
-              bg-blue-600
-              flex items-center justify-center
-              shadow-sm
-            "
+                    w-11 h-11
+                    min-w-11
+                    rounded-xl
+                    bg-blue-600
+                    flex items-center justify-center
+                    shadow-sm
+                  "
                 >
                   <HeartPulse className="text-white" size={25} />
                 </div>
 
                 {/* Logo Text */}
+
                 <div className="w-40 overflow-hidden whitespace-nowrap">
                   <h1 className="font-bold text-gray-800 leading-tight">
                     Health Records
@@ -269,25 +312,26 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               </div>
 
               {/* Hamburger */}
+
               <button
                 onClick={() => setCollapsed(true)}
                 className="
-            absolute
-            right-4
-            top-1/2
-            -translate-y-1/2
+                  absolute
+                  right-4
+                  top-1/2
+                  -translate-y-1/2
 
-            w-9 h-9
-            flex items-center justify-center
+                  w-9 h-9
+                  flex items-center justify-center
 
-            rounded-lg
-            text-gray-500
+                  rounded-lg
+                  text-gray-500
 
-            hover:bg-gray-100
-            hover:text-blue-600
+                  hover:bg-gray-100
+                  hover:text-blue-600
 
-            transition-all duration-200
-          "
+                  transition-all duration-200
+                "
                 title="Collapse sidebar"
               >
                 <Menu size={22} />
@@ -295,26 +339,27 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             </>
           ) : (
             /* Collapsed Hamburger */
+
             <button
               onClick={() => setCollapsed(false)}
               className="
-          absolute
-          left-1/2
-          top-1/2
-          -translate-x-1/2
-          -translate-y-1/2
+                absolute
+                left-1/2
+                top-1/2
+                -translate-x-1/2
+                -translate-y-1/2
 
-          w-10 h-10
-          flex items-center justify-center
+                w-10 h-10
+                flex items-center justify-center
 
-          rounded-lg
-          text-gray-500
+                rounded-lg
+                text-gray-500
 
-          hover:bg-gray-100
-          hover:text-blue-600
+                hover:bg-gray-100
+                hover:text-blue-600
 
-          transition-all duration-200
-        "
+                transition-all duration-200
+              "
               title="Expand sidebar"
             >
               <Menu size={24} />
@@ -323,18 +368,20 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         </div>
 
         {/* ================= MOBILE ================= */}
+
         <div className="lg:hidden w-full h-full flex items-center px-4">
           {/* Logo */}
+
           <div className="flex items-center gap-3">
             <div
               className="
-          w-11 h-11
-          min-w-11
-          rounded-xl
-          bg-blue-600
-          flex items-center justify-center
-          shadow-sm
-        "
+                w-11 h-11
+                min-w-11
+                rounded-xl
+                bg-blue-600
+                flex items-center justify-center
+                shadow-sm
+              "
             >
               <HeartPulse className="text-white" size={25} />
             </div>
@@ -349,30 +396,35 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
           </div>
 
           {/* Mobile Close */}
+
           <button
             onClick={() => setMobileOpen(false)}
             className="
-        absolute
-        right-4
+              absolute
+              right-4
 
-        w-9 h-9
-        flex items-center justify-center
+              w-9 h-9
+              flex items-center justify-center
 
-        rounded-lg
-        text-gray-500
+              rounded-lg
+              text-gray-500
 
-        hover:bg-gray-100
-        hover:text-blue-600
+              hover:bg-gray-100
+              hover:text-blue-600
 
-        transition
-      "
+              transition
+            "
             title="Close menu"
           >
             <Menu size={22} />
           </button>
         </div>
       </div>
-      {/* User */}
+
+      {/* =====================================================
+          USER PROFILE
+      ===================================================== */}
+
       <div
         className={`
           border-b border-gray-200
@@ -380,20 +432,46 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
           ${collapsed ? "px-2 py-4" : "px-5 py-5"}
         `}
       >
-        <div
+        <button
+          onClick={handleProfileClick}
           className={`
+            w-full
             flex items-center
-            ${collapsed ? "justify-center" : "gap-3"}
+            text-left
+            rounded-xl
+            transition-all duration-200
+            hover:bg-gray-50
+            focus:outline-none
+            focus:ring-2
+            focus:ring-blue-100
+
+            ${collapsed ? "justify-center p-1" : "gap-3 p-2 -mx-2"}
           `}
+          title={collapsed ? "My Profile" : undefined}
         >
-          <div className="w-10 h-10 min-w-10 rounded-full bg-blue-100 flex items-center justify-center">
+          {/* Profile Icon */}
+
+          <div
+            className="
+              w-10 h-10
+              min-w-10
+              rounded-full
+              bg-blue-100
+              flex items-center justify-center
+            "
+          >
             <UserRound className="text-blue-600" size={20} />
           </div>
 
+          {/* User Information */}
+
           <div
             className={`
-              min-w-0 overflow-hidden whitespace-nowrap
+              min-w-0
+              overflow-hidden
+              whitespace-nowrap
               transition-all duration-300
+
               ${collapsed ? "w-0 opacity-0" : "w-40 opacity-100"}
             `}
           >
@@ -402,11 +480,59 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             </p>
 
             <p className="text-xs text-gray-500 truncate">{roleNames[role]}</p>
+
+            {!collapsed && (
+              <p className="mt-0.5 text-[11px] text-blue-600">View Profile</p>
+            )}
           </div>
-        </div>
+        </button>
+
+        {/* Collapsed Profile Tooltip */}
+
+        {collapsed && (
+          <div className="relative group">
+            <div
+              className="
+                absolute
+                left-full
+                top-0
+                ml-3
+                px-3
+                py-2
+                bg-gray-900
+                text-white
+                text-xs
+                rounded-lg
+                whitespace-nowrap
+                opacity-0
+                pointer-events-none
+                group-hover:opacity-100
+                transition-opacity
+                duration-200
+                z-50
+              "
+            >
+              My Profile
+              <div
+                className="
+                  absolute
+                  right-full
+                  top-1/2
+                  -translate-y-1/2
+                  border-4
+                  border-transparent
+                  border-r-gray-900
+                "
+              />
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Navigation */}
+      {/* =====================================================
+          NAVIGATION
+      ===================================================== */}
+
       <nav className="flex-1 px-3 py-5">
         {!collapsed && (
           <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider px-3 mb-3">
@@ -435,6 +561,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                     rounded-lg
                     text-sm font-medium
                     transition-all duration-200
+
                     ${
                       isActive
                         ? "bg-blue-50 text-blue-600"
@@ -446,8 +573,10 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
 
                   <span
                     className={`
-                      whitespace-nowrap overflow-hidden
+                      whitespace-nowrap
+                      overflow-hidden
                       transition-all duration-300
+
                       ${collapsed ? "w-0 opacity-0" : "w-auto opacity-100"}
                     `}
                   >
@@ -456,13 +585,17 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                 </button>
 
                 {/* Tooltip */}
+
                 {collapsed && (
                   <div
                     className="
-                      absolute left-full top-1/2
+                      absolute
+                      left-full
+                      top-1/2
                       -translate-y-1/2
                       ml-3
-                      px-3 py-2
+                      px-3
+                      py-2
                       bg-gray-900
                       text-white
                       text-xs
@@ -480,7 +613,9 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
 
                     <div
                       className="
-                        absolute right-full top-1/2
+                        absolute
+                        right-full
+                        top-1/2
                         -translate-y-1/2
                         border-4
                         border-transparent
@@ -495,7 +630,10 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         </div>
       </nav>
 
-      {/* Logout */}
+      {/* =====================================================
+          LOGOUT
+      ===================================================== */}
+
       <div className="p-3 border-t border-gray-200">
         <div className="relative group">
           <button
@@ -503,10 +641,13 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             className={`
               w-full
               flex items-center
+
               ${collapsed ? "justify-center px-3" : "gap-3 px-3"}
+
               py-3
               rounded-lg
-              text-sm font-medium
+              text-sm
+              font-medium
               text-red-600
               hover:bg-red-50
               transition
@@ -516,8 +657,10 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
 
             <span
               className={`
-                whitespace-nowrap overflow-hidden
+                whitespace-nowrap
+                overflow-hidden
                 transition-all duration-300
+
                 ${collapsed ? "w-0 opacity-0" : "w-auto opacity-100"}
               `}
             >
@@ -526,13 +669,17 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
           </button>
 
           {/* Logout tooltip */}
+
           {collapsed && (
             <div
               className="
-                absolute left-full top-1/2
+                absolute
+                left-full
+                top-1/2
                 -translate-y-1/2
                 ml-3
-                px-3 py-2
+                px-3
+                py-2
                 bg-gray-900
                 text-white
                 text-xs
@@ -549,7 +696,9 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               Logout
               <div
                 className="
-                  absolute right-full top-1/2
+                  absolute
+                  right-full
+                  top-1/2
                   -translate-y-1/2
                   border-4
                   border-transparent
