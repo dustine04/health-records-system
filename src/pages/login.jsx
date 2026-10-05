@@ -81,7 +81,6 @@ function Login() {
       ===================================================== */}
       <div className="hidden lg:block lg:w-[70%] p-4">
         <div className="relative w-full h-full min-h-[calc(100vh-2rem)] rounded-3xl overflow-hidden">
-          {/* Replace this image later */}
           <img
             src="/login.png"
             alt="Health services"
@@ -104,7 +103,7 @@ function Login() {
 
               <p className="mt-5 text-white/80 text-base xl:text-lg leading-relaxed max-w-xl">
                 A centralized health records system designed to help healthcare
-                workers manage, monitor, and access records efficiently.sss
+                workers manage, monitor, and access records efficiently.
               </p>
             </div>
           </div>
@@ -180,9 +179,26 @@ function Login() {
 
             {/* Password */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Password
-              </label>
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Password
+                </label>
+
+                {/* Forgot Password */}
+                <button
+                  type="button"
+                  onClick={() => navigate("/forgot-password")}
+                  className="
+                    text-sm
+                    font-medium
+                    text-blue-600
+                    hover:text-blue-700
+                    transition
+                  "
+                >
+                  Forgot password?
+                </button>
+              </div>
 
               <div className="relative">
                 <input
@@ -260,11 +276,6 @@ function Login() {
           </p>
         </div>
       </div>
-
-      {/* =====================================================
-          MOBILE LOGIN
-          Image hidden automatically
-      ===================================================== */}
     </div>
   );
 }

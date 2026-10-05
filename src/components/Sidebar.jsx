@@ -135,14 +135,14 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         icon: LayoutDashboard,
       },
       {
-        name: "Health Records",
-        path: "/dashboard/midwife/records",
-        icon: FileText,
-      },
-      {
         name: "BNS / BHW",
         path: "/dashboard/midwife/workers",
         icon: Users,
+      },
+      {
+        name: "Pregnancy Monitoring",
+        path: "/dashboard/midwife/pregnancy-monitoring",
+        icon: HeartPulse,
       },
       {
         name: "Submit to Nurse",

@@ -25,7 +25,8 @@ import BhwPregnantWomen from "./pages/bhw/BhwPregnantWomen";
 import BhwPregnantMonitoring from "./pages/bhw/BhwPregnantMonitoring";
 
 import Profile from "./pages/Profile";
-
+import PregnancyMonitoring from "./pages/midwife/PregnancyMonitoring";
+import ForgotPassword from "./pages/ForgotPassword";
 function App() {
   return (
     <BrowserRouter>
@@ -35,7 +36,7 @@ function App() {
         ===================================================== */}
 
         <Route path="/" element={<Login />} />
-
+        <Route path="/forgot-password" element={<ForgotPassword />} />
         {/* =====================================================
             ADMIN
         ===================================================== */}
@@ -127,6 +128,15 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["midwife"]}>
               <Workers />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/midwife/pregnancy-monitoring"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <PregnancyMonitoring />
             </ProtectedRoute>
           }
         />
