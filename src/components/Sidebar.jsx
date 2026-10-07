@@ -12,6 +12,7 @@ import {
   Building2,
   UserRound,
   Menu,
+  FileCheck2,
   Baby,
 } from "lucide-react";
 
@@ -145,6 +146,11 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         icon: HeartPulse,
       },
       {
+        name: "Monthly Reports",
+        path: "/dashboard/midwife/monthly-reports",
+        icon: FileCheck2,
+      },
+      {
         name: "Submit to Nurse",
         path: "/dashboard/midwife/submissions",
         icon: ClipboardList,
@@ -211,14 +217,9 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         icon: FileText,
       },
       {
-        name: "Add Record",
-        path: "/dashboard/bhw/add-record",
-        icon: UserPlus,
-      },
-      {
-        name: "My Submissions",
-        path: "/dashboard/bhw/submissions",
-        icon: ClipboardList,
+        name: "Monthly Report",
+        path: "/dashboard/bhw/monthly-report",
+        icon: FileCheck2,
       },
     ],
   };

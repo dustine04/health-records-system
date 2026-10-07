@@ -236,7 +236,69 @@ const formatDate = (value) => {
     day: "numeric",
   });
 };
+const getCheckupStatus = (nextVisitDate, pregnancyStatus = "active") => {
+  if (!nextVisitDate) {
+    return {
+      key: "none",
+      label: "No Schedule",
+      className: "bg-gray-100 text-gray-600",
+    };
+  }
 
+  const inactiveStatuses = [
+    "delivered",
+    "miscarriage",
+    "stillbirth",
+    "inactive",
+  ];
+
+  if (inactiveStatuses.includes(pregnancyStatus)) {
+    return {
+      key: "inactive",
+      label: "Not Applicable",
+      className: "bg-gray-100 text-gray-500",
+    };
+  }
+
+  const todayDate = new Date(`${today()}T00:00:00`);
+  const visitDate = new Date(`${nextVisitDate}T00:00:00`);
+
+  const diffTime = visitDate.getTime() - todayDate.getTime();
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+  if (diffDays < 0) {
+    return {
+      key: "missed",
+      label: "Missed Check-up",
+      className: "bg-red-100 text-red-700",
+      daysOverdue: Math.abs(diffDays),
+    };
+  }
+
+  if (diffDays === 0) {
+    return {
+      key: "today",
+      label: "Due Today",
+      className: "bg-orange-100 text-orange-700",
+    };
+  }
+
+  if (diffDays <= 7) {
+    return {
+      key: "upcoming",
+      label: "Upcoming",
+      className: "bg-yellow-100 text-yellow-700",
+      daysUntil: diffDays,
+    };
+  }
+
+  return {
+    key: "scheduled",
+    label: "Scheduled",
+    className: "bg-blue-100 text-blue-700",
+    daysUntil: diffDays,
+  };
+};
 const fullName = (person) => {
   if (!person) return "Unknown";
 
@@ -401,6 +463,44 @@ export default function PregnancyMonitoring() {
       }));
 
       /* -----------------------------------------------
+   GET LATEST ANC VISIT / NEXT CHECK-UP
+----------------------------------------------- */
+
+      const pregnancyIds = combined.map((item) => item.id).filter(Boolean);
+
+      let latestAncMap = {};
+
+      if (pregnancyIds.length) {
+        const { data: ancData, error: ancError } = await supabase
+          .from("pregnant_woman_visits")
+          .select(
+            `
+        id,
+        pregnant_woman_id,
+        visit_number,
+        visit_date,
+        next_visit_date
+      `,
+          )
+          .in("pregnant_woman_id", pregnancyIds)
+          .order("visit_number", { ascending: false });
+
+        if (ancError) throw ancError;
+
+        (ancData || []).forEach((visit) => {
+          if (!latestAncMap[visit.pregnant_woman_id]) {
+            latestAncMap[visit.pregnant_woman_id] = visit;
+          }
+        });
+      }
+
+      combined = combined.map((pregnancy) => ({
+        ...pregnancy,
+        latest_anc_visit: latestAncMap[pregnancy.id] || null,
+        next_visit_date: latestAncMap[pregnancy.id]?.next_visit_date || null,
+      }));
+
+      /* -----------------------------------------------
          MIDWIFE AREA SCOPE
       ----------------------------------------------- */
 
@@ -497,11 +597,25 @@ export default function PregnancyMonitoring() {
       );
     });
 
+    const missedCheckups = pregnancies.filter((item) => {
+      const status = getCheckupStatus(item.next_visit_date, item.status);
+
+      return status.key === "missed";
+    });
+
+    const dueToday = pregnancies.filter((item) => {
+      const status = getCheckupStatus(item.next_visit_date, item.status);
+
+      return status.key === "today";
+    });
+
     return {
       active: active.length,
       forReview: forReview.length,
       highRisk: highRisk.length,
       dueSoon: dueSoon.length,
+      missedCheckups: missedCheckups.length,
+      dueToday: dueToday.length,
     };
   }, [pregnancies]);
 
@@ -858,7 +972,7 @@ export default function PregnancyMonitoring() {
         </div>
 
         {/* STATISTICS */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
           <StatCard
             title="Active Pregnancies"
             value={statistics.active}
@@ -885,6 +999,19 @@ export default function PregnancyMonitoring() {
             value={statistics.dueSoon}
             icon={CalendarDays}
             iconClass="bg-blue-100 text-blue-600"
+          />
+          <StatCard
+            title="Missed Check-ups"
+            value={statistics.missedCheckups}
+            icon={AlertTriangle}
+            iconClass="bg-red-100 text-red-600"
+          />
+
+          <StatCard
+            title="Due Today"
+            value={statistics.dueToday}
+            icon={Clock3}
+            iconClass="bg-orange-100 text-orange-600"
           />
         </div>
 
@@ -919,7 +1046,7 @@ export default function PregnancyMonitoring() {
                   <th className="px-5 py-4">EDC</th>
 
                   <th className="px-5 py-4">ANC</th>
-
+                  <th className="px-5 py-4">Next Check-up</th>
                   <th className="px-5 py-4">Status</th>
 
                   <th className="px-5 py-4 text-right">Action</th>
@@ -930,7 +1057,7 @@ export default function PregnancyMonitoring() {
                 {loading ? (
                   <tr>
                     <td
-                      colSpan="6"
+                      colSpan="7"
                       className="px-5 py-10 text-center text-gray-500"
                     >
                       Loading pregnancy records...
@@ -939,7 +1066,7 @@ export default function PregnancyMonitoring() {
                 ) : filteredPregnancies.length === 0 ? (
                   <tr>
                     <td
-                      colSpan="6"
+                      colSpan="7"
                       className="px-5 py-10 text-center text-gray-500"
                     >
                       No pregnancy records found.
@@ -953,7 +1080,10 @@ export default function PregnancyMonitoring() {
                     const localArea = household?.local_areas;
 
                     const barangay = localArea?.barangays;
-
+                    const checkupStatus = getCheckupStatus(
+                      pregnancy.next_visit_date,
+                      pregnancy.status,
+                    );
                     return (
                       <tr key={pregnancy.id} className="hover:bg-gray-50">
                         <td className="px-5 py-4">
@@ -1010,8 +1140,53 @@ export default function PregnancyMonitoring() {
                           <div className="flex items-center gap-2">
                             <Activity size={16} className="text-blue-500" />
 
-                            <span className="font-medium">View ANC</span>
+                            <span className="font-medium">
+                              {pregnancy.latest_anc_visit
+                                ? `${pregnancy.latest_anc_visit.visit_number || 0} visit${
+                                    Number(
+                                      pregnancy.latest_anc_visit.visit_number,
+                                    ) === 1
+                                      ? ""
+                                      : "s"
+                                  }`
+                                : "No ANC"}
+                            </span>
                           </div>
+                        </td>
+
+                        <td className="px-5 py-4">
+                          {pregnancy.next_visit_date ? (
+                            <div className="space-y-1">
+                              <p className="font-medium text-gray-700">
+                                {formatDate(pregnancy.next_visit_date)}
+                              </p>
+
+                              <span
+                                className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${checkupStatus.className}`}
+                              >
+                                {checkupStatus.label}
+                              </span>
+
+                              {checkupStatus.key === "missed" && (
+                                <p className="text-xs font-medium text-red-600">
+                                  {checkupStatus.daysOverdue} day
+                                  {checkupStatus.daysOverdue === 1
+                                    ? ""
+                                    : "s"}{" "}
+                                  overdue
+                                </p>
+                              )}
+
+                              {checkupStatus.key === "upcoming" && (
+                                <p className="text-xs text-yellow-700">
+                                  In {checkupStatus.daysUntil} day
+                                  {checkupStatus.daysUntil === 1 ? "" : "s"}
+                                </p>
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-gray-400">No schedule</span>
+                          )}
                         </td>
 
                         <td className="px-5 py-4">
@@ -1141,7 +1316,53 @@ export default function PregnancyMonitoring() {
                   />
                 </div>
               </section>
+              {(() => {
+                const checkupStatus = getCheckupStatus(
+                  selectedPregnancy.next_visit_date,
+                  selectedPregnancy.status,
+                );
 
+                if (checkupStatus.key !== "missed") {
+                  return null;
+                }
+
+                return (
+                  <section className="rounded-xl border border-red-200 bg-red-50 p-5">
+                    <div className="flex items-start gap-3">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
+                        <AlertTriangle size={20} />
+                      </div>
+
+                      <div>
+                        <h3 className="font-semibold text-red-800">
+                          Missed ANC Check-up
+                        </h3>
+
+                        <p className="mt-1 text-sm text-red-700">
+                          This pregnant woman missed her scheduled ANC
+                          follow-up.
+                        </p>
+
+                        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <InfoItem
+                            label="Scheduled Date"
+                            value={formatDate(
+                              selectedPregnancy.next_visit_date,
+                            )}
+                          />
+
+                          <InfoItem
+                            label="Days Overdue"
+                            value={`${checkupStatus.daysOverdue} day${
+                              checkupStatus.daysOverdue === 1 ? "" : "s"
+                            }`}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  </section>
+                );
+              })()}
               {/* STATUS */}
               <section className="rounded-xl border bg-white p-5">
                 <div className="mb-4 flex items-center justify-between">
@@ -1268,6 +1489,30 @@ export default function PregnancyMonitoring() {
                     <p className="mt-1 text-xs text-gray-500">
                       Clinical ANC assessment recorded by the Midwife.
                     </p>
+                    {selectedPregnancy.next_visit_date && (
+                      <div className="mt-3">
+                        {(() => {
+                          const checkupStatus = getCheckupStatus(
+                            selectedPregnancy.next_visit_date,
+                            selectedPregnancy.status,
+                          );
+
+                          return (
+                            <div
+                              className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold ${checkupStatus.className}`}
+                            >
+                              <CalendarDays size={14} />
+                              Next scheduled check-up:{" "}
+                              {formatDate(selectedPregnancy.next_visit_date)}
+                              {checkupStatus.key === "missed" &&
+                                ` — ${checkupStatus.daysOverdue} day${
+                                  checkupStatus.daysOverdue === 1 ? "" : "s"
+                                } overdue`}
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
                   </div>
 
                   <button

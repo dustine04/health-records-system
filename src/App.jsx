@@ -7,7 +7,8 @@ import NurseDashboard from "./pages/NurseDashboard";
 import MidwifeDashboard from "./pages/MidwifeDashboard";
 import BnsDashboard from "./pages/BnsDashboard";
 import BhwDashboard from "./pages/BhwDashboard";
-
+import MidwifeMonthlyReports from "./pages/midwife/MidwifeMonthlyReports";
+import MidwifeMonthlyReportDetails from "./pages/midwife/MidwifeMonthlyReportDetails";
 import Users from "./pages/admin/Users";
 import Workers from "./pages/midwife/Workers";
 import District from "./pages/admin/District";
@@ -23,6 +24,7 @@ import ChildRegistration from "./pages/bns/ChildRegistration";
 
 import BhwPregnantWomen from "./pages/bhw/BhwPregnantWomen";
 import BhwPregnantMonitoring from "./pages/bhw/BhwPregnantMonitoring";
+import BhwMonthlyReport from "./pages/bhw/BhwMonthlyReport";
 
 import Profile from "./pages/Profile";
 import PregnancyMonitoring from "./pages/midwife/PregnancyMonitoring";
@@ -141,6 +143,22 @@ function App() {
           }
         />
 
+        <Route
+          path="/dashboard/midwife/monthly-reports"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <MidwifeMonthlyReports />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/dashboard/midwife/monthly-reports/:id"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <MidwifeMonthlyReportDetails />
+            </ProtectedRoute>
+          }
+        />
         {/* Midwife Profile */}
         <Route
           path="/dashboard/midwife/profile"
@@ -240,7 +258,14 @@ function App() {
             </ProtectedRoute>
           }
         />
-
+        <Route
+          path="/dashboard/bhw/monthly-report"
+          element={
+            <ProtectedRoute allowedRoles={["bhw"]}>
+              <BhwMonthlyReport />
+            </ProtectedRoute>
+          }
+        />
         {/* BHW Profile */}
         <Route
           path="/dashboard/bhw/profile"
