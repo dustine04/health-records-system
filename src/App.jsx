@@ -15,9 +15,10 @@ import District from "./pages/admin/District";
 import Barangay from "./pages/admin/Barangay";
 
 import ProtectedRoute from "./components/ProtectedRoute";
-
+import BnsChildMonthlyReports from "./pages/midwife/BnsChildMonthlyReports";
 import BhwHousehold from "./pages/bhw/BhwHousehold";
 import BnsHousehold from "./pages/bns/BnsHousehold";
+import BnsChildMonthlyReport from "./pages/bns/BnsChildMonthlyReport";
 
 import ChildMonitoring from "./pages/bns/ChildMonitoring";
 import ChildRegistration from "./pages/bns/ChildRegistration";
@@ -159,6 +160,14 @@ function App() {
             </ProtectedRoute>
           }
         />
+        <Route
+          path="/dashboard/midwife/bns-reports"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <BnsChildMonthlyReports />
+            </ProtectedRoute>
+          }
+        />
         {/* Midwife Profile */}
         <Route
           path="/dashboard/midwife/profile"
@@ -205,6 +214,15 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["bns"]}>
               <ChildMonitoring />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/bns/monthly-report"
+          element={
+            <ProtectedRoute allowedRoles={["bns"]}>
+              <BnsChildMonthlyReport />
             </ProtectedRoute>
           }
         />
