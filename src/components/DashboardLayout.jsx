@@ -130,7 +130,7 @@ function DashboardLayout({ children }) {
               </p>
 
               <h1 className="text-base sm:text-lg font-semibold text-gray-800">
-                Health Records Management System
+                MCHMS
               </h1>
             </div>
           </header>

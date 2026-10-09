@@ -340,13 +340,16 @@ function BhwPregnantMonitoring() {
 
       const pregnancyIds = registrations.map((record) => record.id);
 
+      // Fetch ANC visits only for the ANC visit count.
       const { data: allVisits, error: visitsError } = await supabase
         .from("pregnant_woman_visits")
-        .select("id, pregnant_woman_id, visit_number")
-        .in("pregnant_woman_id", pregnancyIds);
+        .select("id, pregnant_woman_id, visit_number, visit_date")
+        .in("pregnant_woman_id", pregnancyIds)
+        .order("visit_date", { ascending: false });
 
       if (visitsError) throw visitsError;
 
+      // Count recorded ANC visits for each pregnancy.
       const visitCountMap = new Map();
 
       (allVisits || []).forEach((visit) => {
@@ -358,6 +361,34 @@ function BhwPregnantMonitoring() {
         );
       });
 
+      // Fetch BHW home visits separately.
+      // The next visit date must come from this table, NOT the ANC table.
+      const { data: allHomeVisits, error: homeVisitsError } = await supabase
+        .from("pregnant_woman_home_visits")
+        .select("id, pregnant_woman_id, visit_date, next_visit_date")
+        .in("pregnant_woman_id", pregnancyIds);
+
+      if (homeVisitsError) throw homeVisitsError;
+
+      // Get the earliest upcoming BHW home visit for each pregnancy.
+      const today = new Date().toLocaleDateString("en-CA", {
+        timeZone: "Asia/Manila",
+      });
+
+      const nextHomeVisitMap = new Map();
+
+      (allHomeVisits || [])
+        .filter(
+          (visit) => visit.next_visit_date && visit.next_visit_date >= today,
+        )
+        .sort((a, b) => a.next_visit_date.localeCompare(b.next_visit_date))
+        .forEach((visit) => {
+          const pregnancyId = Number(visit.pregnant_woman_id);
+
+          if (!nextHomeVisitMap.has(pregnancyId)) {
+            nextHomeVisitMap.set(pregnancyId, visit.next_visit_date);
+          }
+        });
       const result = (residents || [])
         .map((resident) => {
           const registration = registrationMap.get(Number(resident.id));
@@ -368,6 +399,11 @@ function BhwPregnantMonitoring() {
             ...resident,
             pregnancy: registration,
             visit_count: visitCountMap.get(Number(registration.id)) || 0,
+
+            // This is the next scheduled BHW home visit,
+            // not the next ANC appointment.
+            next_visit_date:
+              nextHomeVisitMap.get(Number(registration.id)) || null,
           };
         })
         .filter(Boolean);
@@ -1167,6 +1203,7 @@ function BhwPregnantMonitoring() {
       setShowHomeVisitModal(false);
 
       await fetchHomeVisits(selectedWoman.pregnancy.id);
+      await fetchPregnantWomen();
 
       alert(
         editingHomeVisit
@@ -1198,7 +1235,7 @@ function BhwPregnantMonitoring() {
       if (error) throw error;
 
       await fetchHomeVisits(selectedWoman.pregnancy.id);
-
+      await fetchPregnantWomen();
       alert("Home visit deleted successfully.");
     } catch (error) {
       console.error(error);
@@ -1395,6 +1432,7 @@ function BhwPregnantMonitoring() {
                     <th className="text-left px-6 py-4 font-semibold text-gray-600">
                       ANC
                     </th>
+
                     <th className="text-left px-6 py-4 font-semibold text-gray-600">
                       Status
                     </th>
@@ -1450,6 +1488,7 @@ function BhwPregnantMonitoring() {
                             {woman.visit_count || 0}/8
                           </span>
                         </td>
+
                         <td className="px-6 py-4">
                           <StatusBadge status={pregnancy.status} />
                         </td>
@@ -1704,6 +1743,10 @@ function BhwPregnantMonitoring() {
                             </th>
 
                             <th className="text-left px-5 py-4 font-semibold text-gray-600">
+                              Next Visit Date
+                            </th>
+
+                            <th className="text-left px-5 py-4 font-semibold text-gray-600">
                               Findings
                             </th>
 
@@ -1733,7 +1776,25 @@ function BhwPregnantMonitoring() {
                               <td className="px-5 py-4 text-gray-600">
                                 {visit.visit_date || "—"}
                               </td>
+                              <td className="px-5 py-4">
+                                {visit.next_visit_date ? (
+                                  <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-green-50 text-green-700 text-xs font-medium">
+                                    <CalendarDays size={14} />
 
+                                    {new Date(
+                                      `${visit.next_visit_date}T00:00:00`,
+                                    ).toLocaleDateString("en-PH", {
+                                      day: "2-digit",
+                                      month: "short",
+                                      year: "numeric",
+                                    })}
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-400">
+                                    Not scheduled
+                                  </span>
+                                )}
+                              </td>
                               <td className="px-5 py-4 text-gray-600 max-w-xs">
                                 <p className="truncate">
                                   {visit.findings || "—"}
@@ -1832,7 +1893,9 @@ function BhwPregnantMonitoring() {
                             <th className="text-left px-5 py-4 font-semibold text-gray-600">
                               Date
                             </th>
-
+                            <th className="text-left px-5 py-4 font-semibold text-gray-600">
+                              Next Visit Date
+                            </th>
                             <th className="text-left px-5 py-4 font-semibold text-gray-600">
                               Gestational Age
                             </th>
@@ -1872,7 +1935,25 @@ function BhwPregnantMonitoring() {
                               <td className="px-5 py-4 text-gray-600">
                                 {visit.visit_date || "—"}
                               </td>
+                              <td className="px-5 py-4">
+                                {visit.next_visit_date ? (
+                                  <span className="inline-flex items-center gap-2 px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 text-xs font-medium">
+                                    <CalendarDays size={14} />
 
+                                    {new Date(
+                                      `${visit.next_visit_date}T00:00:00`,
+                                    ).toLocaleDateString("en-PH", {
+                                      day: "2-digit",
+                                      month: "short",
+                                      year: "numeric",
+                                    })}
+                                  </span>
+                                ) : (
+                                  <span className="text-gray-400">
+                                    Not scheduled
+                                  </span>
+                                )}
+                              </td>
                               <td className="px-5 py-4 text-gray-600">
                                 {visit.gestational_age_weeks
                                   ? `${visit.gestational_age_weeks} weeks`
