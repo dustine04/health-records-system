@@ -463,16 +463,33 @@ export default function PregnancyMonitoring() {
   }, []);
 
   useEffect(() => {
-    if (user) loadPregnancies();
+    if (user?.id) {
+      loadPregnancies();
+    }
   }, [user]);
-
-  /* =========================================================
-     LOAD PREGNANCIES
-  ========================================================= */
 
   const loadPregnancies = async () => {
     try {
       setLoading(true);
+
+      // Only a logged-in Midwife can access this page.
+      if (!user?.id || String(user.role || "").toLowerCase() !== "midwife") {
+        setPregnancies([]);
+        console.error("Access denied: a valid Midwife session is required.");
+        return;
+      }
+
+      // Require a location assignment to prevent citywide record exposure.
+      const barangayId = user.barangay_id;
+      const districtId = user.district_id;
+
+      if (!barangayId && !districtId) {
+        setPregnancies([]);
+        console.warn(
+          "This Midwife has no assigned barangay or district. Assign a location to display pregnancy records.",
+        );
+        return;
+      }
 
       const { data: pregnancyData, error: pregnancyError } = await supabase
         .from("pregnant_women")
@@ -501,38 +518,86 @@ export default function PregnancyMonitoring() {
         .from("residents")
         .select(
           `
-          id, first_name, middle_name, last_name, sex, birth_date,
-          contact_number, household_id,
-          households (
-            id, household_code, household_head, address, local_area_id,
-            local_areas (
-              id, name, type, barangay_id,
-              barangays (
-                id, name, district_id,
-                districts (id, name)
+        id,
+        first_name,
+        middle_name,
+        last_name,
+        sex,
+        birth_date,
+        contact_number,
+        household_id,
+        households (
+          id,
+          household_code,
+          household_head,
+          address,
+          local_area_id,
+          local_areas (
+            id,
+            name,
+            type,
+            barangay_id,
+            barangays (
+              id,
+              name,
+              district_id,
+              districts (
+                id,
+                name
               )
             )
           )
-        `,
+        )
+      `,
         )
         .in("id", residentIds);
 
       if (residentError) throw residentError;
 
       const residentMap = {};
+
       (residentData || []).forEach((resident) => {
-        residentMap[resident.id] = resident;
+        residentMap[String(resident.id)] = resident;
       });
 
       let combined = pregnancyData.map((pregnancy) => ({
         ...pregnancy,
-        resident: residentMap[pregnancy.resident_id] || null,
+        resident: residentMap[String(pregnancy.resident_id)] || null,
       }));
 
-      const pregnancyIds = combined.map((item) => item.id).filter(Boolean);
-      let latestAncMap = {};
+      /*
+       * Apply the Midwife's location scope.
+       *
+       * If the Midwife has a barangay assignment, use that barangay.
+       * Otherwise, use the Midwife's district assignment.
+       */
+      if (barangayId) {
+        combined = combined.filter((pregnancy) => {
+          const residentBarangayId =
+            pregnancy.resident?.households?.local_areas?.barangays?.id;
 
-      if (pregnancyIds.length) {
+          return (
+            residentBarangayId != null &&
+            String(residentBarangayId) === String(barangayId)
+          );
+        });
+      } else if (districtId) {
+        combined = combined.filter((pregnancy) => {
+          const residentDistrictId =
+            pregnancy.resident?.households?.local_areas?.barangays?.district_id;
+
+          return (
+            residentDistrictId != null &&
+            String(residentDistrictId) === String(districtId)
+          );
+        });
+      }
+
+      // Only fetch ANC data for pregnancies visible to this Midwife.
+      const pregnancyIds = combined.map((item) => item.id).filter(Boolean);
+      const latestAncMap = {};
+
+      if (pregnancyIds.length > 0) {
         const { data: ancData, error: ancError } = await supabase
           .from("pregnant_woman_visits")
           .select(
@@ -544,36 +609,25 @@ export default function PregnancyMonitoring() {
         if (ancError) throw ancError;
 
         (ancData || []).forEach((visit) => {
-          if (!latestAncMap[visit.pregnant_woman_id]) {
-            latestAncMap[visit.pregnant_woman_id] = visit;
+          const pregnancyId = String(visit.pregnant_woman_id);
+
+          if (!latestAncMap[pregnancyId]) {
+            latestAncMap[pregnancyId] = visit;
           }
         });
       }
 
       combined = combined.map((pregnancy) => ({
         ...pregnancy,
-        latest_anc_visit: latestAncMap[pregnancy.id] || null,
-        next_visit_date: latestAncMap[pregnancy.id]?.next_visit_date || null,
+        latest_anc_visit: latestAncMap[String(pregnancy.id)] || null,
+        next_visit_date:
+          latestAncMap[String(pregnancy.id)]?.next_visit_date || null,
       }));
-
-      if (user?.barangay_id) {
-        combined = combined.filter(
-          (item) =>
-            Number(item.resident?.households?.local_areas?.barangays?.id) ===
-            Number(user.barangay_id),
-        );
-      } else if (user?.district_id) {
-        combined = combined.filter(
-          (item) =>
-            Number(
-              item.resident?.households?.local_areas?.barangays?.district_id,
-            ) === Number(user.district_id),
-        );
-      }
 
       setPregnancies(combined);
     } catch (error) {
       console.error("Error loading pregnancies:", error);
+      setPregnancies([]);
       alert(error.message || "Failed to load pregnancy records.");
     } finally {
       setLoading(false);
@@ -1176,7 +1230,9 @@ export default function PregnancyMonitoring() {
                               {checkupStatus.key === "missed" && (
                                 <p className="text-xs font-medium text-red-600">
                                   {checkupStatus.daysOverdue} day
-                                  {checkupStatus.daysOverdue === 1 ? "" : "s"}{" "}
+                                  {checkupStatus.daysOverdue === 1
+                                    ? ""
+                                    : "s"}{" "}
                                   overdue
                                 </p>
                               )}

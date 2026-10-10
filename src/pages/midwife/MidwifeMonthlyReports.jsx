@@ -18,6 +18,7 @@ import {
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
 import { useNavigate } from "react-router-dom";
+
 const statusConfig = {
   submitted: {
     label: "Submitted",
@@ -55,7 +56,7 @@ function formatDate(date) {
   const parsed = new Date(date);
 
   if (Number.isNaN(parsed.getTime())) {
-    return date;
+    return String(date);
   }
 
   return parsed.toLocaleDateString("en-PH", {
@@ -74,12 +75,13 @@ function formatMonthYear(month, year) {
     return `${month} ${year}`;
   }
 
-  const date = new Date(year, monthNumber - 1, 1);
-
-  return date.toLocaleDateString("en-PH", {
-    month: "long",
-    year: "numeric",
-  });
+  return new Date(Number(year), monthNumber - 1, 1).toLocaleDateString(
+    "en-PH",
+    {
+      month: "long",
+      year: "numeric",
+    },
+  );
 }
 
 function getPregnantWomenCount(report) {
@@ -95,42 +97,45 @@ function getPregnantWomenCount(report) {
 }
 
 function getTotalPregnancyCount(report) {
-  const data = report?.report_data;
+  const tracking = report?.report_data?.pregnancy_tracking;
 
-  if (!data) return 0;
-
-  const pregnancyTracking = data.pregnancy_tracking;
-
-  if (
-    pregnancyTracking &&
-    pregnancyTracking.total !== undefined &&
-    pregnancyTracking.total !== null
-  ) {
-    return Number(pregnancyTracking.total) || 0;
+  if (tracking?.total !== undefined && tracking?.total !== null) {
+    return Number(tracking.total) || 0;
   }
 
   return getPregnantWomenCount(report);
 }
 
 function getNewPregnancyCount(report) {
-  const data = report?.report_data;
+  const tracking = report?.report_data?.pregnancy_tracking;
 
-  if (!data) return 0;
-
-  const pregnancyTracking = data.pregnancy_tracking;
-
-  if (
-    pregnancyTracking &&
-    pregnancyTracking.new !== undefined &&
-    pregnancyTracking.new !== null
-  ) {
-    return Number(pregnancyTracking.new) || 0;
+  if (tracking?.new !== undefined && tracking?.new !== null) {
+    return Number(tracking.new) || 0;
   }
 
   return 0;
 }
 
+/**
+ * Safely retrieve the currently logged-in user.
+ *
+ * This project stores the logged-in user in localStorage
+ * under the key "user".
+ */
+function getCurrentUser() {
+  try {
+    const storedUser = localStorage.getItem("user");
+
+    return storedUser ? JSON.parse(storedUser) : null;
+  } catch (error) {
+    console.error("Unable to read logged-in user:", error);
+    return null;
+  }
+}
+
 export default function MidwifeMonthlyReports() {
+  const navigate = useNavigate();
+
   const [reports, setReports] = useState([]);
   const [bhwUsers, setBhwUsers] = useState([]);
 
@@ -146,8 +151,33 @@ export default function MidwifeMonthlyReports() {
 
   useEffect(() => {
     fetchReports();
+    // Initial loading for the currently logged-in Midwife.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * =========================================================
+   * FETCH REPORTS BELONGING ONLY TO THIS MIDWIFE'S BHW USERS
+   * =========================================================
+   *
+   * Step 1:
+   * Read the logged-in Midwife from localStorage.
+   *
+   * Step 2:
+   * Retrieve users where:
+   *   role = "bhw"
+   *   created_by_midwife_id = current Midwife ID
+   *
+   * Step 3:
+   * Retrieve monthly reports where bhw_id belongs to those
+   * BHW accounts.
+   *
+   * Step 4:
+   * Attach the corresponding BHW information to each report.
+   *
+   * Reports are not regenerated here. The page displays the
+   * report_data snapshot saved by the BHW.
+   */
   async function fetchReports(showRefresh = false) {
     try {
       if (showRefresh) {
@@ -158,32 +188,100 @@ export default function MidwifeMonthlyReports() {
 
       setError("");
 
-      /*
-       * ---------------------------------------------------------
-       * 1. Get monthly reports
-       * ---------------------------------------------------------
-       *
-       * We only load pregnancy monthly reports from BHWs.
-       *
-       * We intentionally do NOT regenerate the report here.
-       * The Midwife reviews the report_data snapshot that the
-       * BHW submitted.
-       */
+      const currentUser = getCurrentUser();
+
+      if (!currentUser?.id) {
+        throw new Error(
+          "Unable to identify the logged-in Midwife. Please log in again.",
+        );
+      }
+
+      if (currentUser.role && currentUser.role !== "midwife") {
+        throw new Error("Only a Midwife account can access this page.");
+      }
+
+      const midwifeId = Number(currentUser.id);
+
+      if (!Number.isSafeInteger(midwifeId) || midwifeId <= 0) {
+        throw new Error("The logged-in Midwife ID is invalid.");
+      }
+
+      // -------------------------------------------------------
+      // STEP 1: Retrieve BHW accounts created by this Midwife.
+      // -------------------------------------------------------
+
+      const { data: userData, error: userError } = await supabase
+        .from("users")
+        .select(
+          `
+          id,
+          first_name,
+          middle_name,
+          last_name,
+          username,
+          role,
+          barangay_id,
+          district_id,
+          created_by_midwife_id
+        `,
+        )
+        .eq("role", "bhw")
+        .eq("created_by_midwife_id", midwifeId);
+
+      if (userError) {
+        throw userError;
+      }
+
+      const ownBhwUsers = userData || [];
+
+      setBhwUsers(ownBhwUsers);
+
+      // No BHW accounts created by this Midwife means there
+      // cannot be any reports belonging to their BHW accounts.
+
+      if (ownBhwUsers.length === 0) {
+        setReports([]);
+        setSelectedReport(null);
+        return;
+      }
+
+      // -------------------------------------------------------
+      // STEP 2: Get the IDs of those BHW accounts.
+      // -------------------------------------------------------
+
+      const bhwIds = [
+        ...new Set(
+          ownBhwUsers
+            .map((user) => Number(user.id))
+            .filter((id) => Number.isSafeInteger(id) && id > 0),
+        ),
+      ];
+
+      if (bhwIds.length === 0) {
+        setReports([]);
+        setSelectedReport(null);
+        return;
+      }
+
+      // -------------------------------------------------------
+      // STEP 3: Retrieve only reports submitted by those BHWs.
+      // -------------------------------------------------------
 
       const { data: reportData, error: reportError } = await supabase
         .from("bhw_monthly_reports")
         .select(
           `
-            id,
-            bhw_id,
-            month,
-            year,
-            status,
-            report_data,
-            submitted_at,
-            updated_at
-          `,
+          id,
+          bhw_id,
+          month,
+          year,
+          status,
+          report_data,
+          submitted_at,
+          updated_at
+        `,
         )
+        .in("bhw_id", bhwIds)
         .order("year", { ascending: false })
         .order("month", { ascending: false })
         .order("submitted_at", { ascending: false });
@@ -194,108 +292,67 @@ export default function MidwifeMonthlyReports() {
 
       const reportRows = reportData || [];
 
-      /*
-       * ---------------------------------------------------------
-       * 2. Get BHW IDs
-       * ---------------------------------------------------------
-       */
+      // -------------------------------------------------------
+      // STEP 4: Match each report with its BHW account.
+      // -------------------------------------------------------
 
-      const bhwIds = [
-        ...new Set(reportRows.map((report) => report.bhw_id).filter(Boolean)),
-      ];
+      const userMap = new Map(
+        ownBhwUsers.map((user) => [String(user.id), user]),
+      );
 
-      let users = [];
-
-      if (bhwIds.length > 0) {
-        const { data: userData, error: userError } = await supabase
-          .from("users")
-          .select(
-            `
-              id,
-              first_name,
-              middle_name,
-              last_name,
-              username,
-              role,
-              barangay_id,
-              district_id
-            `,
-          )
-          .in("id", bhwIds);
-
-        if (userError) {
-          throw userError;
-        }
-
-        users = userData || [];
-      }
-
-      setBhwUsers(users);
-
-      /*
-       * ---------------------------------------------------------
-       * 3. Combine report + BHW information
-       * ---------------------------------------------------------
-       */
-
-      const userMap = {};
-
-      users.forEach((user) => {
-        userMap[user.id] = user;
-      });
-
-      const combinedReports = reportRows.map((report) => ({
-        ...report,
-        bhw: userMap[report.bhw_id] || null,
-      }));
+      const combinedReports = reportRows
+        .filter((report) => userMap.has(String(report.bhw_id)))
+        .map((report) => ({
+          ...report,
+          bhw: userMap.get(String(report.bhw_id)) || null,
+        }));
 
       setReports(combinedReports);
+
+      // Clear a preview if the selected report no longer exists
+      // in the current Midwife's accessible report list.
+      setSelectedReport((previous) => {
+        if (!previous) return null;
+
+        return (
+          combinedReports.find(
+            (report) => String(report.id) === String(previous.id),
+          ) || null
+        );
+      });
     } catch (err) {
       console.error("Error loading Midwife monthly reports:", err);
 
-      setError(
-        err?.message || "Unable to load the BHW monthly pregnancy reports.",
-      );
+      setReports([]);
+      setBhwUsers([]);
+      setSelectedReport(null);
+
+      setError(err?.message || "Unable to load monthly pregnancy reports.");
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }
 
-  /*
-   * -----------------------------------------------------------
-   * Filtered reports
-   * -----------------------------------------------------------
+  /**
+   * =========================================================
+   * FILTERED REPORTS
+   * =========================================================
    */
-  const navigate = useNavigate();
   const filteredReports = useMemo(() => {
     const search = searchTerm.trim().toLowerCase();
 
     return reports.filter((report) => {
-      /*
-       * Status filter
-       */
-
       if (statusFilter !== "all" && report.status !== statusFilter) {
         return false;
       }
 
-      /*
-       * Search
-       */
-
-      if (!search) {
-        return true;
-      }
-
-      const bhwName = getFullName(report.bhw);
-
-      const monthYear = formatMonthYear(report.month, report.year);
+      if (!search) return true;
 
       const searchableText = [
-        bhwName,
+        getFullName(report.bhw),
         report.bhw?.username,
-        monthYear,
+        formatMonthYear(report.month, report.year),
         report.status,
         String(report.month || ""),
         String(report.year || ""),
@@ -308,12 +365,11 @@ export default function MidwifeMonthlyReports() {
     });
   }, [reports, searchTerm, statusFilter]);
 
-  /*
-   * -----------------------------------------------------------
-   * Statistics
-   * -----------------------------------------------------------
+  /**
+   * =========================================================
+   * STATISTICS
+   * =========================================================
    */
-
   const statistics = useMemo(() => {
     const submitted = reports.filter(
       (report) => report.status === "submitted",
@@ -340,12 +396,11 @@ export default function MidwifeMonthlyReports() {
     };
   }, [reports]);
 
-  /*
-   * -----------------------------------------------------------
-   * Loading
-   * -----------------------------------------------------------
+  /**
+   * =========================================================
+   * LOADING SCREEN
+   * =========================================================
    */
-
   if (loading) {
     return (
       <DashboardLayout>
@@ -354,7 +409,7 @@ export default function MidwifeMonthlyReports() {
             <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
 
             <p className="text-sm text-gray-500">
-              Loading BHW monthly pregnancy reports...
+              Loading your BHW monthly pregnancy reports...
             </p>
           </div>
         </div>
@@ -365,26 +420,22 @@ export default function MidwifeMonthlyReports() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* =====================================================
-            HEADER
-        ====================================================== */}
+        {/* HEADER */}
 
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div>
-            <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-100">
-                <FileCheck2 className="h-6 w-6 text-blue-600" />
-              </div>
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-100">
+              <FileCheck2 className="h-6 w-6 text-blue-600" />
+            </div>
 
-              <div>
-                <h1 className="text-2xl font-bold text-gray-900">
-                  Monthly Pregnancy Reports
-                </h1>
+            <div>
+              <h1 className="text-2xl font-bold text-gray-900">
+                Monthly Pregnancy Reports
+              </h1>
 
-                <p className="text-sm text-gray-500">
-                  Review monthly reports submitted by BHWs.
-                </p>
-              </div>
+              <p className="text-sm text-gray-500">
+                Review monthly reports submitted by your BHW accounts.
+              </p>
             </div>
           </div>
 
@@ -402,29 +453,31 @@ export default function MidwifeMonthlyReports() {
           </button>
         </div>
 
-        {/* =====================================================
-            ERROR
-        ====================================================== */}
+        {/* ERROR */}
 
         {error && (
           <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-red-700">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
 
-            <div>
+            <div className="min-w-0 flex-1">
               <p className="font-semibold">Unable to load reports</p>
 
               <p className="mt-1 text-sm">{error}</p>
+
+              <button
+                type="button"
+                onClick={() => fetchReports(true)}
+                className="mt-3 text-sm font-semibold underline"
+              >
+                Try again
+              </button>
             </div>
           </div>
         )}
 
-        {/* =====================================================
-            STATISTICS
-        ====================================================== */}
+        {/* STATISTICS */}
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {/* Submitted */}
-
           <button
             type="button"
             onClick={() => setStatusFilter("submitted")}
@@ -451,8 +504,6 @@ export default function MidwifeMonthlyReports() {
             </div>
           </button>
 
-          {/* Reviewed */}
-
           <button
             type="button"
             onClick={() => setStatusFilter("reviewed")}
@@ -476,8 +527,6 @@ export default function MidwifeMonthlyReports() {
               </div>
             </div>
           </button>
-
-          {/* Returned */}
 
           <button
             type="button"
@@ -503,8 +552,6 @@ export default function MidwifeMonthlyReports() {
             </div>
           </button>
 
-          {/* Pregnant Women */}
-
           <button
             type="button"
             onClick={() => setStatusFilter("all")}
@@ -528,14 +575,35 @@ export default function MidwifeMonthlyReports() {
           </button>
         </div>
 
-        {/* =====================================================
-            SEARCH / FILTER
-        ====================================================== */}
+        {/* BHW ACCOUNT SUMMARY */}
+
+        <div className="flex flex-col gap-2 rounded-xl border border-blue-200 bg-blue-50 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <UserRound className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
+
+            <div>
+              <p className="font-semibold text-blue-900">
+                Your assigned BHW accounts
+              </p>
+
+              <p className="mt-1 text-sm text-blue-800">
+                Only reports submitted by BHW accounts you created are displayed
+                on this page.
+              </p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-center">
+            <p className="text-xs text-gray-500">BHW Accounts</p>
+
+            <p className="text-xl font-bold text-blue-700">{bhwUsers.length}</p>
+          </div>
+        </div>
+
+        {/* SEARCH AND STATUS FILTER */}
 
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-3 lg:flex-row">
-            {/* Search */}
-
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-400" />
 
@@ -552,13 +620,12 @@ export default function MidwifeMonthlyReports() {
                   type="button"
                   onClick={() => setSearchTerm("")}
                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                  aria-label="Clear search"
                 >
                   <X className="h-4 w-4" />
                 </button>
               )}
             </div>
-
-            {/* Status */}
 
             <div className="w-full lg:w-52">
               <select
@@ -567,24 +634,18 @@ export default function MidwifeMonthlyReports() {
                 className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
               >
                 <option value="submitted">Submitted</option>
-
                 <option value="reviewed">Reviewed</option>
-
                 <option value="returned">Returned</option>
-
                 <option value="draft">Draft</option>
-
                 <option value="all">All Statuses</option>
               </select>
             </div>
           </div>
         </div>
 
-        {/* =====================================================
-            REPORT LIST
-        ====================================================== */}
+        {/* REPORT LIST */}
 
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm">
+        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="border-b border-gray-200 px-5 py-4">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -610,8 +671,6 @@ export default function MidwifeMonthlyReports() {
             </div>
           </div>
 
-          {/* Empty */}
-
           {filteredReports.length === 0 ? (
             <div className="flex min-h-[280px] flex-col items-center justify-center px-6 text-center">
               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gray-100">
@@ -623,13 +682,24 @@ export default function MidwifeMonthlyReports() {
               </h3>
 
               <p className="mt-1 max-w-md text-sm text-gray-500">
-                There are no reports matching the current search and status
-                filter.
+                {bhwUsers.length === 0
+                  ? "You have no BHW accounts created under your Midwife account yet."
+                  : "No reports from your BHW accounts match the current search and status filter."}
               </p>
+
+              {searchTerm && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTerm("")}
+                  className="mt-3 text-sm font-medium text-blue-600 hover:text-blue-700"
+                >
+                  Clear search
+                </button>
+              )}
             </div>
           ) : (
             <>
-              {/* Desktop table */}
+              {/* DESKTOP TABLE */}
 
               <div className="hidden overflow-x-auto md:block">
                 <table className="w-full text-left">
@@ -672,17 +742,11 @@ export default function MidwifeMonthlyReports() {
 
                       const StatusIcon = config.icon;
 
-                      const womenCount = getPregnantWomenCount(report);
-
-                      const newCount = getNewPregnancyCount(report);
-
                       return (
                         <tr
                           key={report.id}
                           className="transition hover:bg-gray-50"
                         >
-                          {/* BHW */}
-
                           <td className="px-5 py-4">
                             <div className="flex items-center gap-3">
                               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-orange-100">
@@ -701,8 +765,6 @@ export default function MidwifeMonthlyReports() {
                             </div>
                           </td>
 
-                          {/* Period */}
-
                           <td className="px-5 py-4">
                             <div className="flex items-center gap-2 text-sm font-medium text-gray-900">
                               <CalendarDays className="h-4 w-4 text-gray-400" />
@@ -711,23 +773,17 @@ export default function MidwifeMonthlyReports() {
                             </div>
                           </td>
 
-                          {/* Women */}
-
                           <td className="px-5 py-4 text-center">
                             <span className="font-semibold text-gray-900">
-                              {womenCount}
+                              {getPregnantWomenCount(report)}
                             </span>
                           </td>
-
-                          {/* New */}
 
                           <td className="px-5 py-4 text-center">
                             <span className="font-semibold text-blue-600">
-                              {newCount}
+                              {getNewPregnancyCount(report)}
                             </span>
                           </td>
-
-                          {/* Submitted */}
 
                           <td className="px-5 py-4">
                             <span className="text-sm text-gray-600">
@@ -735,19 +791,14 @@ export default function MidwifeMonthlyReports() {
                             </span>
                           </td>
 
-                          {/* Status */}
-
                           <td className="px-5 py-4 text-center">
                             <span
                               className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${config.className}`}
                             >
                               <StatusIcon className="h-3.5 w-3.5" />
-
                               {config.label}
                             </span>
                           </td>
-
-                          {/* Action */}
 
                           <td className="px-5 py-4 text-right">
                             <button
@@ -770,7 +821,7 @@ export default function MidwifeMonthlyReports() {
                 </table>
               </div>
 
-              {/* Mobile cards */}
+              {/* MOBILE CARDS */}
 
               <div className="divide-y divide-gray-100 md:hidden">
                 {filteredReports.map((report) => {
@@ -778,10 +829,6 @@ export default function MidwifeMonthlyReports() {
                     statusConfig[report.status] || statusConfig.submitted;
 
                   const StatusIcon = config.icon;
-
-                  const womenCount = getPregnantWomenCount(report);
-
-                  const newCount = getNewPregnancyCount(report);
 
                   return (
                     <div key={report.id} className="space-y-4 p-5">
@@ -806,7 +853,6 @@ export default function MidwifeMonthlyReports() {
                           className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${config.className}`}
                         >
                           <StatusIcon className="h-3.5 w-3.5" />
-
                           {config.label}
                         </span>
                       </div>
@@ -834,7 +880,7 @@ export default function MidwifeMonthlyReports() {
                           </p>
 
                           <p className="mt-1 text-lg font-bold text-pink-700">
-                            {womenCount}
+                            {getPregnantWomenCount(report)}
                           </p>
                         </div>
 
@@ -844,14 +890,18 @@ export default function MidwifeMonthlyReports() {
                           </p>
 
                           <p className="mt-1 text-lg font-bold text-blue-700">
-                            {newCount}
+                            {getNewPregnancyCount(report)}
                           </p>
                         </div>
                       </div>
 
                       <button
                         type="button"
-                        onClick={() => setSelectedReport(report)}
+                        onClick={() =>
+                          navigate(
+                            `/dashboard/midwife/monthly-reports/${report.id}`,
+                          )
+                        }
                         className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
                       >
                         <Eye className="h-4 w-4" />
@@ -866,9 +916,7 @@ export default function MidwifeMonthlyReports() {
         </div>
       </div>
 
-      {/* =======================================================
-          QUICK REPORT PREVIEW MODAL
-      ======================================================== */}
+      {/* QUICK REPORT PREVIEW MODAL */}
 
       {selectedReport && (
         <div
@@ -880,7 +928,7 @@ export default function MidwifeMonthlyReports() {
           }}
         >
           <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-            {/* Modal header */}
+            {/* MODAL HEADER */}
 
             <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
               <div>
@@ -901,16 +949,17 @@ export default function MidwifeMonthlyReports() {
                 type="button"
                 onClick={() => setSelectedReport(null)}
                 className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                aria-label="Close report preview"
               >
                 <X className="h-5 w-5" />
               </button>
             </div>
 
-            {/* Modal body */}
+            {/* MODAL BODY */}
 
             <div className="overflow-y-auto p-5">
               <div className="space-y-5">
-                {/* BHW */}
+                {/* SUBMITTED BY */}
 
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
                   <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
@@ -935,7 +984,7 @@ export default function MidwifeMonthlyReports() {
                   </div>
                 </div>
 
-                {/* Report information */}
+                {/* REPORT INFORMATION */}
 
                 <div>
                   <h3 className="font-semibold text-gray-900">
@@ -977,10 +1026,18 @@ export default function MidwifeMonthlyReports() {
                         {getNewPregnancyCount(selectedReport)}
                       </p>
                     </div>
+
+                    <div className="rounded-lg border border-gray-200 p-3 sm:col-span-2">
+                      <p className="text-xs text-gray-500">Total Pregnancies</p>
+
+                      <p className="mt-1 text-xl font-bold text-gray-900">
+                        {getTotalPregnancyCount(selectedReport)}
+                      </p>
+                    </div>
                   </div>
                 </div>
 
-                {/* Pregnancy names */}
+                {/* PREGNANT WOMEN */}
 
                 <div>
                   <h3 className="font-semibold text-gray-900">
@@ -988,8 +1045,7 @@ export default function MidwifeMonthlyReports() {
                   </h3>
 
                   <p className="mt-1 text-sm text-gray-500">
-                    These are the women included in the submitted monthly
-                    report.
+                    These records are taken from the submitted report snapshot.
                   </p>
 
                   <div className="mt-3 space-y-2">
@@ -1039,7 +1095,7 @@ export default function MidwifeMonthlyReports() {
                   </div>
                 </div>
 
-                {/* Important note */}
+                {/* REVIEW INFORMATION */}
 
                 <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
                   <div className="flex gap-3">
@@ -1051,11 +1107,9 @@ export default function MidwifeMonthlyReports() {
                       </p>
 
                       <p className="mt-1 text-sm leading-6 text-blue-800">
-                        This is a preview of the report submitted by the BHW.
-                        The detailed review page will allow the Midwife to
-                        inspect each pregnant woman, ANC visits, home visits,
-                        and other report information before accepting or
-                        returning the report.
+                        This preview displays the report snapshot submitted by
+                        the BHW. Open the full report to inspect the available
+                        details and continue the review process.
                       </p>
                     </div>
                   </div>
@@ -1063,7 +1117,7 @@ export default function MidwifeMonthlyReports() {
               </div>
             </div>
 
-            {/* Modal footer */}
+            {/* MODAL FOOTER */}
 
             <div className="flex flex-col-reverse gap-2 border-t border-gray-200 bg-gray-50 px-5 py-4 sm:flex-row sm:justify-end">
               <button

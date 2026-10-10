@@ -14,7 +14,6 @@ import {
   Search,
   Activity,
   Stethoscope,
-  TrendingUp,
   Filter,
   X,
   BarChart3,
@@ -87,6 +86,38 @@ const inactiveStatuses = ["delivered", "miscarriage", "stillbirth", "inactive"];
 const isActivePregnancy = (pregnancy) =>
   !inactiveStatuses.includes(normalizeStatus(pregnancy.status));
 
+const PREGNANCY_COLORS = {
+  active: "#16a34a",
+  for_review: "#eab308",
+  high_risk: "#dc2626",
+  referred: "#8b5cf6",
+  delivered: "#0891b2",
+  miscarriage: "#f97316",
+  stillbirth: "#64748b",
+  inactive: "#9ca3af",
+};
+
+const ANC_COLORS = {
+  missed: "#dc2626",
+  today: "#f97316",
+  upcoming: "#eab308",
+  scheduled: "#2563eb",
+  none: "#9ca3af",
+};
+
+const REPORT_COLORS = {
+  submitted: "#2563eb",
+  approved: "#16a34a",
+  returned: "#dc2626",
+  draft: "#9ca3af",
+  pending: "#eab308",
+};
+
+const formatStatus = (status) =>
+  String(status || "active")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
 const getCheckupStatus = (nextVisitDate, pregnancyStatus = "active") => {
   if (!isActivePregnancy({ status: pregnancyStatus })) {
     return {
@@ -153,38 +184,6 @@ const getCheckupStatus = (nextVisitDate, pregnancyStatus = "active") => {
   };
 };
 
-const formatStatus = (status) =>
-  String(status || "active")
-    .replace(/_/g, " ")
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
-
-const PREGNANCY_COLORS = {
-  active: "#16a34a",
-  for_review: "#eab308",
-  high_risk: "#dc2626",
-  referred: "#8b5cf6",
-  delivered: "#0891b2",
-  miscarriage: "#f97316",
-  stillbirth: "#64748b",
-  inactive: "#9ca3af",
-};
-
-const ANC_COLORS = {
-  missed: "#dc2626",
-  today: "#f97316",
-  upcoming: "#eab308",
-  scheduled: "#2563eb",
-  none: "#9ca3af",
-};
-
-const REPORT_COLORS = {
-  submitted: "#2563eb",
-  approved: "#16a34a",
-  returned: "#dc2626",
-  draft: "#9ca3af",
-  pending: "#eab308",
-};
-
 /* =========================================================
    COMPONENT
 ========================================================= */
@@ -193,11 +192,13 @@ function MidwifeDashboard() {
   const navigate = useNavigate();
 
   const [user, setUser] = useState(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState("");
 
   const [pregnancies, setPregnancies] = useState([]);
   const [workerCount, setWorkerCount] = useState(0);
+
   const [reportCounts, setReportCounts] = useState({
     submitted: 0,
     approved: 0,
@@ -212,22 +213,64 @@ function MidwifeDashboard() {
   const [showAllAppointments, setShowAllAppointments] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
 
-  useEffect(() => {
-    const storedUser = localStorage.getItem("user");
+  /* =========================================================
+     LOAD CURRENT SESSION
+  ========================================================= */
 
-    if (!storedUser) {
-      setUser(null);
-      setLoading(false);
-      return;
-    }
+  useEffect(() => {
+    let cancelled = false;
 
     try {
-      setUser(JSON.parse(storedUser));
+      const storedUser = localStorage.getItem("user");
+
+      if (!storedUser) {
+        if (!cancelled) {
+          setUser(null);
+          setErrorMessage("Please log in again to access the dashboard.");
+        }
+        return;
+      }
+
+      const parsedUser = JSON.parse(storedUser);
+
+      if (!parsedUser?.id) {
+        if (!cancelled) {
+          setUser(null);
+          setErrorMessage("Your session is invalid. Please log in again.");
+        }
+        return;
+      }
+
+      if (parsedUser.role !== "midwife") {
+        if (!cancelled) {
+          setUser(null);
+          setErrorMessage(
+            "This dashboard is available only to midwife accounts.",
+          );
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        setUser(parsedUser);
+        setErrorMessage("");
+      }
     } catch (error) {
       console.error("Invalid user session:", error);
-      setErrorMessage("Your session is invalid. Please log in again.");
-      setLoading(false);
+
+      if (!cancelled) {
+        setUser(null);
+        setErrorMessage("Your session is invalid. Please log in again.");
+      }
+    } finally {
+      if (!cancelled) {
+        setSessionChecked(true);
+      }
     }
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /* =========================================================
@@ -235,13 +278,19 @@ function MidwifeDashboard() {
   ========================================================= */
 
   const loadDashboard = useCallback(async () => {
-    if (!user?.id) return;
+    if (!user?.id || user.role !== "midwife") {
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setErrorMessage("");
 
     try {
-      setLoading(true);
-      setErrorMessage("");
-
-      // 1. Load pregnancy records.
+      /*
+       * STEP 1:
+       * Load pregnancy records.
+       */
       const { data: pregnancyData, error: pregnancyError } = await supabase
         .from("pregnant_women")
         .select("*")
@@ -251,7 +300,10 @@ function MidwifeDashboard() {
 
       const allPregnancies = pregnancyData || [];
 
-      // 2. Load residents and their household locations.
+      /*
+       * STEP 2:
+       * Load resident and household location information.
+       */
       const residentIds = [
         ...new Set(
           allPregnancies
@@ -298,16 +350,22 @@ function MidwifeDashboard() {
         if (residentError) throw residentError;
 
         residentMap = Object.fromEntries(
-          (residentData || []).map((resident) => [resident.id, resident]),
+          (residentData || []).map((resident) => [
+            String(resident.id),
+            resident,
+          ]),
         );
       }
 
       let combined = allPregnancies.map((pregnancy) => ({
         ...pregnancy,
-        resident: residentMap[pregnancy.resident_id] || null,
+        resident: residentMap[String(pregnancy.resident_id)] || null,
       }));
 
-      // 3. Load ANC visits and find the highest recorded visit number.
+      /*
+       * STEP 3:
+       * Load ANC visits and get the latest visit by visit number/date.
+       */
       const pregnancyIds = combined
         .map((pregnancy) => pregnancy.id)
         .filter(Boolean);
@@ -319,12 +377,12 @@ function MidwifeDashboard() {
           .from("pregnant_woman_visits")
           .select(
             `
-            id,
-            pregnant_woman_id,
-            visit_number,
-            visit_date,
-            next_visit_date
-          `,
+              id,
+              pregnant_woman_id,
+              visit_number,
+              visit_date,
+              next_visit_date
+            `,
           )
           .in("pregnant_woman_id", pregnancyIds)
           .order("visit_number", { ascending: false })
@@ -333,7 +391,7 @@ function MidwifeDashboard() {
         if (ancError) throw ancError;
 
         (ancData || []).forEach((visit) => {
-          const pregnancyId = visit.pregnant_woman_id;
+          const pregnancyId = String(visit.pregnant_woman_id);
 
           if (!latestAncMap[pregnancyId]) {
             latestAncMap[pregnancyId] = visit;
@@ -341,134 +399,135 @@ function MidwifeDashboard() {
         });
       }
 
-      combined = combined.map((pregnancy) => ({
-        ...pregnancy,
-        latest_anc_visit: latestAncMap[pregnancy.id] || null,
-        next_visit_date: latestAncMap[pregnancy.id]?.next_visit_date || null,
-      }));
+      combined = combined.map((pregnancy) => {
+        const latestVisit = latestAncMap[String(pregnancy.id)] || null;
 
-      // 4. Restrict pregnancy records to the midwife's assigned area.
-      if (user.barangay_id) {
+        return {
+          ...pregnancy,
+          latest_anc_visit: latestVisit,
+          next_visit_date: latestVisit?.next_visit_date || null,
+        };
+      });
+
+      /*
+       * STEP 4:
+       * Scope pregnancy records to the midwife's assigned area.
+       *
+       * If a barangay is assigned, use that barangay.
+       * Otherwise, if a district is assigned, use that district.
+       * If neither is assigned, return no pregnancy records.
+       */
+      if (user.barangay_id != null) {
         combined = combined.filter((pregnancy) => {
           const barangayId =
             pregnancy.resident?.households?.local_areas?.barangays?.id;
 
-          return Number(barangayId) === Number(user.barangay_id);
+          return (
+            barangayId != null &&
+            String(barangayId) === String(user.barangay_id)
+          );
         });
-      } else if (user.district_id) {
+      } else if (user.district_id != null) {
         combined = combined.filter((pregnancy) => {
           const districtId =
             pregnancy.resident?.households?.local_areas?.barangays?.district_id;
 
-          return Number(districtId) === Number(user.district_id);
+          return (
+            districtId != null &&
+            String(districtId) === String(user.district_id)
+          );
         });
+      } else {
+        combined = [];
       }
 
       setPregnancies(combined);
 
-      // 5. Count BNS and BHW accounts in the assigned area.
-      let workerQuery = supabase
+      /*
+       * STEP 5:
+       * Retrieve ONLY BNS/BHW accounts created by this midwife.
+       *
+       * Do not rely on district_id or barangay_id for ownership.
+       * created_by_midwife_id is the ownership filter.
+       */
+      const { data: ownedWorkers, error: workersError } = await supabase
         .from("users")
-        .select("id", { count: "exact", head: true })
-        .in("role", ["bns", "bhw"]);
+        .select("id, role")
+        .in("role", ["bns", "bhw"])
+        .eq("created_by_midwife_id", user.id);
 
-      if (user.barangay_id) {
-        workerQuery = workerQuery.eq("barangay_id", user.barangay_id);
-      } else if (user.district_id) {
-        workerQuery = workerQuery.eq("district_id", user.district_id);
+      if (workersError) throw workersError;
+
+      const workers = ownedWorkers || [];
+
+      setWorkerCount(workers.length);
+
+      /*
+       * STEP 6:
+       * Use only this midwife's BHW IDs when loading BHW reports.
+       *
+       * BNS monthly reports are stored separately and are not included
+       * in bhw_monthly_reports.
+       */
+      const ownedBhwIds = workers
+        .filter((worker) => worker.role === "bhw")
+        .map((worker) => worker.id);
+
+      let reports = [];
+
+      if (ownedBhwIds.length > 0) {
+        const { data: reportData, error: reportError } = await supabase
+          .from("bhw_monthly_reports")
+          .select("id, status, bhw_id")
+          .in("bhw_id", ownedBhwIds);
+
+        if (reportError) throw reportError;
+
+        reports = reportData || [];
       }
 
-      const { count: workers, error: workerError } = await workerQuery;
+      /*
+       * STEP 7:
+       * Count report statuses using only the filtered reports.
+       */
+      const nextReportCounts = {
+        submitted: 0,
+        approved: 0,
+        returned: 0,
+        draft: 0,
+        other: 0,
+      };
 
-      if (workerError) throw workerError;
+      reports.forEach((report) => {
+        const status = normalizeStatus(report.status);
 
-      setWorkerCount(workers || 0);
-
-      // 6. Load monthly report statuses.
-      const { data: reportData, error: reportError } = await supabase
-        .from("bhw_monthly_reports")
-        .select("id, status, bhw_id");
-
-      if (reportError) {
-        console.warn("Could not load BHW reports:", reportError);
-        setReportCounts({
-          submitted: 0,
-          approved: 0,
-          returned: 0,
-          draft: 0,
-          other: 0,
-        });
-      } else {
-        let reports = reportData || [];
-
-        // Scope reports to workers in the midwife's assigned area.
-        if (user.barangay_id || user.district_id) {
-          let areaWorkerQuery = supabase
-            .from("users")
-            .select("id")
-            .in("role", ["bns", "bhw"]);
-
-          if (user.barangay_id) {
-            areaWorkerQuery = areaWorkerQuery.eq(
-              "barangay_id",
-              user.barangay_id,
-            );
-          } else {
-            areaWorkerQuery = areaWorkerQuery.eq(
-              "district_id",
-              user.district_id,
-            );
-          }
-
-          const { data: workersInArea, error: areaWorkerError } =
-            await areaWorkerQuery;
-
-          if (areaWorkerError) throw areaWorkerError;
-
-          const areaWorkerIds = new Set(
-            (workersInArea || []).map((worker) => String(worker.id)),
-          );
-
-          reports = reports.filter((report) =>
-            areaWorkerIds.has(String(report.bhw_id)),
-          );
+        if (Object.hasOwn(nextReportCounts, status)) {
+          nextReportCounts[status] += 1;
+        } else {
+          nextReportCounts.other += 1;
         }
+      });
 
-        const nextReportCounts = {
-          submitted: 0,
-          approved: 0,
-          returned: 0,
-          draft: 0,
-          other: 0,
-        };
-
-        reports.forEach((report) => {
-          const status = normalizeStatus(report.status);
-
-          if (Object.hasOwn(nextReportCounts, status)) {
-            nextReportCounts[status] += 1;
-          } else {
-            nextReportCounts.other += 1;
-          }
-        });
-
-        setReportCounts(nextReportCounts);
-      }
-
+      setReportCounts(nextReportCounts);
       setLastUpdated(new Date());
     } catch (error) {
       console.error("Error loading midwife dashboard:", error);
-      setErrorMessage(error.message || "Failed to load dashboard information.");
+
+      setErrorMessage(
+        error?.message || "Failed to load dashboard information.",
+      );
     } finally {
       setLoading(false);
     }
   }, [user]);
 
   useEffect(() => {
-    if (user) {
+    if (user?.id && user.role === "midwife") {
       loadDashboard();
+    } else if (sessionChecked) {
+      setLoading(false);
     }
-  }, [user, loadDashboard]);
+  }, [user, sessionChecked, loadDashboard]);
 
   /* =========================================================
      DERIVED STATISTICS
@@ -529,7 +588,6 @@ function MidwifeDashboard() {
     };
   }, [enrichedPregnancies, pregnancies, workerCount, reportCounts]);
 
-  // Pregnancy status chart data.
   const pregnancyChartData = useMemo(() => {
     const counts = {};
 
@@ -548,7 +606,6 @@ function MidwifeDashboard() {
       .sort((a, b) => b.value - a.value);
   }, [pregnancies]);
 
-  // ANC appointment status chart data.
   const ancChartData = useMemo(() => {
     const counts = {
       missed: 0,
@@ -636,7 +693,6 @@ function MidwifeDashboard() {
     [reportCounts],
   );
 
-  // Barangays represented in the currently loaded pregnancy records.
   const barangayOptions = useMemo(() => {
     const unique = new Map();
 
@@ -654,7 +710,6 @@ function MidwifeDashboard() {
     return [...unique.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [pregnancies]);
 
-  // Interactive appointment queue.
   const filteredAppointments = useMemo(() => {
     return enrichedPregnancies
       .filter(isActivePregnancy)
@@ -664,10 +719,14 @@ function MidwifeDashboard() {
         if (selectedFilter === "missed") return key === "missed";
         if (selectedFilter === "today") return key === "today";
         if (selectedFilter === "upcoming") return key === "upcoming";
+
         if (selectedFilter === "scheduled") {
           return ["scheduled", "upcoming", "today"].includes(key);
         }
-        if (selectedFilter === "no_schedule") return key === "none";
+
+        if (selectedFilter === "no_schedule") {
+          return key === "none";
+        }
 
         return true;
       })
@@ -760,16 +819,34 @@ function MidwifeDashboard() {
     setShowAllAppointments(false);
   };
 
+  /* =========================================================
+     SESSION / ACCESS STATES
+  ========================================================= */
+
+  if (!sessionChecked) {
+    return (
+      <DashboardLayout>
+        <div className="rounded-2xl border border-gray-200 bg-white p-10 text-center shadow-sm">
+          <RefreshCw className="mx-auto animate-spin text-teal-600" size={28} />
+          <p className="mt-3 text-sm text-gray-500">Checking your session...</p>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   if (!user) {
     return (
       <DashboardLayout>
         <div className="rounded-2xl border border-gray-200 bg-white p-8 text-center shadow-sm">
           <UserRound className="mx-auto h-10 w-10 text-gray-400" />
+
           <p className="mt-3 font-semibold text-gray-800">
-            No user session found
+            Unable to access the dashboard
           </p>
+
           <p className="mt-1 text-sm text-gray-500">
-            Please log in again to access the midwife dashboard.
+            {errorMessage ||
+              "No valid midwife session was found. Please log in again."}
           </p>
         </div>
       </DashboardLayout>
@@ -859,17 +936,21 @@ function MidwifeDashboard() {
             className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4"
           >
             <AlertTriangle size={20} className="mt-0.5 shrink-0 text-red-600" />
+
             <div className="min-w-0 flex-1">
               <p className="font-semibold text-red-800">
                 Unable to load all dashboard data
               </p>
+
               <p className="mt-1 break-words text-sm text-red-700">
                 {errorMessage}
               </p>
+
               <button
                 type="button"
                 onClick={loadDashboard}
-                className="mt-2 text-sm font-semibold text-red-800 underline"
+                disabled={loading}
+                className="mt-2 text-sm font-semibold text-red-800 underline disabled:opacity-50"
               >
                 Try again
               </button>
@@ -886,6 +967,7 @@ function MidwifeDashboard() {
                 Select a card to explore the related records.
               </p>
             </div>
+
             {loading && (
               <span className="text-xs text-gray-500">Updating...</span>
             )}
@@ -899,10 +981,7 @@ function MidwifeDashboard() {
               icon={FileText}
               iconClass="bg-blue-50 text-blue-600"
               loading={loading}
-              onClick={() => {
-                setSelectedFilter("all");
-                openPregnancyMonitoring();
-              }}
+              onClick={openPregnancyMonitoring}
             />
 
             <StatCard
@@ -919,7 +998,7 @@ function MidwifeDashboard() {
             <StatCard
               title="BNS / BHW Workers"
               value={statistics.workers}
-              description="Workers in your assigned area"
+              description="BNS and BHW accounts you created"
               icon={Users}
               iconClass="bg-violet-50 text-violet-600"
               loading={loading}
@@ -994,10 +1073,12 @@ function MidwifeDashboard() {
                       ANC appointment status
                     </h3>
                   </div>
+
                   <p className="mt-2 text-sm text-gray-500">
                     Click a bar to filter the appointment queue.
                   </p>
                 </div>
+
                 <span className="rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-600">
                   {statistics.activePregnancies} active
                 </span>
@@ -1096,10 +1177,12 @@ function MidwifeDashboard() {
                       Pregnancy record distribution
                     </h3>
                   </div>
+
                   <p className="mt-2 text-sm text-gray-500">
                     Click a segment to open pregnancy monitoring.
                   </p>
                 </div>
+
                 <span className="rounded-full bg-violet-50 px-3 py-1 text-xs font-semibold text-violet-700">
                   {pregnancies.length} records
                 </span>
@@ -1135,7 +1218,9 @@ function MidwifeDashboard() {
                           />
                         ))}
                       </Pie>
+
                       <Tooltip formatter={(value, name) => [value, name]} />
+
                       <Legend
                         verticalAlign="bottom"
                         iconType="circle"
@@ -1170,8 +1255,9 @@ function MidwifeDashboard() {
                   Monthly report workflow
                 </h3>
               </div>
+
               <p className="mt-2 text-sm text-gray-500">
-                BHW monthly report counts by stored report status.
+                BHW monthly report counts from the BHW accounts you created.
               </p>
             </div>
 
@@ -1196,6 +1282,7 @@ function MidwifeDashboard() {
                   0,
                 )}
               />
+
               <ReportProgressRow
                 label="Approved"
                 count={reportCounts.approved}
@@ -1205,6 +1292,7 @@ function MidwifeDashboard() {
                   0,
                 )}
               />
+
               <ReportProgressRow
                 label="Returned"
                 count={reportCounts.returned}
@@ -1214,6 +1302,7 @@ function MidwifeDashboard() {
                   0,
                 )}
               />
+
               <ReportProgressRow
                 label="Draft"
                 count={reportCounts.draft}
@@ -1274,9 +1363,10 @@ function MidwifeDashboard() {
           </div>
 
           <p className="mt-3 text-xs leading-5 text-gray-500">
-            Report counts are based on the <code>bhw_monthly_reports</code>{" "}
-            table. This chart does not include BNS reports stored in a separate
-            table.
+            These counts include only records in{" "}
+            <code>bhw_monthly_reports</code> associated with BHW accounts
+            created by the logged-in midwife. BNS reports stored in a separate
+            table are not included.
           </p>
         </section>
 
@@ -1291,6 +1381,7 @@ function MidwifeDashboard() {
                 <div className="rounded-xl bg-red-50 p-3 text-red-600">
                   <AlertTriangle size={22} />
                 </div>
+
                 <div>
                   <h3 className="text-lg font-bold text-gray-800">
                     ANC appointment follow-up queue
@@ -1301,19 +1392,17 @@ function MidwifeDashboard() {
                 </div>
               </div>
 
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={openPregnancyMonitoring}
-                  className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-800"
-                >
-                  Pregnancy monitoring
-                  <ArrowRight size={15} />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={openPregnancyMonitoring}
+                className="inline-flex items-center gap-2 rounded-lg bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-800"
+              >
+                Pregnancy monitoring
+                <ArrowRight size={15} />
+              </button>
             </div>
 
-            {/* INTERACTIVE FILTER CHIPS */}
+            {/* FILTER CHIPS */}
             <div className="mt-5 flex flex-wrap gap-2">
               {[
                 { key: "all", label: "All active" },
@@ -1348,6 +1437,7 @@ function MidwifeDashboard() {
                   size={18}
                   className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
                 />
+
                 <input
                   type="search"
                   value={searchTerm}
@@ -1362,12 +1452,14 @@ function MidwifeDashboard() {
                   size={16}
                   className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
                 />
+
                 <select
                   value={barangayFilter}
                   onChange={(event) => setBarangayFilter(event.target.value)}
                   className="w-full appearance-none rounded-xl border border-gray-200 bg-white py-3 pl-9 pr-8 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100"
                 >
                   <option value="all">All barangays</option>
+
                   {barangayOptions.map((barangay) => (
                     <option key={barangay.id} value={barangay.id}>
                       {barangay.name}
@@ -1411,6 +1503,7 @@ function MidwifeDashboard() {
           {loading ? (
             <div className="p-12 text-center">
               <RefreshCw className="mx-auto animate-spin text-teal-600" />
+
               <p className="mt-3 text-sm text-gray-500">
                 Loading appointment records...
               </p>
@@ -1420,13 +1513,16 @@ function MidwifeDashboard() {
               <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-gray-100">
                 <CheckCircle2 size={26} className="text-gray-500" />
               </div>
+
               <h4 className="mt-4 font-semibold text-gray-800">
                 No matching appointments
               </h4>
+
               <p className="mx-auto mt-1 max-w-md text-sm text-gray-500">
                 Try another status, barangay, or search term. This result does
                 not necessarily mean all ANC visits are complete.
               </p>
+
               <button
                 type="button"
                 onClick={clearFilters}
@@ -1438,7 +1534,7 @@ function MidwifeDashboard() {
           ) : (
             <>
               <div className="overflow-x-auto">
-                <table className="min-w-[850px] w-full text-left text-sm">
+                <table className="w-full min-w-[850px] text-left text-sm">
                   <thead className="bg-white text-xs uppercase tracking-wide text-gray-500">
                     <tr>
                       <th className="px-5 py-4 font-semibold">
@@ -1476,10 +1572,12 @@ function MidwifeDashboard() {
                               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-pink-50 text-pink-600">
                                 <HeartPulse size={18} />
                               </div>
+
                               <div>
                                 <p className="font-semibold text-gray-800">
                                   {getFullName(resident)}
                                 </p>
+
                                 <p className="mt-1 text-xs text-gray-500">
                                   Family Record:{" "}
                                   {pregnancy.family_record_no || "—"}
@@ -1494,10 +1592,12 @@ function MidwifeDashboard() {
                                 size={15}
                                 className="mt-0.5 shrink-0 text-gray-400"
                               />
+
                               <div>
                                 <p className="font-medium text-gray-700">
                                   {barangay?.name || "—"}
                                 </p>
+
                                 <p className="mt-1 text-xs text-gray-500">
                                   {localArea?.name || "No local area"}
                                 </p>
@@ -1509,12 +1609,14 @@ function MidwifeDashboard() {
                             <p className="font-medium text-gray-800">
                               {formatDate(pregnancy.next_visit_date)}
                             </p>
+
                             {checkup.key === "missed" && (
                               <p className="mt-1 text-xs text-red-600">
                                 {checkup.daysOverdue} day
                                 {checkup.daysOverdue === 1 ? "" : "s"} overdue
                               </p>
                             )}
+
                             {checkup.key === "upcoming" && (
                               <p className="mt-1 text-xs text-amber-700">
                                 Due in {checkup.daysUntil} day
@@ -1530,9 +1632,11 @@ function MidwifeDashboard() {
                               {checkup.key === "missed" && (
                                 <AlertTriangle size={12} />
                               )}
+
                               {checkup.key === "today" && (
                                 <CalendarCheck size={12} />
                               )}
+
                               {checkup.label}
                             </span>
                           </td>
@@ -1561,6 +1665,7 @@ function MidwifeDashboard() {
                       ? "Showing all matching appointments."
                       : `Showing 8 of ${filteredAppointments.length} matching appointments.`}
                   </p>
+
                   <button
                     type="button"
                     onClick={() =>
@@ -1569,6 +1674,7 @@ function MidwifeDashboard() {
                     className="inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-700 transition hover:bg-gray-100"
                   >
                     {showAllAppointments ? "Show less" : "Show all"}
+
                     <ArrowRight
                       size={15}
                       className={
@@ -1586,6 +1692,7 @@ function MidwifeDashboard() {
         <section>
           <div className="mb-4">
             <h2 className="text-lg font-bold text-gray-800">Quick actions</h2>
+
             <p className="mt-1 text-sm text-gray-500">
               Continue to your most-used midwife workflows.
             </p>
@@ -1614,7 +1721,7 @@ function MidwifeDashboard() {
               icon={Users}
               iconClass="bg-violet-50 text-violet-700"
               title="Community health workers"
-              description="View BNS and BHW accounts associated with your assigned area."
+              description="Manage the BNS and BHW accounts you created."
               buttonText="Manage workers"
               onClick={openWorkers}
             />
@@ -1628,12 +1735,14 @@ function MidwifeDashboard() {
               <div className="rounded-xl bg-blue-50 p-3 text-blue-700">
                 <FileText size={22} />
               </div>
+
               <div>
                 <h3 className="font-bold text-gray-800">
                   Report review overview
                 </h3>
+
                 <p className="mt-1 text-sm text-gray-500">
-                  Check the report workload before opening the review page.
+                  Review the report workload before opening the review page.
                 </p>
               </div>
             </div>
@@ -1655,18 +1764,21 @@ function MidwifeDashboard() {
               description="Submitted reports"
               color="blue"
             />
+
             <ReportSummaryTile
               title="Approved"
               count={reportCounts.approved}
               description="Approved reports"
               color="green"
             />
+
             <ReportSummaryTile
               title="Returned"
               count={reportCounts.returned}
               description="Reports needing correction"
               color="red"
             />
+
             <ReportSummaryTile
               title="Drafts"
               count={reportCounts.draft}
@@ -1703,6 +1815,7 @@ function StatCard({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium text-gray-500">{title}</p>
+
           <p
             className={`mt-3 text-3xl font-bold tracking-tight ${
               urgent ? "text-red-700" : "text-gray-900"
@@ -1710,6 +1823,7 @@ function StatCard({
           >
             {loading ? "—" : value}
           </p>
+
           <p className="mt-1.5 text-xs leading-5 text-gray-500">
             {description}
           </p>
@@ -1751,7 +1865,9 @@ function MiniStatCard({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-2xl border p-5 text-left transition hover:-translate-y-0.5 hover:shadow-sm ${styles[color] || styles.orange}`}
+      className={`rounded-2xl border p-5 text-left transition hover:-translate-y-0.5 hover:shadow-sm ${
+        styles[color] || styles.orange
+      }`}
     >
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -1759,8 +1875,10 @@ function MiniStatCard({
           <p className="mt-2 text-3xl font-bold">{value}</p>
           <p className="mt-1 text-xs opacity-80">{description}</p>
         </div>
+
         <Icon size={23} />
       </div>
+
       <div className="mt-3 flex items-center gap-1 text-xs font-semibold">
         View details <ArrowRight size={13} />
       </div>
@@ -1784,6 +1902,7 @@ function QuickAction({
         >
           <Icon size={22} />
         </div>
+
         <div className="min-w-0">
           <h3 className="font-bold text-gray-800">{title}</h3>
           <p className="mt-2 text-sm leading-6 text-gray-500">{description}</p>
@@ -1811,6 +1930,7 @@ function ReportProgressRow({ label, count, color, total }) {
         <span className="text-sm text-gray-600">{label}</span>
         <span className="text-sm font-bold text-gray-800">{count}</span>
       </div>
+
       <div className="h-2.5 overflow-hidden rounded-full bg-gray-100">
         <div
           className={`h-full rounded-full transition-all duration-500 ${color}`}

@@ -199,27 +199,65 @@ export default function BnsChildMonthlyReports() {
 
   const [savingReview, setSavingReview] = useState(false);
 
-  /* =======================================================
-     LOAD LOGGED-IN USER
-  ======================================================= */
-
   useEffect(() => {
-    const storedUser = localStorage.getItem("user");
+    let cancelled = false;
 
-    if (!storedUser) {
-      setLoading(false);
-      return;
+    async function initialize() {
+      try {
+        setLoading(true);
+        setErrorMessage("");
+
+        const storedUser = localStorage.getItem("user");
+
+        if (!storedUser) {
+          throw new Error(
+            "Your login session was not found. Please log in again.",
+          );
+        }
+
+        let parsedUser;
+
+        try {
+          parsedUser = JSON.parse(storedUser);
+        } catch {
+          throw new Error(
+            "Your login session is invalid. Please log in again.",
+          );
+        }
+
+        if (!parsedUser?.id) {
+          throw new Error("Unable to identify the logged-in user.");
+        }
+
+        if (parsedUser.role !== "midwife") {
+          throw new Error("Only a logged-in Midwife can access these reports.");
+        }
+
+        if (cancelled) return;
+
+        setUser(parsedUser);
+
+        // Pass the user directly instead of updating it again inside loadReports.
+        await loadReports(parsedUser, () => cancelled);
+      } catch (error) {
+        if (cancelled) return;
+
+        console.error("Error initializing BNS reports:", error);
+
+        setReports([]);
+        setBnsUsers({});
+        setBarangayMap({});
+        setLocalAreaMap({});
+        setErrorMessage(error.message || "Unable to initialize reports.");
+        setLoading(false);
+      }
     }
 
-    try {
-      const parsedUser = JSON.parse(storedUser);
+    initialize();
 
-      setUser(parsedUser);
-    } catch (error) {
-      console.error("Unable to parse logged-in user:", error);
-
-      setLoading(false);
-    }
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /* =======================================================
@@ -232,29 +270,116 @@ export default function BnsChildMonthlyReports() {
     loadReports();
   }, [user]);
 
-  /* =======================================================
-     LOAD BNS REPORTS
-  ======================================================= */
-
-  async function loadReports() {
+  async function loadReports(currentUser = user, isCancelled = () => false) {
     try {
       setLoading(true);
       setErrorMessage("");
 
-      /*
-        First get all reports.
+      // Get the currently logged-in Midwife.
+      const storedUser = localStorage.getItem("user");
 
-        We intentionally don't use a deeply nested
-        Supabase relationship here because the exact
-        FK relationship between the report table,
-        users, and barangays can vary.
+      if (!storedUser) {
+        setReports([]);
+        setBnsUsers({});
+        setBarangayMap({});
+        setLocalAreaMap({});
+        setErrorMessage(
+          "Your login session was not found. Please log in again.",
+        );
+        return;
+      }
 
-        Instead, we load the related records separately.
-      */
+      let currentUser;
+
+      try {
+        currentUser = JSON.parse(storedUser);
+      } catch {
+        setReports([]);
+        setBnsUsers({});
+        setBarangayMap({});
+        setLocalAreaMap({});
+        setErrorMessage("Your login session is invalid. Please log in again.");
+        return;
+      }
+
+      if (!currentUser?.id) {
+        setReports([]);
+        setBnsUsers({});
+        setBarangayMap({});
+        setLocalAreaMap({});
+        setErrorMessage("Unable to identify the logged-in Midwife.");
+        return;
+      }
+
+      if (currentUser.role !== "midwife") {
+        setReports([]);
+        setBnsUsers({});
+        setBarangayMap({});
+        setLocalAreaMap({});
+        setErrorMessage("Only a logged-in Midwife can access these reports.");
+        return;
+      }
+
+      // -----------------------------------------------------
+      // 1. Fetch only BNS users created by this Midwife.
+      // -----------------------------------------------------
+
+      const { data: bnsData, error: bnsError } = await supabase
+        .from("users")
+        .select(
+          `
+        id,
+        first_name,
+        middle_name,
+        last_name,
+        username,
+        role,
+        barangay_id,
+        district_id,
+        created_by_midwife_id
+      `,
+        )
+        .eq("role", "bns")
+        .eq("created_by_midwife_id", currentUser.id);
+
+      if (bnsError) {
+        throw bnsError;
+      }
+
+      const ownedBnsUsers = bnsData || [];
+
+      const loadedBnsUsers = {};
+
+      ownedBnsUsers.forEach((bns) => {
+        loadedBnsUsers[String(bns.id)] = bns;
+      });
+
+      const bnsIds = [
+        ...new Set(
+          ownedBnsUsers
+            .map((bns) => bns.id)
+            .filter((id) => id !== null && id !== undefined),
+        ),
+      ];
+
+      // No BNS accounts created by this Midwife means no reports.
+      if (bnsIds.length === 0) {
+        setReports([]);
+        setBnsUsers({});
+        setBarangayMap({});
+        setLocalAreaMap({});
+        setSelectedReport(null);
+        return;
+      }
+
+      // -----------------------------------------------------
+      // 2. Fetch reports belonging only to those BNS accounts.
+      // -----------------------------------------------------
 
       const { data: reportRows, error: reportError } = await supabase
         .from("bns_child_monthly_reports")
         .select("*")
+        .in("bns_id", bnsIds)
         .order("report_year", {
           ascending: false,
         })
@@ -271,71 +396,29 @@ export default function BnsChildMonthlyReports() {
 
       const safeReports = reportRows || [];
 
-      /* ---------------------------------------------------
-         Get BNS user IDs
-      --------------------------------------------------- */
-
-      const bnsIds = [
-        ...new Set(safeReports.map((report) => report.bns_id).filter(Boolean)),
-      ];
-
-      /* ---------------------------------------------------
-         Get barangay IDs
-      --------------------------------------------------- */
+      // -----------------------------------------------------
+      // 3. Fetch barangays used by the retrieved reports.
+      // -----------------------------------------------------
 
       const barangayIds = [
         ...new Set(
-          safeReports.map((report) => report.barangay_id).filter(Boolean),
+          safeReports
+            .map((report) => report.barangay_id)
+            .filter((id) => id !== null && id !== undefined),
         ),
       ];
 
-      let loadedBnsUsers = {};
-      let loadedBarangays = {};
-      let loadedLocalAreas = {};
-
-      /* ---------------------------------------------------
-         Load BNS users
-      --------------------------------------------------- */
-
-      if (bnsIds.length > 0) {
-        const { data: bnsData, error: bnsError } = await supabase
-          .from("users")
-          .select(
-            `
-              id,
-              first_name,
-              middle_name,
-              last_name,
-              username,
-              role,
-              barangay_id,
-              district_id
-            `,
-          )
-          .in("id", bnsIds);
-
-        if (bnsError) {
-          throw bnsError;
-        }
-
-        (bnsData || []).forEach((bns) => {
-          loadedBnsUsers[String(bns.id)] = bns;
-        });
-      }
-
-      /* ---------------------------------------------------
-         Load barangays
-      --------------------------------------------------- */
+      const loadedBarangays = {};
 
       if (barangayIds.length > 0) {
         const { data: barangayData, error: barangayError } = await supabase
           .from("barangays")
           .select(
             `
-              id,
-              name,
-              district_id
-            `,
+          id,
+          name,
+          district_id
+        `,
           )
           .in("id", barangayIds);
 
@@ -347,88 +430,99 @@ export default function BnsChildMonthlyReports() {
           loadedBarangays[String(barangay.id)] = barangay;
         });
       }
-      /* ---------------------------------------------------
-   Load BNS assigned Purok / Sitio
---------------------------------------------------- */
 
-      if (bnsIds.length > 0) {
-        const { data: assignmentData, error: assignmentError } = await supabase
-          .from("worker_area_assignments")
-          .select(
-            `
-      worker_id,
-      local_area_id,
-      is_active,
-      local_areas (
-        id,
-        name,
-        type,
-        barangay_id
-      )
-    `,
+      // -----------------------------------------------------
+      // 4. Fetch active Purok/Sitio assignments for owned BNS.
+      // -----------------------------------------------------
+
+      const loadedLocalAreas = {};
+
+      const { data: assignmentData, error: assignmentError } = await supabase
+        .from("worker_area_assignments")
+        .select(
+          `
+          worker_id,
+          local_area_id,
+          is_active,
+          local_areas (
+            id,
+            name,
+            type,
+            barangay_id
           )
-          .in("worker_id", bnsIds)
-          .eq("is_active", true);
+        `,
+        )
+        .in("worker_id", bnsIds)
+        .eq("is_active", true);
 
-        if (assignmentError) {
-          throw assignmentError;
+      if (assignmentError) {
+        throw assignmentError;
+      }
+
+      (assignmentData || []).forEach((assignment) => {
+        const localArea = assignment.local_areas;
+
+        if (!localArea?.id) return;
+
+        const workerId = String(assignment.worker_id);
+
+        if (!loadedLocalAreas[workerId]) {
+          loadedLocalAreas[workerId] = [];
         }
 
-        /*
-    Store local areas by BNS.
-
-    Example:
-    loadedLocalAreas["123"] = [
-      {
-        id: 1,
-        name: "Purok 1",
-        type: "Purok",
-        barangay_id: 10
-      }
-    ]
-  */
-
-        (assignmentData || []).forEach((assignment) => {
-          const localArea = assignment.local_areas;
-
-          if (!localArea?.id) return;
-
-          const workerId = String(assignment.worker_id);
-
-          if (!loadedLocalAreas[workerId]) {
-            loadedLocalAreas[workerId] = [];
-          }
-
-          loadedLocalAreas[workerId].push({
-            id: localArea.id,
-            name: localArea.name,
-            type: localArea.type,
-            barangay_id: localArea.barangay_id,
-          });
+        loadedLocalAreas[workerId].push({
+          id: localArea.id,
+          name: localArea.name,
+          type: localArea.type,
+          barangay_id: localArea.barangay_id,
         });
-      }
-      /* ---------------------------------------------------
-         Attach related information
-      --------------------------------------------------- */
+      });
 
-      const enrichedReports = safeReports.map((report) => ({
-        ...report,
+      // -----------------------------------------------------
+      // 5. Attach BNS, barangay, and local-area information.
+      // -----------------------------------------------------
 
-        bns: loadedBnsUsers[String(report.bns_id)] || null,
-
-        barangay: loadedBarangays[String(report.barangay_id)] || null,
-
-        localAreas: loadedLocalAreas[String(report.bns_id)] || [],
-      }));
+      const enrichedReports = safeReports
+        // Extra ownership check before showing any report.
+        .filter((report) =>
+          Object.prototype.hasOwnProperty.call(
+            loadedBnsUsers,
+            String(report.bns_id),
+          ),
+        )
+        .map((report) => ({
+          ...report,
+          bns: loadedBnsUsers[String(report.bns_id)] || null,
+          barangay: loadedBarangays[String(report.barangay_id)] || null,
+          localAreas: loadedLocalAreas[String(report.bns_id)] || [],
+        }));
 
       setReports(enrichedReports);
       setBnsUsers(loadedBnsUsers);
       setBarangayMap(loadedBarangays);
       setLocalAreaMap(loadedLocalAreas);
+
+      // Clear an open modal if its report is no longer available.
+      setSelectedReport((previous) => {
+        if (!previous) return null;
+
+        return (
+          enrichedReports.find(
+            (report) => String(report.id) === String(previous.id),
+          ) || null
+        );
+      });
     } catch (error) {
       console.error("Error loading BNS child reports:", error);
 
-      setErrorMessage(error.message || "Unable to load BNS child reports.");
+      setErrorMessage(
+        error.message || "Unable to load BNS child monitoring reports.",
+      );
+
+      setReports([]);
+      setBnsUsers({});
+      setBarangayMap({});
+      setLocalAreaMap({});
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -444,24 +538,10 @@ export default function BnsChildMonthlyReports() {
     await loadReports();
   }
 
-  /* =======================================================
-     MIDWIFE ACCESS FILTER
-  ======================================================= */
-
   const scopedReports = useMemo(() => {
-    /*
-      Your existing Midwife pregnancy page uses:
-      
-      1. user.barangay_id when available
-      2. otherwise user.district_id
-
-      We follow the same pattern here.
-
-      If the Midwife has neither field, we show all
-      reports rather than accidentally hiding everything.
-    */
-
-    if (!user) return [];
+    if (!user?.id || user.role !== "midwife") {
+      return [];
+    }
 
     const hasBarangay =
       user.barangay_id !== null &&
@@ -473,20 +553,30 @@ export default function BnsChildMonthlyReports() {
       user.district_id !== undefined &&
       user.district_id !== "";
 
-    if (hasBarangay) {
-      return reports.filter(
-        (report) => String(report.barangay_id) === String(user.barangay_id),
-      );
-    }
+    return reports.filter((report) => {
+      // Always require the BNS to have been created by this Midwife.
+      const belongsToMidwife =
+        String(report.bns?.created_by_midwife_id) === String(user.id);
 
-    if (hasDistrict) {
-      return reports.filter(
-        (report) =>
-          String(report.barangay?.district_id) === String(user.district_id),
-      );
-    }
+      if (!belongsToMidwife) {
+        return false;
+      }
 
-    return reports;
+      // Preserve the existing barangay restriction.
+      if (hasBarangay) {
+        return String(report.barangay_id) === String(user.barangay_id);
+      }
+
+      // If there is no barangay assignment, apply district restriction.
+      if (hasDistrict) {
+        return (
+          String(report.barangay?.district_id) === String(user.district_id)
+        );
+      }
+
+      // Do not fall back to unrestricted reports.
+      return false;
+    });
   }, [reports, user]);
 
   /* =======================================================
