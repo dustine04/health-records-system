@@ -151,8 +151,19 @@ function SectionTitle({ icon: Icon, title, description }) {
 function PregnantWomanCard({ woman, index, report }) {
   const [expanded, setExpanded] = useState(index === 0);
 
-  const ancCount = Number(woman?.anc || 0);
-  const homeVisitCount = Number(woman?.home_visits || 0);
+  const pregnancy = woman?.pregnancy || {};
+  const pregnancyOutcome = woman?.pregnancy_outcome || {};
+  const ancVisits =
+    woman?.monthly_anc || woman?.anc_visits || woman?.all_anc_visits || [];
+  const ancCount = Number(
+    woman?.anc ?? woman?.monthly_anc?.length ?? woman?.anc_visits?.length ?? 0,
+  );
+  const homeVisitCount = Number(
+    woman?.home_visits ??
+      woman?.monthly_home_visits?.length ??
+      woman?.all_home_visits?.length ??
+      0,
+  );
 
   return (
     <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -271,7 +282,7 @@ function PregnantWomanCard({ woman, index, report }) {
                 <InfoItem
                   icon={ClipboardCheck}
                   label="Family Record No."
-                  value={woman?.family_record_no}
+                  value={pregnancy.family_record_no || woman?.family_record_no}
                 />
 
                 <InfoItem
@@ -305,25 +316,34 @@ function PregnantWomanCard({ woman, index, report }) {
                 <InfoItem
                   icon={CalendarDays}
                   label="Registration Date"
-                  value={formatDate(woman?.date_of_registration)}
+                  value={formatDate(
+                    pregnancy.date_of_registration ||
+                      woman?.date_of_registration,
+                  )}
                 />
 
                 <InfoItem
                   icon={CalendarDays}
                   label="LMP"
-                  value={formatDate(woman?.lmp)}
+                  value={formatDate(pregnancy.lmp || woman?.lmp)}
                 />
 
                 <InfoItem
                   icon={CalendarDays}
                   label="EDC / EDD"
-                  value={formatDate(woman?.edc)}
+                  value={formatDate(
+                    pregnancy.edc || pregnancy.edd || woman?.edc,
+                  )}
                 />
 
                 <InfoItem
                   icon={ClipboardCheck}
                   label="MC Book No."
-                  value={woman?.mc_book}
+                  value={
+                    woman?.mc_book
+                      ? "Recorded"
+                      : pregnancy.mc_book_number || woman?.mc_book
+                  }
                 />
               </div>
             </section>
@@ -366,7 +386,7 @@ function PregnantWomanCard({ woman, index, report }) {
                   </p>
 
                   <p className="mt-1 text-sm font-bold text-green-800">
-                    {woman?.birth_plan || "Not specified"}
+                    {woman?.birth_plan ? "Recorded" : "Not specified"}
                   </p>
                 </div>
 
@@ -376,7 +396,10 @@ function PregnantWomanCard({ woman, index, report }) {
                   </p>
 
                   <p className="mt-1 text-sm font-bold text-orange-800">
-                    {woman?.outcome || "Ongoing"}
+                    {pregnancy.status ||
+                      pregnancyOutcome.pregnancy_outcome ||
+                      woman?.outcome ||
+                      "Ongoing"}
                   </p>
                 </div>
               </div>
@@ -386,166 +409,381 @@ function PregnantWomanCard({ woman, index, report }) {
                 DELIVERY
             ================================================= */}
 
-            {(woman?.place_of_delivery ||
+            {(pregnancyOutcome.place_of_delivery ||
+              pregnancyOutcome.date_of_delivery ||
+              pregnancyOutcome.pregnancy_outcome ||
+              pregnancyOutcome.birth_status ||
+              pregnancyOutcome.attended_by ||
+              woman?.place_of_delivery ||
               woman?.date_of_delivery ||
               woman?.attended_by) && (
               <section>
-                <SectionTitle icon={Baby} title="Delivery Information" />
+                <SectionTitle
+                  icon={Baby}
+                  title="Delivery Information"
+                  description="Delivery and pregnancy outcome details captured in the submitted report."
+                />
 
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   <InfoItem
                     icon={Home}
                     label="Place of Delivery"
-                    value={woman?.place_of_delivery}
+                    value={
+                      pregnancyOutcome.place_of_delivery ||
+                      woman?.place_of_delivery
+                    }
                   />
 
                   <InfoItem
                     icon={CalendarDays}
                     label="Date of Delivery"
-                    value={formatDate(woman?.date_of_delivery)}
+                    value={formatDate(
+                      pregnancyOutcome.date_of_delivery ||
+                        woman?.date_of_delivery,
+                    )}
                   />
 
                   <InfoItem
                     icon={Stethoscope}
                     label="Attended By"
-                    value={woman?.attended_by}
+                    value={pregnancyOutcome.attended_by || woman?.attended_by}
+                  />
+
+                  <InfoItem
+                    icon={Baby}
+                    label="Pregnancy Outcome"
+                    value={
+                      pregnancyOutcome.pregnancy_outcome ||
+                      woman?.pregnancy_outcome
+                    }
+                  />
+
+                  <InfoItem
+                    icon={Baby}
+                    label="Birth Status"
+                    value={pregnancyOutcome.birth_status || woman?.birth_status}
                   />
                 </div>
               </section>
             )}
 
             {/* =================================================
-                ANC DETAILS IF INCLUDED IN SNAPSHOT
+                MONITORING AND FOLLOW-UP
             ================================================= */}
 
-            {Array.isArray(woman?.anc_visits) &&
-              woman.anc_visits.length > 0 && (
+            {woman?.monitoring && (
+              <section>
+                <SectionTitle
+                  icon={HeartPulse}
+                  title="Monitoring & Follow-up"
+                  description="Monitoring indicators saved in the BHW's submitted report snapshot. These are follow-up prompts, not a clinical diagnosis."
+                />
+
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                  <InfoItem
+                    icon={HeartPulse}
+                    label="Recorded Pregnancy Status"
+                    value={woman.monitoring.pregnancy_status || "Not recorded"}
+                  />
+                  <InfoItem
+                    icon={CalendarDays}
+                    label="Next Home Visit"
+                    value={formatDate(woman.monitoring.next_home_visit_date)}
+                  />
+                  <InfoItem
+                    icon={AlertCircle}
+                    label="Urgent / High Referrals Open"
+                    value={Number(woman.monitoring.urgent_open_referrals || 0)}
+                  />
+                  <InfoItem
+                    label="Flagged High Risk"
+                    value={formatBoolean(woman.monitoring.flagged_high_risk)}
+                  />
+                  <InfoItem
+                    label="Marked for Review"
+                    value={formatBoolean(woman.monitoring.flagged_for_review)}
+                  />
+                  <InfoItem
+                    label="Potentially Overdue Home Follow-up"
+                    value={formatBoolean(
+                      woman.monitoring.overdue_home_followup,
+                    )}
+                  />
+                  <InfoItem
+                    label="No ANC Recorded This Month"
+                    value={formatBoolean(
+                      woman.monitoring.no_anc_record_this_month,
+                    )}
+                  />
+                </div>
+
+                {Array.isArray(woman.monitoring.flags) &&
+                  woman.monitoring.flags.length > 0 && (
+                    <div className="mt-3 rounded-lg border border-orange-200 bg-orange-50 p-4">
+                      <p className="text-sm font-semibold text-orange-900">
+                        Monitoring Flags
+                      </p>
+                      <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-orange-800">
+                        {woman.monitoring.flags.map((flag, flagIndex) => (
+                          <li
+                            key={`${woman.pregnant_woman_id}-flag-${flagIndex}`}
+                          >
+                            {flag}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                {woman.monitoring.no_anc_record_this_month && (
+                  <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+                    “No ANC recorded this month” means no ANC visit appears in
+                    this report snapshot for the reporting month. It does not
+                    independently confirm that a scheduled appointment was
+                    missed.
+                  </p>
+                )}
+              </section>
+            )}
+
+            {/* =================================================
+                HOME VISIT DETAILS
+            ================================================= */}
+
+            {Array.isArray(woman?.monthly_home_visits) &&
+              woman.monthly_home_visits.length > 0 && (
                 <section>
                   <SectionTitle
-                    icon={Stethoscope}
-                    title="ANC Visit Details"
-                    description="ANC visits included in the submitted report snapshot."
+                    icon={Home}
+                    title="Home Visit Details"
+                    description="BHW home visits recorded during this reporting month."
                   />
-
                   <div className="space-y-3">
-                    {woman.anc_visits.map((visit, visitIndex) => (
+                    {woman.monthly_home_visits.map((visit, visitIndex) => (
                       <div
                         key={
                           visit.id ||
-                          `${woman.pregnant_woman_id}-anc-${visitIndex}`
+                          `${woman.pregnant_woman_id}-home-${visitIndex}`
                         }
                         className="rounded-lg border border-gray-200 bg-white p-4"
                       >
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <p className="font-semibold text-gray-900">
-                              ANC Visit #{visit.visit_number || visitIndex + 1}
-                            </p>
-
-                            <p className="text-sm text-gray-500">
-                              {formatDate(visit.visit_date)}
-                            </p>
-                          </div>
-
-                          <div className="flex flex-wrap gap-2">
-                            {visit.gestational_age_weeks !== undefined &&
-                              visit.gestational_age_weeks !== null && (
-                                <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">
-                                  GA: {visit.gestational_age_weeks} weeks
-                                </span>
-                              )}
-
-                            {visit.fetal_heart_rate !== undefined &&
-                              visit.fetal_heart_rate !== null && (
-                                <span className="rounded-full bg-pink-50 px-2.5 py-1 text-xs font-medium text-pink-700">
-                                  FHR: {visit.fetal_heart_rate} bpm
-                                </span>
-                              )}
-                          </div>
-                        </div>
-
-                        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
                           <InfoItem
-                            label="BP"
+                            icon={CalendarDays}
+                            label="Visit Date"
+                            value={formatDate(visit.visit_date)}
+                          />
+                          <InfoItem
+                            label="Visit Type / Purpose"
                             value={
-                              visit.systolic_bp && visit.diastolic_bp
-                                ? `${visit.systolic_bp}/${visit.diastolic_bp}`
-                                : "—"
+                              visit.visit_type ||
+                              visit.purpose ||
+                              visit.visit_purpose
                             }
                           />
-
                           <InfoItem
-                            label="Weight"
-                            value={
-                              visit.weight_kg ? `${visit.weight_kg} kg` : "—"
-                            }
+                            label="Follow-up Needed"
+                            value={formatBoolean(visit.follow_up_needed)}
                           />
-
                           <InfoItem
-                            label="Fundal Height"
-                            value={
-                              visit.fundal_height_cm
-                                ? `${visit.fundal_height_cm} cm`
-                                : "—"
-                            }
+                            icon={CalendarDays}
+                            label="Next Visit Date"
+                            value={formatDate(visit.next_visit_date)}
                           />
-
                           <InfoItem
-                            label="Temperature"
+                            label="Notes / Findings"
                             value={
-                              visit.temperature
-                                ? `${visit.temperature} °C`
-                                : "—"
+                              visit.notes || visit.findings || visit.remarks
                             }
                           />
                         </div>
-
-                        {(visit.overall_assessment ||
-                          visit.management_advice ||
-                          visit.concerns) && (
-                          <div className="mt-3 space-y-2">
-                            {visit.overall_assessment && (
-                              <div className="rounded-lg bg-gray-50 p-3">
-                                <p className="text-xs font-semibold text-gray-500">
-                                  Assessment
-                                </p>
-
-                                <p className="mt-1 text-sm text-gray-700">
-                                  {visit.overall_assessment}
-                                </p>
-                              </div>
-                            )}
-
-                            {visit.management_advice && (
-                              <div className="rounded-lg bg-gray-50 p-3">
-                                <p className="text-xs font-semibold text-gray-500">
-                                  Management / Advice
-                                </p>
-
-                                <p className="mt-1 text-sm text-gray-700">
-                                  {visit.management_advice}
-                                </p>
-                              </div>
-                            )}
-
-                            {visit.concerns && (
-                              <div className="rounded-lg bg-gray-50 p-3">
-                                <p className="text-xs font-semibold text-gray-500">
-                                  Concerns
-                                </p>
-
-                                <p className="mt-1 text-sm text-gray-700">
-                                  {visit.concerns}
-                                </p>
-                              </div>
-                            )}
-                          </div>
-                        )}
                       </div>
                     ))}
                   </div>
                 </section>
               )}
+
+            {/* =================================================
+                REFERRAL DETAILS
+            ================================================= */}
+
+            {Array.isArray(woman?.monthly_referrals) &&
+              woman.monthly_referrals.length > 0 && (
+                <section>
+                  <SectionTitle
+                    icon={AlertCircle}
+                    title="Referral Details"
+                    description="Pregnancy referrals recorded during this reporting month."
+                  />
+                  <div className="space-y-3">
+                    {woman.monthly_referrals.map((referral, referralIndex) => (
+                      <div
+                        key={
+                          referral.id ||
+                          `${woman.pregnant_woman_id}-referral-${referralIndex}`
+                        }
+                        className="rounded-lg border border-gray-200 bg-white p-4"
+                      >
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                          <InfoItem
+                            icon={CalendarDays}
+                            label="Referral Date"
+                            value={formatDate(referral.referral_date)}
+                          />
+                          <InfoItem
+                            label="Reason"
+                            value={referral.reason || referral.referral_reason}
+                          />
+                          <InfoItem
+                            label="Facility / Referred To"
+                            value={
+                              referral.referred_to ||
+                              referral.facility_name ||
+                              referral.referral_facility
+                            }
+                          />
+                          <InfoItem label="Urgency" value={referral.urgency} />
+                          <InfoItem label="Status" value={referral.status} />
+                          <InfoItem
+                            label="Notes"
+                            value={referral.notes || referral.remarks}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+            {/* =================================================
+                ANC DETAILS IF INCLUDED IN SNAPSHOT
+            ================================================= */}
+
+            {Array.isArray(ancVisits) && ancVisits.length > 0 && (
+              <section>
+                <SectionTitle
+                  icon={Stethoscope}
+                  title="ANC Visit Details"
+                  description="ANC visits included in the submitted report snapshot."
+                />
+
+                <div className="space-y-3">
+                  {ancVisits.map((visit, visitIndex) => (
+                    <div
+                      key={
+                        visit.id ||
+                        `${woman.pregnant_woman_id}-anc-${visitIndex}`
+                      }
+                      className="rounded-lg border border-gray-200 bg-white p-4"
+                    >
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div>
+                          <p className="font-semibold text-gray-900">
+                            ANC Visit #{visit.visit_number || visitIndex + 1}
+                          </p>
+
+                          <p className="text-sm text-gray-500">
+                            {formatDate(visit.visit_date)}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                          {visit.gestational_age_weeks !== undefined &&
+                            visit.gestational_age_weeks !== null && (
+                              <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-700">
+                                GA: {visit.gestational_age_weeks} weeks
+                              </span>
+                            )}
+
+                          {visit.fetal_heart_rate !== undefined &&
+                            visit.fetal_heart_rate !== null && (
+                              <span className="rounded-full bg-pink-50 px-2.5 py-1 text-xs font-medium text-pink-700">
+                                FHR: {visit.fetal_heart_rate} bpm
+                              </span>
+                            )}
+                        </div>
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        <InfoItem
+                          label="BP"
+                          value={
+                            visit.systolic_bp && visit.diastolic_bp
+                              ? `${visit.systolic_bp}/${visit.diastolic_bp}`
+                              : "—"
+                          }
+                        />
+
+                        <InfoItem
+                          label="Weight"
+                          value={
+                            visit.weight_kg ? `${visit.weight_kg} kg` : "—"
+                          }
+                        />
+
+                        <InfoItem
+                          label="Fundal Height"
+                          value={
+                            visit.fundal_height_cm
+                              ? `${visit.fundal_height_cm} cm`
+                              : "—"
+                          }
+                        />
+
+                        <InfoItem
+                          label="Temperature"
+                          value={
+                            visit.temperature ? `${visit.temperature} °C` : "—"
+                          }
+                        />
+                      </div>
+
+                      {(visit.overall_assessment ||
+                        visit.management_advice ||
+                        visit.concerns) && (
+                        <div className="mt-3 space-y-2">
+                          {visit.overall_assessment && (
+                            <div className="rounded-lg bg-gray-50 p-3">
+                              <p className="text-xs font-semibold text-gray-500">
+                                Assessment
+                              </p>
+
+                              <p className="mt-1 text-sm text-gray-700">
+                                {visit.overall_assessment}
+                              </p>
+                            </div>
+                          )}
+
+                          {visit.management_advice && (
+                            <div className="rounded-lg bg-gray-50 p-3">
+                              <p className="text-xs font-semibold text-gray-500">
+                                Management / Advice
+                              </p>
+
+                              <p className="mt-1 text-sm text-gray-700">
+                                {visit.management_advice}
+                              </p>
+                            </div>
+                          )}
+
+                          {visit.concerns && (
+                            <div className="rounded-lg bg-gray-50 p-3">
+                              <p className="text-xs font-semibold text-gray-500">
+                                Concerns
+                              </p>
+
+                              <p className="mt-1 text-sm text-gray-700">
+                                {visit.concerns}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
             {/* =================================================
                 MOBILE COUNTS
@@ -737,6 +975,9 @@ export default function MidwifeMonthlyReportDetails() {
 
   const homeVisitsCompleted =
     Number(pregnancyTracking.completed_home_visits) || 0;
+
+  const monitoringSummary = reportData.monitoring_summary || {};
+  const deliveriesSummary = reportData.deliveries || {};
 
   /* ==========================================================
      SORT WOMEN
@@ -1073,7 +1314,7 @@ export default function MidwifeMonthlyReportDetails() {
           <SectionTitle
             icon={ClipboardCheck}
             title="Pregnancy Summary"
-            description="Summary of pregnancy activities reported by the BHW for this month."
+            description="Summary of pregnancy activities and monitoring totals reported by the BHW for this month."
           />
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -1110,6 +1351,108 @@ export default function MidwifeMonthlyReportDetails() {
                 {homeVisitsCompleted}
               </p>
             </div>
+          </div>
+        </div>
+
+        {/* ====================================================
+            MONITORING & FOLLOW-UP SUMMARY
+        ===================================================== */}
+
+        <div>
+          <SectionTitle
+            icon={HeartPulse}
+            title="Monitoring & Follow-up Summary"
+            description="Counts captured in the BHW's submitted report for the selected reporting period."
+          />
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {[
+              {
+                label: "High Risk / Flagged",
+                value: monitoringSummary.high_risk_or_flagged,
+                color: "red",
+              },
+              {
+                label: "Marked for Review",
+                value: monitoringSummary.for_review,
+                color: "orange",
+              },
+              {
+                label: "Potentially Overdue Home Follow-ups",
+                value: monitoringSummary.overdue_home_followups,
+                color: "amber",
+              },
+              {
+                label: "No ANC Recorded This Month",
+                value: monitoringSummary.no_anc_record_this_month,
+                color: "blue",
+              },
+              {
+                label: "Urgent / High Open Referrals",
+                value: monitoringSummary.urgent_open_referrals,
+                color: "purple",
+              },
+              {
+                label: "No Upcoming Home Visit",
+                value: monitoringSummary.without_upcoming_home_visit,
+                color: "gray",
+              },
+            ].map((item) => (
+              <div
+                key={item.label}
+                className="rounded-xl border border-gray-200 bg-white p-4"
+              >
+                <p className="text-sm text-gray-600">{item.label}</p>
+                <p className="mt-2 text-2xl font-bold text-gray-900">
+                  {Number(item.value) || 0}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <p className="mt-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+            A lack of ANC records in this snapshot does not by itself prove a
+            missed appointment. Confirm the woman's actual schedule before
+            treating it as a missed checkup.
+          </p>
+        </div>
+
+        {/* ====================================================
+            DELIVERY SUMMARY
+        ===================================================== */}
+
+        <div>
+          <SectionTitle
+            icon={Baby}
+            title="Delivery Summary"
+            description="Delivery totals calculated and saved with the submitted monthly report."
+          />
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            <InfoItem
+              icon={Baby}
+              label="Total Deliveries"
+              value={Number(deliveriesSummary.total) || 0}
+            />
+            <InfoItem
+              icon={Home}
+              label="Health Facility Deliveries"
+              value={Number(deliveriesSummary.at_health_facility) || 0}
+            />
+            <InfoItem
+              icon={Home}
+              label="Home Deliveries"
+              value={Number(deliveriesSummary.home_delivery) || 0}
+            />
+            <InfoItem
+              icon={Users}
+              label="Delivered with 4+ Home Visits"
+              value={Number(deliveriesSummary.with_completed_4_hv) || 0}
+            />
+            <InfoItem
+              icon={ClipboardCheck}
+              label="PNV4"
+              value={Number(deliveriesSummary.with_pnv4) || 0}
+            />
           </div>
         </div>
 

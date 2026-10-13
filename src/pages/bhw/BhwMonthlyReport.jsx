@@ -45,6 +45,15 @@ const EMPTY_REPORT = {
     completed_home_visits: 0,
   },
 
+  monitoring_summary: {
+    high_risk_or_flagged: 0,
+    for_review: 0,
+    overdue_home_followups: 0,
+    no_anc_record_this_month: 0,
+    urgent_open_referrals: 0,
+    without_upcoming_home_visit: 0,
+  },
+
   pregnant_women: [],
 
   prenatal_checkup: {
@@ -279,11 +288,18 @@ function mergeReport(existing, generated) {
 
     pregnant_women: generated.pregnant_women,
 
+    monitoring_summary: {
+      ...EMPTY_REPORT.monitoring_summary,
+      ...(existingReport.monitoring_summary || {}),
+      ...(generated.monitoring_summary || {}),
+    },
+
     prenatal_checkup: generated.prenatal_checkup,
 
     deliveries: {
       ...EMPTY_REPORT.deliveries,
       ...(existingReport.deliveries || {}),
+      ...(generated.deliveries || {}),
     },
 
     postpartum: {
@@ -514,7 +530,88 @@ function PregnantWomanCard({ woman, index, expanded, onToggle }) {
               />
 
               <InfoItem label="Pregnancy Status" value={pregnancy.status} />
+
+              <InfoItem
+                label="Pregnancy Outcome"
+                value={woman.pregnancy_outcome?.pregnancy_outcome}
+              />
+
+              <InfoItem
+                label="Date of Delivery"
+                value={formatDate(woman.pregnancy_outcome?.date_of_delivery)}
+              />
+
+              <InfoItem
+                label="Place of Delivery"
+                value={woman.pregnancy_outcome?.place_of_delivery}
+              />
+
+              <InfoItem
+                label="Birth Status"
+                value={woman.pregnancy_outcome?.birth_status}
+              />
+
+              <InfoItem
+                label="Attended By"
+                value={woman.pregnancy_outcome?.attended_by}
+              />
             </div>
+          </div>
+
+          {/* MONITORING AND FOLLOW-UP */}
+
+          <div>
+            <div className="mb-3 flex items-center gap-2">
+              <AlertCircle size={18} className="text-orange-600" />
+              <h4 className="font-semibold text-gray-800">
+                Monitoring & Follow-up
+              </h4>
+            </div>
+
+            <div className="grid gap-4 rounded-lg border border-orange-200 bg-orange-50/50 p-4 sm:grid-cols-2 lg:grid-cols-3">
+              <InfoItem
+                label="Recorded Pregnancy Status"
+                value={
+                  woman.monitoring?.pregnancy_status ||
+                  pregnancy.status ||
+                  "Not recorded"
+                }
+              />
+              <InfoItem
+                label="Next Home Visit"
+                value={formatDate(woman.monitoring?.next_home_visit_date)}
+              />
+              <InfoItem
+                label="Urgent / High Referrals"
+                value={woman.monitoring?.urgent_open_referrals ?? 0}
+              />
+              <InfoItem
+                label="ANC This Month"
+                value={
+                  monthlyAnc.length > 0
+                    ? `${monthlyAnc.length} recorded`
+                    : "No ANC recorded this month"
+                }
+              />
+              <InfoItem
+                label="Home Visits This Month"
+                value={`${monthlyHomeVisits.length} recorded`}
+              />
+              <InfoItem
+                label="Monitoring Flags"
+                value={
+                  woman.monitoring?.flags?.length
+                    ? woman.monitoring.flags.join("; ")
+                    : "No follow-up flags from available records"
+                }
+              />
+            </div>
+            <p className="mt-2 text-xs text-gray-500">
+              These indicators are generated from recorded pregnancy status, ANC
+              visits, home-visit dates, and referral urgency/status. “No ANC
+              recorded” means no visit was found in this reporting month; it
+              does not by itself confirm a missed scheduled appointment.
+            </p>
           </div>
 
           {/* LOCATION */}
@@ -1009,6 +1106,13 @@ export default function BhwMonthlyReport() {
 
         pregnant_women: [],
 
+        deliveries: {
+          total: 0,
+          at_health_facility: 0,
+          with_completed_4_hv: 0,
+          home_delivery: 0,
+        },
+
         prenatal_checkup: {
           first_trimester: [],
           second_trimester: [],
@@ -1053,6 +1157,13 @@ export default function BhwMonthlyReport() {
         },
 
         pregnant_women: [],
+
+        deliveries: {
+          total: 0,
+          at_health_facility: 0,
+          with_completed_4_hv: 0,
+          home_delivery: 0,
+        },
 
         prenatal_checkup: {
           first_trimester: [],
@@ -1120,6 +1231,13 @@ export default function BhwMonthlyReport() {
 
         pregnant_women: [],
 
+        deliveries: {
+          total: 0,
+          at_health_facility: 0,
+          with_completed_4_hv: 0,
+          home_delivery: 0,
+        },
+
         prenatal_checkup: {
           first_trimester: [],
           second_trimester: [],
@@ -1170,6 +1288,13 @@ export default function BhwMonthlyReport() {
         },
 
         pregnant_women: [],
+
+        deliveries: {
+          total: 0,
+          at_health_facility: 0,
+          with_completed_4_hv: 0,
+          home_delivery: 0,
+        },
 
         prenatal_checkup: {
           first_trimester: [],
@@ -1312,6 +1437,76 @@ export default function BhwMonthlyReport() {
           isDateInRange(referral.referral_date, start, end),
         );
 
+        // Monitoring indicators use records already stored in Supabase.
+        // They are follow-up prompts, not a clinical diagnosis.
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const nextHomeVisitDates = homeVisits
+          .map((visit) => visit.next_visit_date)
+          .filter(Boolean)
+          .sort(
+            (a, b) => new Date(`${a}T00:00:00`) - new Date(`${b}T00:00:00`),
+          );
+
+        const upcomingHomeVisitDate =
+          nextHomeVisitDates.find(
+            (date) => new Date(`${date}T00:00:00`) >= today,
+          ) || null;
+
+        const pastDueHomeVisitDates = nextHomeVisitDates.filter(
+          (date) => new Date(`${date}T00:00:00`) < today,
+        );
+
+        const latestPastDueHomeVisitDate =
+          pastDueHomeVisitDates[pastDueHomeVisitDates.length - 1] || null;
+
+        const hasVisitAfterLatestDueDate =
+          latestPastDueHomeVisitDate &&
+          homeVisits.some(
+            (visit) =>
+              visit.visit_date &&
+              new Date(`${visit.visit_date}T00:00:00`) >=
+                new Date(`${latestPastDueHomeVisitDate}T00:00:00`),
+          );
+
+        const overdueHomeFollowup =
+          !upcomingHomeVisitDate &&
+          Boolean(latestPastDueHomeVisitDate) &&
+          !hasVisitAfterLatestDueDate;
+
+        const pregnancyStatus = String(pregnancy.status || "").toLowerCase();
+        const flaggedHighRisk =
+          pregnancyStatus.includes("high_risk") ||
+          pregnancyStatus.includes("high risk");
+        const flaggedForReview =
+          pregnancyStatus.includes("for_review") ||
+          pregnancyStatus.includes("for review");
+
+        const urgentOpenReferrals = referrals.filter((referral) => {
+          const urgency = String(referral.urgency || "").toLowerCase();
+          const referralStatus = String(referral.status || "").toLowerCase();
+          const urgent = urgency === "urgent" || urgency === "high";
+          const resolved = ["resolved", "closed", "completed", "done"].includes(
+            referralStatus,
+          );
+          return urgent && !resolved;
+        });
+
+        const monitoringFlags = [];
+        if (flaggedHighRisk)
+          monitoringFlags.push("Marked high risk in pregnancy record");
+        if (flaggedForReview)
+          monitoringFlags.push("Marked for review in pregnancy record");
+        if (overdueHomeFollowup)
+          monitoringFlags.push("Home-visit follow-up date may be overdue");
+        if (monthlyAnc.length === 0)
+          monitoringFlags.push("No ANC visit recorded this month");
+        if (urgentOpenReferrals.length > 0)
+          monitoringFlags.push("Urgent/high referral needs status review");
+        if (!upcomingHomeVisitDate)
+          monitoringFlags.push("No upcoming home-visit date recorded");
+
         const referenceDate = new Date(year, month, 0);
 
         return {
@@ -1340,12 +1535,31 @@ export default function BhwMonthlyReport() {
 
           pregnancy,
 
+          pregnancy_outcome: {
+            place_of_delivery: pregnancy.place_of_delivery || null,
+            date_of_delivery: pregnancy.date_of_delivery || null,
+            pregnancy_outcome: pregnancy.pregnancy_outcome || null,
+            birth_status: pregnancy.birth_status || null,
+            attended_by: pregnancy.attended_by || null,
+          },
+
           birth_plan: Boolean(
             pregnancy.birth_plan ||
             monthlyAnc.some((visit) => visit.birth_plan),
           ),
 
           mc_book: Boolean(pregnancy.mc_book_number),
+
+          monitoring: {
+            pregnancy_status: pregnancy.status || "Not recorded",
+            flagged_high_risk: flaggedHighRisk,
+            flagged_for_review: flaggedForReview,
+            overdue_home_followup: overdueHomeFollowup,
+            next_home_visit_date: upcomingHomeVisitDate,
+            no_anc_record_this_month: monthlyAnc.length === 0,
+            urgent_open_referrals: urgentOpenReferrals.length,
+            flags: monitoringFlags,
+          },
 
           monthly_anc: monthlyAnc,
 
@@ -1387,6 +1601,49 @@ export default function BhwMonthlyReport() {
     const womenWithBirthPlan = pregnantWomen.filter(
       (woman) => woman.birth_plan,
     );
+
+    const deliveredThisMonth = pregnantWomen.filter((woman) =>
+      isDateInRange(woman.pregnancy_outcome?.date_of_delivery, start, end),
+    );
+
+    const autoDeliverySummary = {
+      total: deliveredThisMonth.length,
+      at_health_facility: deliveredThisMonth.filter((woman) =>
+        /health|facility|hospital|clinic/i.test(
+          woman.pregnancy_outcome?.place_of_delivery || "",
+        ),
+      ).length,
+      // PNV4 is not stored in the reviewed pregnancy/visit fields, so that
+      // value remains manually editable in the report.
+      with_completed_4_hv: deliveredThisMonth.filter(
+        (woman) => (woman.all_home_visits || []).length >= 4,
+      ).length,
+      home_delivery: deliveredThisMonth.filter((woman) =>
+        /home/i.test(woman.pregnancy_outcome?.place_of_delivery || ""),
+      ).length,
+    };
+
+    const monitoringSummary = {
+      high_risk_or_flagged: pregnantWomen.filter(
+        (woman) => woman.monitoring?.flagged_high_risk,
+      ).length,
+      for_review: pregnantWomen.filter(
+        (woman) => woman.monitoring?.flagged_for_review,
+      ).length,
+      overdue_home_followups: pregnantWomen.filter(
+        (woman) => woman.monitoring?.overdue_home_followup,
+      ).length,
+      no_anc_record_this_month: pregnantWomen.filter(
+        (woman) => woman.monitoring?.no_anc_record_this_month,
+      ).length,
+      urgent_open_referrals: pregnantWomen.reduce(
+        (sum, woman) => sum + (woman.monitoring?.urgent_open_referrals || 0),
+        0,
+      ),
+      without_upcoming_home_visit: pregnantWomen.filter(
+        (woman) => !woman.monitoring?.next_home_visit_date,
+      ).length,
+    };
 
     /* -------------------------------------------------------
        11. ANC GROUPS
@@ -1442,6 +1699,10 @@ export default function BhwMonthlyReport() {
       },
 
       pregnant_women: pregnantWomen,
+
+      monitoring_summary: monitoringSummary,
+
+      deliveries: autoDeliverySummary,
 
       prenatal_checkup: prenatalCheckup,
     };
@@ -2191,6 +2452,85 @@ export default function BhwMonthlyReport() {
         </SectionCard>
 
         {/* =================================================
+            MONITORING AND FOLLOW-UP SUMMARY
+        ================================================= */}
+
+        <SectionCard
+          title="Monitoring & Follow-up Summary"
+          icon={AlertCircle}
+          description="Automatically calculated from available pregnancy status, ANC, home-visit, and referral records."
+        >
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+              <p className="text-xs font-semibold uppercase text-red-700">
+                Marked High Risk
+              </p>
+              <p className="mt-2 text-3xl font-bold text-red-800">
+                {report.monitoring_summary?.high_risk_or_flagged ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-red-700">
+                Based on saved pregnancy status
+              </p>
+            </div>
+            <div className="rounded-lg border border-yellow-200 bg-yellow-50 p-4">
+              <p className="text-xs font-semibold uppercase text-yellow-700">
+                For Review
+              </p>
+              <p className="mt-2 text-3xl font-bold text-yellow-800">
+                {report.monitoring_summary?.for_review ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-yellow-700">
+                Based on saved pregnancy status
+              </p>
+            </div>
+            <div className="rounded-lg border border-orange-200 bg-orange-50 p-4">
+              <p className="text-xs font-semibold uppercase text-orange-700">
+                Potentially Overdue Home Follow-up
+              </p>
+              <p className="mt-2 text-3xl font-bold text-orange-800">
+                {report.monitoring_summary?.overdue_home_followups ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-orange-700">
+                Review dates before taking action
+              </p>
+            </div>
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+              <p className="text-xs font-semibold uppercase text-blue-700">
+                No ANC Recorded This Month
+              </p>
+              <p className="mt-2 text-3xl font-bold text-blue-800">
+                {report.monitoring_summary?.no_anc_record_this_month ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-blue-700">
+                Not proof of a missed scheduled checkup
+              </p>
+            </div>
+            <div className="rounded-lg border border-red-200 bg-red-50 p-4">
+              <p className="text-xs font-semibold uppercase text-red-700">
+                Urgent / High Referrals
+              </p>
+              <p className="mt-2 text-3xl font-bold text-red-800">
+                {report.monitoring_summary?.urgent_open_referrals ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-red-700">
+                Referral records not marked resolved/closed/completed
+              </p>
+            </div>
+            <div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+              <p className="text-xs font-semibold uppercase text-gray-600">
+                No Upcoming Home Visit Date
+              </p>
+              <p className="mt-2 text-3xl font-bold text-gray-800">
+                {report.monitoring_summary?.without_upcoming_home_visit ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-gray-600">
+                Check whether follow-up scheduling is needed
+              </p>
+            </div>
+          </div>
+        </SectionCard>
+
+        {/* =================================================
             PREGNANT WOMEN
         ================================================= */}
 
@@ -2302,7 +2642,7 @@ export default function BhwMonthlyReport() {
         <SectionCard
           title="Deliveries This Month"
           icon={HeartPulse}
-          description="These fields are currently manual because delivery-related values require additional business rules for monthly reporting."
+          description="Delivery counts are calculated from recorded pregnancy outcomes and delivery dates. PNV4 remains manual because no PNV4 field was found in the reviewed records."
         >
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <NumberInput

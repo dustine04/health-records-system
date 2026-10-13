@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+
 import {
   Baby,
   CalendarDays,
@@ -16,40 +17,157 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+
 import { supabase } from "../../lib/supabase";
 
 /* =========================================================
+
    HELPERS
-========================================================= */
+
+\========================================================= */
 
 const STATUS_LABELS = {
   draft: "Draft",
+
   submitted: "Submitted",
+
   returned: "Returned",
+
   approved: "Approved",
 };
 
 const STATUS_CLASSES = {
   draft: "bg-gray-100 text-gray-700",
+
   submitted: "bg-blue-100 text-blue-700",
+
   returned: "bg-orange-100 text-orange-700",
+
   approved: "bg-green-100 text-green-700",
 };
 
 const MONTHS = [
   "January",
+
   "February",
+
   "March",
+
   "April",
+
   "May",
+
   "June",
+
   "July",
+
   "August",
+
   "September",
+
   "October",
+
   "November",
+
   "December",
 ];
+
+const CHILD_MONITORING_SECTIONS = [
+  {
+    key: "newborn",
+    title: "Newborn Tracking",
+    columns: [
+      ["child_name", "Child"],
+      ["delivery_date", "Delivery Date"],
+      ["place_of_delivery", "Place of Delivery"],
+      ["birth_weight_kg", "Birth Weight (kg)"],
+      ["newborn_screening_done", "Screening Done"],
+      ["newborn_screening_date", "Screening Date"],
+      ["newborn_screening_result", "Screening Result"],
+      ["exclusive_breastfeeding", "Exclusive Breastfeeding"],
+      ["remarks", "Remarks"],
+    ],
+  },
+  {
+    key: "growth",
+    title: "Growth Monitoring",
+    columns: [
+      ["child_name", "Child"],
+      ["monitoring_date", "Date"],
+      ["weight_kg", "Weight (kg)"],
+      ["height_cm", "Height (cm)"],
+      ["muac_cm", "MUAC (cm)"],
+    ],
+  },
+  {
+    key: "immunization",
+    title: "Immunization",
+    columns: [
+      ["child_name", "Child"],
+      ["vaccination_date", "Date"],
+      ["vaccine_name", "Vaccine"],
+      ["dose", "Dose"],
+      ["facility", "Facility"],
+      ["remarks", "Remarks"],
+    ],
+  },
+  {
+    key: "feeding",
+    title: "Breastfeeding & Complementary Feeding",
+    columns: [
+      ["child_name", "Child"],
+      ["record_date", "Date"],
+      ["breastfeeding_status", "Breastfeeding"],
+      ["complementary_feeding_status", "Complementary Feeding"],
+      ["feeding_notes", "Notes"],
+    ],
+  },
+  {
+    key: "micronutrients",
+    title: "Micronutrient Supplementation",
+    columns: [
+      ["child_name", "Child"],
+      ["supplementation_date", "Date"],
+      ["supplement_name", "Supplement"],
+      ["dosage", "Dosage"],
+      ["status", "Status"],
+      ["remarks", "Remarks"],
+    ],
+  },
+  {
+    key: "deworming",
+    title: "Deworming",
+    columns: [
+      ["child_name", "Child"],
+      ["deworming_date", "Date"],
+      ["medicine", "Medicine"],
+      ["dosage", "Dosage"],
+      ["status", "Status"],
+      ["remarks", "Remarks"],
+    ],
+  },
+  {
+    key: "followups",
+    title: "SOAP / Follow-up",
+    columns: [
+      ["child_name", "Child"],
+      ["followup_date", "Date"],
+      ["subjective", "Subjective"],
+      ["objective", "Objective"],
+      ["assessment", "Assessment"],
+      ["plan", "Plan"],
+      ["referral", "Referral"],
+      ["remarks", "Remarks"],
+    ],
+  },
+];
+
+function formatMonitoringValue(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
 
 function getCurrentYear() {
   return new Date().getFullYear();
@@ -66,7 +184,9 @@ function formatDate(dateValue) {
 
   return date.toLocaleDateString("en-US", {
     year: "numeric",
+
     month: "short",
+
     day: "numeric",
   });
 }
@@ -75,8 +195,11 @@ function getUserFullName(user) {
   if (!user) return "-";
 
   const name = [user.first_name, user.middle_name, user.last_name]
+
     .filter(Boolean)
+
     .join(" ")
+
     .trim();
 
   return name || user.full_name || user.name || user.username || "-";
@@ -86,37 +209,57 @@ function getEmptyReportData() {
   return {
     age_0_11: {
       male: 0,
+
       female: 0,
+
       trans_out_male: 0,
+
       trans_out_female: 0,
+
       deceased_male: 0,
+
       deceased_female: 0,
     },
 
     age_0_12: {
       male: 0,
+
       female: 0,
+
       trans_out_male: 0,
+
       trans_out_female: 0,
+
       deceased_male: 0,
+
       deceased_female: 0,
     },
 
     age_13_23: {
       male: 0,
+
       female: 0,
+
       trans_out_male: 0,
+
       trans_out_female: 0,
+
       deceased_male: 0,
+
       deceased_female: 0,
     },
 
     age_24_59: {
       male: 0,
+
       female: 0,
+
       trans_out_male: 0,
+
       trans_out_female: 0,
+
       deceased_male: 0,
+
       deceased_female: 0,
     },
   };
@@ -135,6 +278,7 @@ function normalizeReportData(data) {
     if (data[category] && typeof data[category] === "object") {
       empty[category] = {
         ...empty[category],
+
         ...data[category],
       };
     }
@@ -148,8 +292,10 @@ function getTotalForCategory(category) {
 }
 
 /* =========================================================
+
    STATUS BADGE
-========================================================= */
+
+\========================================================= */
 
 function StatusBadge({ status }) {
   return (
@@ -170,17 +316,24 @@ function StatusBadge({ status }) {
 }
 
 /* =========================================================
+
    MAIN COMPONENT
-========================================================= */
+
+\========================================================= */
 
 export default function BnsChildMonthlyReports() {
   const [user, setUser] = useState(null);
 
   const [reports, setReports] = useState([]);
+
   const [bnsUsers, setBnsUsers] = useState({});
+
   const [barangayMap, setBarangayMap] = useState({});
+
   const [localAreaMap, setLocalAreaMap] = useState({});
+
   const [loading, setLoading] = useState(true);
+
   const [refreshing, setRefreshing] = useState(false);
 
   const [errorMessage, setErrorMessage] = useState("");
@@ -199,12 +352,303 @@ export default function BnsChildMonthlyReports() {
 
   const [savingReview, setSavingReview] = useState(false);
 
+  // Load the current month's monitoring records when a report is opened.
+  // The BNS may have entered monitoring records after the monthly report was
+  // first submitted, so the saved JSON snapshot alone may be out of date.
+  const [liveMonitoring, setLiveMonitoring] = useState(null);
+  const [liveMonitoringLoading, setLiveMonitoringLoading] = useState(false);
+  const [liveMonitoringError, setLiveMonitoringError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLiveMonitoring() {
+      if (
+        !selectedReport?.bns_id ||
+        !selectedReport?.report_month ||
+        !selectedReport?.report_year
+      ) {
+        setLiveMonitoring(null);
+        setLiveMonitoringError("");
+        return;
+      }
+
+      setLiveMonitoring(null);
+      setLiveMonitoringError("");
+      setLiveMonitoringLoading(true);
+
+      try {
+        const bnsId = selectedReport.bns_id;
+        const reportMonth = Number(selectedReport.report_month);
+        const reportYear = Number(selectedReport.report_year);
+        const startDate = `${reportYear}-${String(reportMonth).padStart(2, "0")}-01`;
+        const endDate = new Date(reportYear, reportMonth, 0)
+          .toISOString()
+          .slice(0, 10);
+
+        const { data: assignments, error: assignmentError } = await supabase
+          .from("worker_area_assignments")
+          .select(
+            "worker_id, local_area_id, local_areas(id, name, type, barangay_id)",
+          )
+          .eq("worker_id", bnsId)
+          .eq("is_active", true);
+        if (assignmentError) throw assignmentError;
+
+        const areaIds = [
+          ...new Set(
+            (assignments || [])
+              .filter((item) => {
+                const area = item.local_areas;
+                return (
+                  area?.id &&
+                  String(area.barangay_id) ===
+                    String(selectedReport.barangay_id)
+                );
+              })
+              .map((item) => item.local_area_id)
+              .filter(Boolean),
+          ),
+        ];
+
+        if (areaIds.length === 0) {
+          if (!cancelled)
+            setLiveMonitoring({
+              reportId: selectedReport.id,
+              data: {
+                newborn: [],
+                growth: [],
+                immunization: [],
+                feeding: [],
+                micronutrients: [],
+                deworming: [],
+                followups: [],
+              },
+            });
+          return;
+        }
+
+        const { data: households, error: householdError } = await supabase
+          .from("households")
+          .select("id, local_area_id")
+          .in("local_area_id", areaIds);
+        if (householdError) throw householdError;
+
+        const householdIds = [
+          ...new Set((households || []).map((item) => item.id).filter(Boolean)),
+        ];
+        if (householdIds.length === 0) {
+          if (!cancelled)
+            setLiveMonitoring({
+              reportId: selectedReport.id,
+              data: {
+                newborn: [],
+                growth: [],
+                immunization: [],
+                feeding: [],
+                micronutrients: [],
+                deworming: [],
+                followups: [],
+              },
+            });
+          return;
+        }
+
+        const { data: residents, error: residentError } = await supabase
+          .from("residents")
+          .select(
+            "id, first_name, middle_name, last_name, household_id, birth_date",
+          )
+          .in("household_id", householdIds);
+        if (residentError) throw residentError;
+
+        const residentById = new Map(
+          (residents || []).map((resident) => [String(resident.id), resident]),
+        );
+        const residentIds = [...residentById.keys()];
+        if (residentIds.length === 0) {
+          if (!cancelled)
+            setLiveMonitoring({
+              reportId: selectedReport.id,
+              data: {
+                newborn: [],
+                growth: [],
+                immunization: [],
+                feeding: [],
+                micronutrients: [],
+                deworming: [],
+                followups: [],
+              },
+            });
+          return;
+        }
+
+        const { data: childRecords, error: childRecordError } = await supabase
+          .from("child_health_records")
+          .select("id, resident_id")
+          .in("resident_id", residentIds);
+        if (childRecordError) throw childRecordError;
+
+        const healthRecordIds = [
+          ...new Set(
+            (childRecords || []).map((item) => item.id).filter(Boolean),
+          ),
+        ];
+        const childByHealthRecordId = new Map();
+        (childRecords || []).forEach((record) => {
+          const resident = residentById.get(String(record.resident_id));
+          if (resident) childByHealthRecordId.set(String(record.id), resident);
+        });
+
+        const empty = {
+          newborn: [],
+          growth: [],
+          immunization: [],
+          feeding: [],
+          micronutrients: [],
+          deworming: [],
+          followups: [],
+        };
+        if (healthRecordIds.length === 0) {
+          if (!cancelled)
+            setLiveMonitoring({ reportId: selectedReport.id, data: empty });
+          return;
+        }
+
+        const results = await Promise.all([
+          supabase
+            .from("child_newborn_tracking")
+            .select("*")
+            .in("child_health_record_id", healthRecordIds),
+          supabase
+            .from("child_monitoring")
+            .select("*")
+            .in("child_health_record_id", healthRecordIds)
+            .gte("monitoring_date", startDate)
+            .lte("monitoring_date", endDate)
+            .order("monitoring_date", { ascending: false }),
+          supabase
+            .from("child_immunization")
+            .select("*")
+            .in("child_health_record_id", healthRecordIds)
+            .gte("vaccination_date", startDate)
+            .lte("vaccination_date", endDate)
+            .order("vaccination_date", { ascending: false }),
+          supabase
+            .from("child_feeding")
+            .select("*")
+            .in("child_health_record_id", healthRecordIds)
+            .gte("record_date", startDate)
+            .lte("record_date", endDate)
+            .order("record_date", { ascending: false }),
+          supabase
+            .from("child_micronutrients")
+            .select("*")
+            .in("child_health_record_id", healthRecordIds)
+            .gte("supplementation_date", startDate)
+            .lte("supplementation_date", endDate)
+            .order("supplementation_date", { ascending: false }),
+          supabase
+            .from("child_deworming")
+            .select("*")
+            .in("child_health_record_id", healthRecordIds)
+            .gte("deworming_date", startDate)
+            .lte("deworming_date", endDate)
+            .order("deworming_date", { ascending: false }),
+          supabase
+            .from("child_followups")
+            .select("*")
+            .in("child_health_record_id", healthRecordIds)
+            .gte("followup_date", startDate)
+            .lte("followup_date", endDate)
+            .order("followup_date", { ascending: false }),
+        ]);
+        const labels = [
+          "Newborn tracking",
+          "Growth monitoring",
+          "Immunization",
+          "Feeding",
+          "Micronutrients",
+          "Deworming",
+          "Follow-ups",
+        ];
+        results.forEach((result, index) => {
+          if (result.error)
+            throw new Error(`${labels[index]}: ${result.error.message}`);
+        });
+
+        const attachChild = (record) => {
+          const resident = childByHealthRecordId.get(
+            String(record.child_health_record_id),
+          );
+          return {
+            ...record,
+            child_name: resident
+              ? [resident.first_name, resident.middle_name, resident.last_name]
+                  .filter(Boolean)
+                  .join(" ")
+              : "Unknown child",
+          };
+        };
+        const newbornDateFields = [
+          "delivery_date",
+          "home_visit_24hrs_date",
+          "home_visit_1week_date",
+          "home_visit_2_3weeks_date",
+          "home_visit_4_6weeks_date",
+          "newborn_screening_date",
+        ];
+        const monitoringData = {
+          newborn: (results[0].data || [])
+            .filter((record) =>
+              newbornDateFields.some(
+                (field) =>
+                  record[field] &&
+                  record[field] >= startDate &&
+                  record[field] <= endDate,
+              ),
+            )
+            .map(attachChild),
+          growth: (results[1].data || []).map(attachChild),
+          immunization: (results[2].data || []).map(attachChild),
+          feeding: (results[3].data || []).map(attachChild),
+          micronutrients: (results[4].data || []).map(attachChild),
+          deworming: (results[5].data || []).map(attachChild),
+          followups: (results[6].data || []).map(attachChild),
+        };
+
+        if (!cancelled)
+          setLiveMonitoring({
+            reportId: selectedReport.id,
+            data: monitoringData,
+          });
+      } catch (error) {
+        console.error(
+          "Unable to load live child monitoring records for report:",
+          error,
+        );
+        if (!cancelled)
+          setLiveMonitoringError(
+            error.message || "Unable to load current child monitoring records.",
+          );
+      } finally {
+        if (!cancelled) setLiveMonitoringLoading(false);
+      }
+    }
+
+    loadLiveMonitoring();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedReport?.id]);
+
   useEffect(() => {
     let cancelled = false;
 
     async function initialize() {
       try {
         setLoading(true);
+
         setErrorMessage("");
 
         const storedUser = localStorage.getItem("user");
@@ -238,6 +682,7 @@ export default function BnsChildMonthlyReports() {
         setUser(parsedUser);
 
         // Pass the user directly instead of updating it again inside loadReports.
+
         await loadReports(parsedUser, () => cancelled);
       } catch (error) {
         if (cancelled) return;
@@ -245,10 +690,15 @@ export default function BnsChildMonthlyReports() {
         console.error("Error initializing BNS reports:", error);
 
         setReports([]);
+
         setBnsUsers({});
+
         setBarangayMap({});
+
         setLocalAreaMap({});
+
         setErrorMessage(error.message || "Unable to initialize reports.");
+
         setLoading(false);
       }
     }
@@ -261,7 +711,9 @@ export default function BnsChildMonthlyReports() {
   }, []);
 
   /* =======================================================
+
      LOAD REPORTS
+
   ======================================================= */
 
   useEffect(() => {
@@ -273,19 +725,26 @@ export default function BnsChildMonthlyReports() {
   async function loadReports(currentUser = user, isCancelled = () => false) {
     try {
       setLoading(true);
+
       setErrorMessage("");
 
       // Get the currently logged-in Midwife.
+
       const storedUser = localStorage.getItem("user");
 
       if (!storedUser) {
         setReports([]);
+
         setBnsUsers({});
+
         setBarangayMap({});
+
         setLocalAreaMap({});
+
         setErrorMessage(
           "Your login session was not found. Please log in again.",
         );
+
         return;
       }
 
@@ -295,51 +754,82 @@ export default function BnsChildMonthlyReports() {
         currentUser = JSON.parse(storedUser);
       } catch {
         setReports([]);
+
         setBnsUsers({});
+
         setBarangayMap({});
+
         setLocalAreaMap({});
+
         setErrorMessage("Your login session is invalid. Please log in again.");
+
         return;
       }
 
       if (!currentUser?.id) {
         setReports([]);
+
         setBnsUsers({});
+
         setBarangayMap({});
+
         setLocalAreaMap({});
+
         setErrorMessage("Unable to identify the logged-in Midwife.");
+
         return;
       }
 
       if (currentUser.role !== "midwife") {
         setReports([]);
+
         setBnsUsers({});
+
         setBarangayMap({});
+
         setLocalAreaMap({});
+
         setErrorMessage("Only a logged-in Midwife can access these reports.");
+
         return;
       }
 
       // -----------------------------------------------------
+
       // 1. Fetch only BNS users created by this Midwife.
+
       // -----------------------------------------------------
 
       const { data: bnsData, error: bnsError } = await supabase
+
         .from("users")
+
         .select(
           `
+
         id,
+
         first_name,
+
         middle_name,
+
         last_name,
+
         username,
+
         role,
+
         barangay_id,
+
         district_id,
+
         created_by_midwife_id
+
       `,
         )
+
         .eq("role", "bns")
+
         .eq("created_by_midwife_id", currentUser.id);
 
       if (bnsError) {
@@ -357,35 +847,51 @@ export default function BnsChildMonthlyReports() {
       const bnsIds = [
         ...new Set(
           ownedBnsUsers
+
             .map((bns) => bns.id)
+
             .filter((id) => id !== null && id !== undefined),
         ),
       ];
 
       // No BNS accounts created by this Midwife means no reports.
+
       if (bnsIds.length === 0) {
         setReports([]);
+
         setBnsUsers({});
+
         setBarangayMap({});
+
         setLocalAreaMap({});
+
         setSelectedReport(null);
+
         return;
       }
 
       // -----------------------------------------------------
+
       // 2. Fetch reports belonging only to those BNS accounts.
+
       // -----------------------------------------------------
 
       const { data: reportRows, error: reportError } = await supabase
+
         .from("bns_child_monthly_reports")
+
         .select("*")
+
         .in("bns_id", bnsIds)
+
         .order("report_year", {
           ascending: false,
         })
+
         .order("report_month", {
           ascending: false,
         })
+
         .order("created_at", {
           ascending: false,
         });
@@ -397,13 +903,17 @@ export default function BnsChildMonthlyReports() {
       const safeReports = reportRows || [];
 
       // -----------------------------------------------------
+
       // 3. Fetch barangays used by the retrieved reports.
+
       // -----------------------------------------------------
 
       const barangayIds = [
         ...new Set(
           safeReports
+
             .map((report) => report.barangay_id)
+
             .filter((id) => id !== null && id !== undefined),
         ),
       ];
@@ -412,14 +922,21 @@ export default function BnsChildMonthlyReports() {
 
       if (barangayIds.length > 0) {
         const { data: barangayData, error: barangayError } = await supabase
+
           .from("barangays")
+
           .select(
             `
+
           id,
+
           name,
+
           district_id
+
         `,
           )
+
           .in("id", barangayIds);
 
         if (barangayError) {
@@ -432,27 +949,43 @@ export default function BnsChildMonthlyReports() {
       }
 
       // -----------------------------------------------------
+
       // 4. Fetch active Purok/Sitio assignments for owned BNS.
+
       // -----------------------------------------------------
 
       const loadedLocalAreas = {};
 
       const { data: assignmentData, error: assignmentError } = await supabase
+
         .from("worker_area_assignments")
+
         .select(
           `
+
           worker_id,
+
           local_area_id,
+
           is_active,
+
           local_areas (
+
             id,
+
             name,
+
             type,
+
             barangay_id
+
           )
+
         `,
         )
+
         .in("worker_id", bnsIds)
+
         .eq("is_active", true);
 
       if (assignmentError) {
@@ -472,37 +1005,53 @@ export default function BnsChildMonthlyReports() {
 
         loadedLocalAreas[workerId].push({
           id: localArea.id,
+
           name: localArea.name,
+
           type: localArea.type,
+
           barangay_id: localArea.barangay_id,
         });
       });
 
       // -----------------------------------------------------
+
       // 5. Attach BNS, barangay, and local-area information.
+
       // -----------------------------------------------------
 
       const enrichedReports = safeReports
+
         // Extra ownership check before showing any report.
+
         .filter((report) =>
           Object.prototype.hasOwnProperty.call(
             loadedBnsUsers,
+
             String(report.bns_id),
           ),
         )
+
         .map((report) => ({
           ...report,
+
           bns: loadedBnsUsers[String(report.bns_id)] || null,
+
           barangay: loadedBarangays[String(report.barangay_id)] || null,
+
           localAreas: loadedLocalAreas[String(report.bns_id)] || [],
         }));
 
       setReports(enrichedReports);
+
       setBnsUsers(loadedBnsUsers);
+
       setBarangayMap(loadedBarangays);
+
       setLocalAreaMap(loadedLocalAreas);
 
       // Clear an open modal if its report is no longer available.
+
       setSelectedReport((previous) => {
         if (!previous) return null;
 
@@ -520,21 +1069,28 @@ export default function BnsChildMonthlyReports() {
       );
 
       setReports([]);
+
       setBnsUsers({});
+
       setBarangayMap({});
+
       setLocalAreaMap({});
     } finally {
       setLoading(false);
+
       setRefreshing(false);
     }
   }
 
   /* =======================================================
+
      REFRESH
+
   ======================================================= */
 
   async function handleRefresh() {
     setRefreshing(true);
+
     await loadReports();
   }
 
@@ -555,6 +1111,7 @@ export default function BnsChildMonthlyReports() {
 
     return reports.filter((report) => {
       // Always require the BNS to have been created by this Midwife.
+
       const belongsToMidwife =
         String(report.bns?.created_by_midwife_id) === String(user.id);
 
@@ -563,11 +1120,13 @@ export default function BnsChildMonthlyReports() {
       }
 
       // Preserve the existing barangay restriction.
+
       if (hasBarangay) {
         return String(report.barangay_id) === String(user.barangay_id);
       }
 
       // If there is no barangay assignment, apply district restriction.
+
       if (hasDistrict) {
         return (
           String(report.barangay?.district_id) === String(user.district_id)
@@ -575,12 +1134,15 @@ export default function BnsChildMonthlyReports() {
       }
 
       // Do not fall back to unrestricted reports.
+
       return false;
     });
   }, [reports, user]);
 
   /* =======================================================
+
      FILTER REPORTS
+
   ======================================================= */
 
   const filteredReports = useMemo(() => {
@@ -588,11 +1150,13 @@ export default function BnsChildMonthlyReports() {
 
     return scopedReports.filter((report) => {
       /* Status */
+
       if (statusFilter !== "all" && report.status !== statusFilter) {
         return false;
       }
 
       /* Month */
+
       if (
         monthFilter !== "all" &&
         Number(report.report_month) !== Number(monthFilter)
@@ -601,6 +1165,7 @@ export default function BnsChildMonthlyReports() {
       }
 
       /* Year */
+
       if (
         yearFilter !== "all" &&
         Number(report.report_year) !== Number(yearFilter)
@@ -609,6 +1174,7 @@ export default function BnsChildMonthlyReports() {
       }
 
       /* Search */
+
       if (keyword) {
         const bnsName = getUserFullName(report.bns).toLowerCase();
 
@@ -619,8 +1185,11 @@ export default function BnsChildMonthlyReports() {
 
         const searchable = [
           bnsName,
+
           barangayName,
+
           monthName,
+
           String(report.report_year),
         ].join(" ");
 
@@ -634,7 +1203,9 @@ export default function BnsChildMonthlyReports() {
   }, [scopedReports, search, statusFilter, monthFilter, yearFilter]);
 
   /* =======================================================
+
      REPORT STATISTICS
+
   ======================================================= */
 
   const statistics = useMemo(() => {
@@ -653,14 +1224,18 @@ export default function BnsChildMonthlyReports() {
   }, [scopedReports]);
 
   /* =======================================================
+
      AVAILABLE YEARS
+
   ======================================================= */
 
   const availableYears = useMemo(() => {
     const years = [
       ...new Set(
         scopedReports
+
           .map((report) => Number(report.report_year))
+
           .filter(Boolean),
       ),
     ];
@@ -669,7 +1244,9 @@ export default function BnsChildMonthlyReports() {
   }, [scopedReports]);
 
   /* =======================================================
+
      OPEN REPORT
+
   ======================================================= */
 
   function openReport(report) {
@@ -679,18 +1256,23 @@ export default function BnsChildMonthlyReports() {
   }
 
   /* =======================================================
+
      CLOSE REPORT
+
   ======================================================= */
 
   function closeReport() {
     if (savingReview) return;
 
     setSelectedReport(null);
+
     setReviewNotes("");
   }
 
   /* =======================================================
+
      UPDATE REPORT STATUS
+
   ======================================================= */
 
   async function updateReportStatus(nextStatus) {
@@ -703,7 +1285,9 @@ export default function BnsChildMonthlyReports() {
     }
 
     /* ---------------------------------------------------
+
        Require notes when returning
+
     --------------------------------------------------- */
 
     if (nextStatus === "returned" && !reviewNotes.trim()) {
@@ -726,6 +1310,7 @@ export default function BnsChildMonthlyReports() {
 
     try {
       setSavingReview(true);
+
       setErrorMessage("");
 
       const updatePayload = {
@@ -741,10 +1326,15 @@ export default function BnsChildMonthlyReports() {
       };
 
       const { data, error } = await supabase
+
         .from("bns_child_monthly_reports")
+
         .update(updatePayload)
+
         .eq("id", selectedReport.id)
+
         .select("*")
+
         .single();
 
       if (error) {
@@ -752,18 +1342,23 @@ export default function BnsChildMonthlyReports() {
       }
 
       /* ---------------------------------------------------
+
          Update current report
+
       --------------------------------------------------- */
 
       const updatedReport = {
         ...selectedReport,
+
         ...data,
       };
 
       setSelectedReport(updatedReport);
 
       /* ---------------------------------------------------
+
          Update list
+
       --------------------------------------------------- */
 
       setReports((previous) =>
@@ -771,6 +1366,7 @@ export default function BnsChildMonthlyReports() {
           String(report.id) === String(selectedReport.id)
             ? {
                 ...report,
+
                 ...data,
               }
             : report,
@@ -792,25 +1388,34 @@ export default function BnsChildMonthlyReports() {
   }
 
   /* =======================================================
+
      RENDER REPORT TABLE
+
   ======================================================= */
 
   function ReportDataTable({ data }) {
     const rows = [
       {
         key: "age_0_11",
+
         label: "0–11 mos old",
       },
+
       {
         key: "age_0_12",
+
         label: "0–12 mos old",
       },
+
       {
         key: "age_13_23",
+
         label: "13–23 mos old",
       },
+
       {
         key: "age_24_59",
+
         label: "24–59 mos old",
       },
     ];
@@ -914,7 +1519,9 @@ export default function BnsChildMonthlyReports() {
   }
 
   /* =======================================================
+
      REPORT REVIEW MODAL
+
   ======================================================= */
 
   function ReportReviewModal() {
@@ -927,7 +1534,9 @@ export default function BnsChildMonthlyReports() {
     const bns = selectedReport.bns;
 
     const barangay = selectedReport.barangay;
+
     const localAreas = selectedReport.localAreas || [];
+
     const reportMonthName =
       MONTHS[Number(selectedReport.report_month) - 1] || "-";
 
@@ -937,6 +1546,7 @@ export default function BnsChildMonthlyReports() {
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
         <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
           {/* MODAL HEADER */}
+
           <div className="flex items-start justify-between border-b border-gray-200 p-6">
             <div className="flex items-start gap-4">
               <div className="rounded-xl bg-blue-100 p-3 text-blue-600">
@@ -969,9 +1579,11 @@ export default function BnsChildMonthlyReports() {
           </div>
 
           {/* MODAL BODY */}
+
           <div className="overflow-y-auto p-6">
             <div className="space-y-6">
               {/* REPORT INFORMATION */}
+
               <div className="grid gap-4 rounded-xl border border-gray-200 bg-gray-50 p-5 md:grid-cols-5">
                 <div>
                   <p className="text-xs uppercase tracking-wide text-gray-400">
@@ -992,6 +1604,7 @@ export default function BnsChildMonthlyReports() {
                     {barangay?.name || "-"}
                   </p>
                 </div>
+
                 <div>
                   <p className="text-xs uppercase tracking-wide text-gray-400">
                     Purok / Sitio
@@ -1005,6 +1618,7 @@ export default function BnsChildMonthlyReports() {
                           className="inline-flex items-center rounded-lg bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700"
                         >
                           {area.type ? `${area.type}: ` : ""}
+
                           {area.name}
                         </span>
                       ))}
@@ -1015,6 +1629,7 @@ export default function BnsChildMonthlyReports() {
                     </p>
                   )}
                 </div>
+
                 <div>
                   <p className="text-xs uppercase tracking-wide text-gray-400">
                     Reporting Period
@@ -1037,6 +1652,7 @@ export default function BnsChildMonthlyReports() {
               </div>
 
               {/* REPORT */}
+
               <div>
                 <div className="mb-4 flex items-center gap-2">
                   <ClipboardList size={20} className="text-blue-600" />
@@ -1050,22 +1666,30 @@ export default function BnsChildMonthlyReports() {
               </div>
 
               {/* TOTALS */}
+
               <div className="grid gap-4 md:grid-cols-4">
                 {[
                   {
                     label: "0–11 months",
+
                     value: getTotalForCategory(reportData.age_0_11),
                   },
+
                   {
                     label: "0–12 months",
+
                     value: getTotalForCategory(reportData.age_0_12),
                   },
+
                   {
                     label: "13–23 months",
+
                     value: getTotalForCategory(reportData.age_13_23),
                   },
+
                   {
                     label: "24–59 months",
+
                     value: getTotalForCategory(reportData.age_24_59),
                   },
                 ].map((item) => (
@@ -1084,7 +1708,106 @@ export default function BnsChildMonthlyReports() {
                 ))}
               </div>
 
+              {/* CHILD MONITORING ACTIVITIES INCLUDED BY BNS */}
+              <div className="space-y-5">
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2">
+                    <Baby size={20} className="text-blue-600" />
+                    <h3 className="font-semibold text-gray-800">
+                      Child Monitoring Activities
+                    </h3>
+                  </div>
+                  <p className="text-sm text-gray-500">
+                    Current monitoring records for children in this BNS’s
+                    assigned areas during the selected reporting month. The
+                    saved report snapshot is used if live records cannot be
+                    loaded.
+                  </p>
+                </div>
+
+                {liveMonitoringLoading && (
+                  <div className="rounded-xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
+                    Loading the latest monitoring records for this BNS and
+                    reporting month...
+                  </div>
+                )}
+                {liveMonitoringError && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                    {liveMonitoringError} Showing the monitoring snapshot saved
+                    with the report instead.
+                  </div>
+                )}
+                {CHILD_MONITORING_SECTIONS.map((section) => {
+                  const savedRows =
+                    selectedReport.report_data?.child_monitoring?.[
+                      section.key
+                    ] || [];
+                  const liveRows =
+                    liveMonitoring?.reportId === selectedReport.id
+                      ? liveMonitoring.data?.[section.key]
+                      : null;
+                  const rows = Array.isArray(liveRows) ? liveRows : savedRows;
+                  return (
+                    <div
+                      key={section.key}
+                      className="overflow-hidden rounded-xl border border-gray-200"
+                    >
+                      <div className="flex items-center justify-between gap-3 border-b border-gray-200 bg-gray-50 px-4 py-3">
+                        <h4 className="font-semibold text-gray-800">
+                          {section.title}
+                        </h4>
+                        <span className="rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold text-blue-700">
+                          {rows.length}{" "}
+                          {rows.length === 1 ? "record" : "records"}
+                        </span>
+                      </div>
+                      {rows.length === 0 ? (
+                        <p className="px-4 py-5 text-sm text-gray-500">
+                          No {section.title.toLowerCase()} records were included
+                          in this report.
+                        </p>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full min-w-max">
+                            <thead>
+                              <tr className="bg-white text-left text-xs uppercase tracking-wide text-gray-500">
+                                {section.columns.map(([key, label]) => (
+                                  <th
+                                    key={key}
+                                    className="whitespace-nowrap border-b border-gray-200 px-4 py-3"
+                                  >
+                                    {label}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {rows.map((row, rowIndex) => (
+                                <tr
+                                  key={row.id ?? `${section.key}-${rowIndex}`}
+                                  className="border-b border-gray-100 last:border-b-0 hover:bg-gray-50"
+                                >
+                                  {section.columns.map(([key]) => (
+                                    <td
+                                      key={key}
+                                      className="max-w-xs whitespace-pre-wrap px-4 py-3 text-sm text-gray-700"
+                                    >
+                                      {formatMonitoringValue(row[key])}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
               {/* PREVIOUS REVIEW */}
+
               {selectedReport.review_notes && (
                 <div className="rounded-xl border border-gray-200 bg-gray-50 p-5">
                   <div className="flex items-center gap-2">
@@ -1108,6 +1831,7 @@ export default function BnsChildMonthlyReports() {
               )}
 
               {/* REVIEW AREA */}
+
               {canReview && (
                 <div className="rounded-xl border border-blue-200 bg-blue-50 p-5">
                   <div className="flex items-start gap-3">
@@ -1141,6 +1865,7 @@ export default function BnsChildMonthlyReports() {
           </div>
 
           {/* MODAL FOOTER */}
+
           <div className="flex flex-col-reverse gap-3 border-t border-gray-200 bg-gray-50 p-5 sm:flex-row sm:items-center sm:justify-between">
             <button
               type="button"
@@ -1184,14 +1909,18 @@ export default function BnsChildMonthlyReports() {
   }
 
   /* =======================================================
+
      MAIN RENDER
+
   ======================================================= */
 
   return (
     <DashboardLayout>
       <div className="space-y-6">
         {/* ===================================================
+
             HEADER
+
         ================================================== */}
 
         <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
@@ -1229,7 +1958,9 @@ export default function BnsChildMonthlyReports() {
         </div>
 
         {/* ===================================================
+
             ERROR
+
         ================================================== */}
 
         {errorMessage && (
@@ -1245,7 +1976,9 @@ export default function BnsChildMonthlyReports() {
         )}
 
         {/* ===================================================
+
             STATISTICS
+
         ================================================== */}
 
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -1315,7 +2048,9 @@ export default function BnsChildMonthlyReports() {
         </div>
 
         {/* ===================================================
+
             FILTERS
+
         ================================================== */}
 
         <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
@@ -1327,6 +2062,7 @@ export default function BnsChildMonthlyReports() {
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
             {/* SEARCH */}
+
             <div className="relative xl:col-span-2">
               <Search
                 size={18}
@@ -1343,6 +2079,7 @@ export default function BnsChildMonthlyReports() {
             </div>
 
             {/* STATUS */}
+
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value)}
@@ -1360,6 +2097,7 @@ export default function BnsChildMonthlyReports() {
             </select>
 
             {/* MONTH */}
+
             <select
               value={monthFilter}
               onChange={(e) => setMonthFilter(e.target.value)}
@@ -1375,6 +2113,7 @@ export default function BnsChildMonthlyReports() {
             </select>
 
             {/* YEAR */}
+
             <select
               value={yearFilter}
               onChange={(e) => setYearFilter(e.target.value)}
@@ -1392,7 +2131,9 @@ export default function BnsChildMonthlyReports() {
         </div>
 
         {/* ===================================================
+
             REPORT LIST
+
         ================================================== */}
 
         <div className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
@@ -1459,7 +2200,9 @@ export default function BnsChildMonthlyReports() {
                   {filteredReports.map((report) => {
                     const monthName =
                       MONTHS[Number(report.report_month) - 1] || "-";
+
                     const localAreas = report.localAreas || [];
+
                     return (
                       <tr
                         key={report.id}
@@ -1486,6 +2229,7 @@ export default function BnsChildMonthlyReports() {
                             {report.barangay?.name || "-"}
                           </span>
                         </td>
+
                         <td className="px-5 py-4">
                           {localAreas.length > 0 ? (
                             <div className="flex flex-wrap gap-1.5">
@@ -1495,6 +2239,7 @@ export default function BnsChildMonthlyReports() {
                                   className="inline-flex items-center rounded-lg bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700"
                                 >
                                   {area.type ? `${area.type}: ` : ""}
+
                                   {area.name}
                                 </span>
                               ))}
@@ -1505,6 +2250,7 @@ export default function BnsChildMonthlyReports() {
                             </span>
                           )}
                         </td>
+
                         <td className="px-5 py-4">
                           <p className="text-sm font-medium text-gray-800">
                             {monthName} {report.report_year}
@@ -1541,7 +2287,9 @@ export default function BnsChildMonthlyReports() {
         </div>
 
         {/* ===================================================
+
             MODAL
+
         ================================================== */}
 
         <ReportReviewModal />

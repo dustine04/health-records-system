@@ -246,18 +246,63 @@ function BhwPregnantWomen() {
       setLoading(false);
     }
   };
-
   // =====================================================
-  // FORM
+  // AUTOMATIC EDC CALCULATION
+  // EDC = 9 calendar months after LMP
+  // =====================================================
+
+  const calculateEdcFromLmp = (lmp) => {
+    if (!lmp) return "";
+
+    const [year, month, day] = lmp.split("-").map(Number);
+
+    if (!year || !month || !day) return "";
+
+    // Convert the LMP month to a zero-based month index
+    const targetMonthIndex = year * 12 + (month - 1) + 9;
+
+    const targetYear = Math.floor(targetMonthIndex / 12);
+    const targetMonth = targetMonthIndex % 12;
+
+    // Handle dates near the end of a month safely
+    const lastDayOfTargetMonth = new Date(
+      targetYear,
+      targetMonth + 1,
+      0,
+    ).getDate();
+
+    const targetDay = Math.min(day, lastDayOfTargetMonth);
+
+    // Format as YYYY-MM-DD without timezone conversion
+    const formattedMonth = String(targetMonth + 1).padStart(2, "0");
+    const formattedDay = String(targetDay).padStart(2, "0");
+
+    return `${targetYear}-${formattedMonth}-${formattedDay}`;
+  };
+  // =====================================================
+  // FORM CHANGE HANDLER
+  // Automatically calculate EDC when LMP changes
   // =====================================================
 
   const handleChange = (e) => {
     const { name, value } = e.target;
 
-    setForm((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+    setForm((prev) => {
+      // Automatically update EDC when LMP changes
+      if (name === "lmp") {
+        return {
+          ...prev,
+          lmp: value,
+          edc: calculateEdcFromLmp(value),
+        };
+      }
+
+      // Keep normal behavior for all other fields
+      return {
+        ...prev,
+        [name]: value,
+      };
+    });
   };
 
   // =====================================================
@@ -1149,6 +1194,7 @@ function BhwPregnantWomen() {
                   </div>
 
                   <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* LMP */}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         LMP
@@ -1163,10 +1209,12 @@ function BhwPregnantWomen() {
                       />
 
                       <p className="text-xs text-gray-500 mt-1">
-                        Last Menstrual Period
+                        Last Menstrual Period. Selecting this date automatically
+                        calculates EDC.
                       </p>
                     </div>
 
+                    {/* EDC */}
                     <div>
                       <label className="block text-sm font-medium text-gray-700 mb-1">
                         EDC
@@ -1181,7 +1229,9 @@ function BhwPregnantWomen() {
                       />
 
                       <p className="text-xs text-gray-500 mt-1">
-                        Expected Date of Confinement
+                        Expected Date of Confinement. Automatically calculated
+                        as 9 calendar months after LMP; adjust if clinically
+                        confirmed otherwise.
                       </p>
                     </div>
                   </div>
