@@ -1,0 +1,1558 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Activity,
+  AlertCircle,
+  Baby,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  ClipboardList,
+  FileText,
+  HeartPulse,
+  LoaderCircle,
+  RefreshCw,
+  Send,
+  ShieldCheck,
+  Users,
+} from "lucide-react";
+
+import DashboardLayout from "../../components/DashboardLayout";
+import { supabase } from "../../lib/supabase";
+
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+const BNS_AGE_FIELDS = [
+  {
+    key: "age_0_11",
+    label: "Children aged 0–11 months",
+  },
+  {
+    key: "age_0_12",
+    label: "Children aged 0–12 months",
+  },
+  {
+    key: "age_13_23",
+    label: "Children aged 13–23 months",
+  },
+  {
+    key: "age_24_59",
+    label: "Children aged 24–59 months",
+  },
+];
+
+const BNS_METRICS = [
+  { key: "male", label: "Male" },
+  { key: "female", label: "Female" },
+  { key: "deceased_male", label: "Deceased male" },
+  { key: "deceased_female", label: "Deceased female" },
+  { key: "trans_out_male", label: "Male transferred out" },
+  { key: "trans_out_female", label: "Female transferred out" },
+];
+
+const BHW_OBJECT_FIELDS = [
+  {
+    key: "pregnancy_tracking",
+    label: "Pregnancy tracking",
+    fields: [
+      { key: "new", label: "Newly recorded pregnancies" },
+      { key: "total", label: "Total pregnancies recorded" },
+      { key: "last_month", label: "Pregnancies from last month" },
+      { key: "mc_book", label: "With MC book" },
+      { key: "birth_plan", label: "With birth plan" },
+      {
+        key: "completed_home_visits",
+        label: "Completed pregnancy home visits",
+      },
+    ],
+  },
+  {
+    key: "deliveries",
+    label: "Delivery indicators",
+    fields: [
+      { key: "total", label: "Total deliveries" },
+      { key: "with_pnv4", label: "With PNV4" },
+      { key: "home_delivery", label: "Home deliveries" },
+      {
+        key: "at_health_facility",
+        label: "Deliveries at a health facility",
+      },
+      {
+        key: "with_completed_4_hv",
+        label: "With completed 4 home visits",
+      },
+    ],
+  },
+  {
+    key: "breastfeeding",
+    label: "Breastfeeding",
+    fields: [
+      {
+        key: "initiated_breastfeeding",
+        label: "Initiated breastfeeding",
+      },
+      {
+        key: "exclusively_breastfed",
+        label: "Exclusively breastfed",
+      },
+    ],
+  },
+  {
+    key: "postpartum",
+    label: "Postpartum indicators",
+    fields: [
+      {
+        key: "pregnant_next_month",
+        label: "Pregnant again the following month",
+      },
+      {
+        key: "fp_completed_home_visit",
+        label: "Family planning home visits completed",
+      },
+    ],
+  },
+  {
+    key: "iec",
+    label: "Information, education and communication",
+    fields: [
+      { key: "bench_conference", label: "Bench conferences" },
+      { key: "care_giver_class", label: "Caregiver classes" },
+      {
+        key: "household_study_group",
+        label: "Household study groups",
+      },
+      {
+        key: "individual_health_counseling",
+        label: "Individual health counseling",
+      },
+    ],
+  },
+];
+
+const FAMILY_PLANNING_GROUPS = [
+  { key: "current_users", label: "Current users" },
+  { key: "new_acceptors", label: "New acceptors" },
+  { key: "dropouts", label: "Dropouts" },
+];
+
+const FAMILY_PLANNING_METHODS = [
+  { key: "btl", label: "BTL" },
+  { key: "coc", label: "COC" },
+  { key: "iud", label: "IUD" },
+  { key: "lam", label: "LAM" },
+  { key: "nsv", label: "NSV" },
+  { key: "pop", label: "POP" },
+  { key: "dmpa", label: "DMPA" },
+  { key: "condom", label: "Condom" },
+  { key: "implant", label: "Implant" },
+  { key: "age_15_19", label: "Age 15–19" },
+  { key: "age_20_49", label: "Age 20–49" },
+];
+
+const BHW_ARRAY_FIELDS = [
+  {
+    key: "pregnant_women",
+    label: "Pregnant women records",
+  },
+  {
+    key: "deaths",
+    label: "Death records",
+  },
+  {
+    key: "delivery_details",
+    label: "Delivery detail records",
+  },
+  {
+    key: "women_deworming",
+    label: "Women deworming records",
+  },
+  {
+    key: "pregnant_deworming",
+    label: "Pregnant women deworming records",
+  },
+  {
+    key: "tb_dots_referrals",
+    label: "TB-DOTS referrals",
+  },
+  {
+    key: "teenage_pregnancy",
+    label: "Teenage pregnancy records",
+  },
+  {
+    key: "agencies_coordinated",
+    label: "Agencies coordinated with",
+  },
+  {
+    key: "nutrition_assessment",
+    label: "Nutrition assessment records",
+  },
+  {
+    key: "postpartum_vitamin_a",
+    label: "Postpartum vitamin A records",
+  },
+  {
+    key: "consultation_referrals",
+    label: "Consultation referrals",
+  },
+];
+
+const PRENATAL_TRIMESTERS = [
+  { key: "first_trimester", label: "First trimester" },
+  { key: "second_trimester", label: "Second trimester" },
+  { key: "third_trimester", label: "Third trimester" },
+];
+
+const asNumber = (value) => {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : 0;
+};
+
+const emptyBnsTotals = () =>
+  Object.fromEntries(
+    BNS_AGE_FIELDS.map(({ key }) => [
+      key,
+      Object.fromEntries(BNS_METRICS.map(({ key: metric }) => [metric, 0])),
+    ]),
+  );
+
+const emptyBhwTotals = () => {
+  const totals = {};
+
+  BHW_OBJECT_FIELDS.forEach(({ key, fields }) => {
+    totals[key] = Object.fromEntries(
+      fields.map(({ key: field }) => [field, 0]),
+    );
+  });
+
+  totals.family_planning = Object.fromEntries(
+    FAMILY_PLANNING_GROUPS.map(({ key }) => [
+      key,
+      Object.fromEntries(
+        FAMILY_PLANNING_METHODS.map(({ key: method }) => [method, 0]),
+      ),
+    ]),
+  );
+
+  totals.records = Object.fromEntries(
+    BHW_ARRAY_FIELDS.map(({ key }) => [key, 0]),
+  );
+
+  totals.prenatal_checkup = Object.fromEntries(
+    PRENATAL_TRIMESTERS.map(({ key }) => [key, 0]),
+  );
+
+  return totals;
+};
+
+const addBnsReport = (totals, reportData) => {
+  const data = reportData && typeof reportData === "object" ? reportData : {};
+
+  BNS_AGE_FIELDS.forEach(({ key }) => {
+    BNS_METRICS.forEach(({ key: metric }) => {
+      totals[key][metric] += asNumber(data[key]?.[metric]);
+    });
+  });
+};
+
+const addBhwReport = (totals, reportData) => {
+  const data = reportData && typeof reportData === "object" ? reportData : {};
+
+  BHW_OBJECT_FIELDS.forEach(({ key, fields }) => {
+    fields.forEach(({ key: field }) => {
+      totals[key][field] += asNumber(data[key]?.[field]);
+    });
+  });
+
+  FAMILY_PLANNING_GROUPS.forEach(({ key: group }) => {
+    FAMILY_PLANNING_METHODS.forEach(({ key: method }) => {
+      totals.family_planning[group][method] += asNumber(
+        data.family_planning?.[group]?.[method],
+      );
+    });
+  });
+
+  BHW_ARRAY_FIELDS.forEach(({ key }) => {
+    totals.records[key] += Array.isArray(data[key]) ? data[key].length : 0;
+  });
+
+  PRENATAL_TRIMESTERS.forEach(({ key }) => {
+    const entries = data.prenatal_checkup?.[key];
+    totals.prenatal_checkup[key] += Array.isArray(entries) ? entries.length : 0;
+  });
+};
+
+const getUser = () => {
+  try {
+    return JSON.parse(localStorage.getItem("user") || "null");
+  } catch {
+    return null;
+  }
+};
+
+const displayName = (user) =>
+  [user?.first_name, user?.middle_name, user?.last_name]
+    .filter(Boolean)
+    .join(" ")
+    .trim() ||
+  user?.username ||
+  `User #${user?.id ?? ""}`;
+
+const formatNumber = (value) =>
+  asNumber(value).toLocaleString("en-PH", {
+    maximumFractionDigits: 2,
+  });
+
+function MetricTable({ rows }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[420px] text-sm">
+        <thead>
+          <tr className="border-b border-slate-200 text-left text-xs uppercase tracking-wide text-slate-500">
+            <th className="px-4 py-3 font-semibold">Indicator</th>
+            <th className="px-4 py-3 text-right font-semibold">Total</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr
+              key={row.key}
+              className="border-b border-slate-100 last:border-0"
+            >
+              <td className="px-4 py-3 text-slate-700">{row.label}</td>
+              <td className="px-4 py-3 text-right font-semibold tabular-nums text-slate-900">
+                {formatNumber(row.value)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SectionCard({ title, description, icon: Icon, children }) {
+  return (
+    <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="flex items-start gap-3 border-b border-slate-100 px-5 py-4">
+        <div className="rounded-xl bg-emerald-50 p-2.5 text-emerald-700">
+          <Icon size={20} />
+        </div>
+        <div>
+          <h2 className="font-semibold text-slate-900">{title}</h2>
+          {description && (
+            <p className="mt-1 text-sm text-slate-500">{description}</p>
+          )}
+        </div>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function SourceReportList({ title, reports, emptyText }) {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-white">
+      <button
+        type="button"
+        onClick={() => setExpanded((current) => !current)}
+        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+      >
+        <div>
+          <p className="font-medium text-slate-800">{title}</p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {reports.length} reviewed source report
+            {reports.length === 1 ? "" : "s"}
+          </p>
+        </div>
+        {expanded ? (
+          <ChevronDown size={18} className="text-slate-500" />
+        ) : (
+          <ChevronRight size={18} className="text-slate-500" />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="border-t border-slate-100">
+          {reports.length === 0 ? (
+            <p className="px-4 py-4 text-sm text-slate-500">{emptyText}</p>
+          ) : (
+            <div className="divide-y divide-slate-100">
+              {reports.map((report) => (
+                <div key={report.id} className="px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-sm font-semibold text-slate-800">
+                      {report.sourceName || `Source report #${report.id}`}
+                    </p>
+                    <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
+                      Reviewed
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Report ID: {report.id}
+                    {report.barangayName ? ` · ${report.barangayName}` : ""}
+                    {report.submitted_at
+                      ? ` · Submitted ${new Date(
+                          report.submitted_at,
+                        ).toLocaleDateString()}`
+                      : ""}
+                  </p>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default function MidwifeNurseFhsisReport() {
+  const currentUser = useMemo(() => getUser(), []);
+
+  const now = new Date();
+
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [year, setYear] = useState(now.getFullYear());
+  const [nurseId, setNurseId] = useState("");
+
+  const [district, setDistrict] = useState(null);
+  const [nurses, setNurses] = useState([]);
+  const [bnsReports, setBnsReports] = useState([]);
+  const [bhwReports, setBhwReports] = useState([]);
+  const [existingReports, setExistingReports] = useState([]);
+
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const districtId = currentUser?.district_id;
+
+  const loadReportData = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    setNotice("");
+
+    try {
+      if (!currentUser?.id) {
+        throw new Error(
+          "Your login session could not be found. Please log in again.",
+        );
+      }
+
+      if (currentUser.role !== "midwife") {
+        throw new Error("This page is available to Midwife accounts only.");
+      }
+
+      if (!districtId) {
+        throw new Error(
+          "Your account has no assigned district. Please ask the CHO Admin to assign your district.",
+        );
+      }
+
+      // Confirm the district record and load only nurses in this district.
+      const [
+        districtResult,
+        nursesResult,
+        barangaysResult,
+        bnsResult,
+        bhwResult,
+        priorReportsResult,
+      ] = await Promise.all([
+        supabase
+          .from("districts")
+          .select("id, name")
+          .eq("id", districtId)
+          .maybeSingle(),
+
+        supabase
+          .from("users")
+          .select(
+            "id, username, first_name, middle_name, last_name, role, district_id, is_active",
+          )
+          .eq("role", "nurse")
+          .eq("district_id", districtId)
+          .eq("is_active", true)
+          .order("last_name", { ascending: true }),
+
+        supabase
+          .from("barangays")
+          .select("id, name, district_id")
+          .eq("district_id", districtId),
+
+        supabase
+          .from("bns_child_monthly_reports")
+          .select(
+            "id, bns_id, barangay_id, report_month, report_year, status, report_data, submitted_at, reviewed_at, created_at",
+          )
+          .eq("report_month", month)
+          .eq("report_year", year)
+          .eq("status", "reviewed"),
+
+        supabase
+          .from("bhw_monthly_reports")
+          .select(
+            "id, bhw_id, month, year, status, report_data, submitted_at, reviewed_at, created_at",
+          )
+          .eq("month", month)
+          .eq("year", year)
+          .eq("status", "reviewed"),
+
+        supabase
+          .from("midwife_nurse_fhsis_reports")
+          .select(
+            "id, reporting_month, reporting_year, district_id, midwife_id, nurse_id, report_title, status, submitted_at, reviewed_at, review_notes, created_at",
+          )
+          .eq("reporting_month", month)
+          .eq("reporting_year", year)
+          .eq("district_id", districtId)
+          .eq("midwife_id", currentUser.id)
+          .order("created_at", { ascending: false }),
+      ]);
+
+      if (districtResult.error) throw districtResult.error;
+      if (nursesResult.error) throw nursesResult.error;
+      if (barangaysResult.error) throw barangaysResult.error;
+      if (bnsResult.error) throw bnsResult.error;
+      if (bhwResult.error) throw bhwResult.error;
+      if (priorReportsResult.error) throw priorReportsResult.error;
+
+      const districtRow = districtResult.data;
+
+      if (!districtRow) {
+        throw new Error("The district assigned to your account was not found.");
+      }
+
+      setDistrict(districtRow);
+      setNurses(nursesResult.data || []);
+      setExistingReports(priorReportsResult.data || []);
+
+      const districtBarangays = barangaysResult.data || [];
+      const barangayIds = new Set(
+        districtBarangays.map((barangay) => String(barangay.id)),
+      );
+
+      const barangayNames = new Map(
+        districtBarangays.map((barangay) => [
+          String(barangay.id),
+          barangay.name,
+        ]),
+      );
+
+      // BNS reports have an explicit barangay_id. Verify that each
+      // report's barangay belongs to the current midwife's district.
+      const eligibleBns = (bnsResult.data || []).filter(
+        (report) =>
+          report.barangay_id != null &&
+          barangayIds.has(String(report.barangay_id)),
+      );
+
+      const uniqueBns = Array.from(
+        new Map(
+          eligibleBns.map((report) => [String(report.id), report]),
+        ).values(),
+      );
+
+      const bnsIds = [
+        ...new Set(uniqueBns.map((report) => String(report.bns_id))),
+      ];
+
+      let bnsUsersById = new Map();
+
+      if (bnsIds.length > 0) {
+        const { data, error: bnsUsersError } = await supabase
+          .from("users")
+          .select("id, username, first_name, middle_name, last_name, role")
+          .in("id", bnsIds);
+
+        if (bnsUsersError) throw bnsUsersError;
+
+        bnsUsersById = new Map(
+          (data || [])
+            .filter((user) => user.role === "bns")
+            .map((user) => [String(user.id), user]),
+        );
+      }
+
+      const verifiedBns = uniqueBns
+        .filter((report) => bnsUsersById.has(String(report.bns_id)))
+        .map((report) => ({
+          ...report,
+          sourceName: displayName(bnsUsersById.get(String(report.bns_id))),
+          barangayName:
+            barangayNames.get(String(report.barangay_id)) ||
+            "District barangay",
+        }));
+
+      // BHW reports have no barangay_id. Determine their district through
+      // active worker assignments -> local_areas -> barangays.
+      const candidateBhw = bhwResult.data || [];
+
+      const uniqueCandidateBhw = Array.from(
+        new Map(
+          candidateBhw.map((report) => [String(report.id), report]),
+        ).values(),
+      );
+
+      const bhwIds = [
+        ...new Set(uniqueCandidateBhw.map((report) => String(report.bhw_id))),
+      ];
+
+      let verifiedBhw = [];
+
+      if (bhwIds.length > 0) {
+        const { data: bhwUsers, error: bhwUsersError } = await supabase
+          .from("users")
+          .select("id, username, first_name, middle_name, last_name, role")
+          .in("id", bhwIds);
+
+        if (bhwUsersError) throw bhwUsersError;
+
+        const bhwUsersById = new Map(
+          (bhwUsers || [])
+            .filter((user) => user.role === "bhw")
+            .map((user) => [String(user.id), user]),
+        );
+
+        const validBhwIds = [
+          ...new Set(
+            (bhwUsers || [])
+              .filter((user) => user.role === "bhw")
+              .map((user) => user.id),
+          ),
+        ];
+
+        if (validBhwIds.length > 0) {
+          const { data: assignments, error: assignmentsError } = await supabase
+            .from("worker_area_assignments")
+            .select("id, worker_id, local_area_id, is_active")
+            .in("worker_id", validBhwIds)
+            .eq("is_active", true);
+
+          if (assignmentsError) throw assignmentsError;
+
+          const assignmentRows = assignments || [];
+
+          const localAreaIds = [
+            ...new Set(
+              assignmentRows.map((assignment) => assignment.local_area_id),
+            ),
+          ];
+
+          let areas = [];
+
+          if (localAreaIds.length > 0) {
+            const { data, error: areasError } = await supabase
+              .from("local_areas")
+              .select("id, name, type, barangay_id")
+              .in("id", localAreaIds);
+
+            if (areasError) throw areasError;
+            areas = data || [];
+          }
+
+          const areaById = new Map(
+            areas.map((area) => [String(area.id), area]),
+          );
+
+          const workerAssignments = new Map();
+
+          assignmentRows.forEach((assignment) => {
+            const workerKey = String(assignment.worker_id);
+            const area = areaById.get(String(assignment.local_area_id));
+
+            if (!area) return;
+
+            if (!workerAssignments.has(workerKey)) {
+              workerAssignments.set(workerKey, []);
+            }
+
+            workerAssignments.get(workerKey).push({
+              ...assignment,
+              area,
+            });
+          });
+
+          verifiedBhw = uniqueCandidateBhw
+            .filter((report) => bhwUsersById.has(String(report.bhw_id)))
+            .map((report) => {
+              const assignedAreas =
+                workerAssignments.get(String(report.bhw_id)) || [];
+
+              // If area_ids is provided in the report snapshot, honor it.
+              // It must still match an active assignment. If absent, use
+              // the worker's active assignments as the legacy fallback.
+              const reportData =
+                report.report_data && typeof report.report_data === "object"
+                  ? report.report_data
+                  : {};
+
+              const hasAreaIds = Array.isArray(reportData.area_ids);
+
+              const coveredAreas = assignedAreas.filter(({ area }) => {
+                if (!barangayIds.has(String(area.barangay_id))) return false;
+
+                if (!hasAreaIds) return true;
+
+                return reportData.area_ids.some(
+                  (id) => String(id) === String(area.id),
+                );
+              });
+
+              // A BHW report qualifies only if it covers at least one
+              // actively assigned local area in the current district.
+              if (coveredAreas.length === 0) return null;
+
+              const coveredBarangayNames = [
+                ...new Set(
+                  coveredAreas
+                    .map(({ area }) =>
+                      barangayNames.get(String(area.barangay_id)),
+                    )
+                    .filter(Boolean),
+                ),
+              ];
+
+              return {
+                ...report,
+                sourceName: displayName(
+                  bhwUsersById.get(String(report.bhw_id)),
+                ),
+                barangayName:
+                  coveredBarangayNames.join(", ") || "District barangay",
+                coveredAreaIds: coveredAreas.map(({ area }) => area.id),
+              };
+            })
+            .filter(Boolean);
+        }
+      }
+
+      // Defensive de-duplication: one source report ID is included only once.
+      const uniqueVerifiedBhw = Array.from(
+        new Map(
+          verifiedBhw.map((report) => [String(report.id), report]),
+        ).values(),
+      );
+
+      setBnsReports(verifiedBns);
+      setBhwReports(uniqueVerifiedBhw);
+
+      setNurseId((current) => {
+        if (
+          current &&
+          (nursesResult.data || []).some(
+            (nurse) => String(nurse.id) === String(current),
+          )
+        ) {
+          return current;
+        }
+
+        return "";
+      });
+    } catch (err) {
+      console.error("Failed to load Midwife FHSIS data:", err);
+      setError(
+        err?.message ||
+          "Unable to load the district's reviewed source reports.",
+      );
+      setBnsReports([]);
+      setBhwReports([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [currentUser, districtId, month, year]);
+
+  useEffect(() => {
+    loadReportData();
+  }, [loadReportData, refreshKey]);
+
+  const bnsTotals = useMemo(() => {
+    const totals = emptyBnsTotals();
+    bnsReports.forEach((report) => addBnsReport(totals, report.report_data));
+    return totals;
+  }, [bnsReports]);
+
+  const bhwTotals = useMemo(() => {
+    const totals = emptyBhwTotals();
+    bhwReports.forEach((report) => addBhwReport(totals, report.report_data));
+    return totals;
+  }, [bhwReports]);
+
+  const selectedNurse = nurses.find(
+    (nurse) => String(nurse.id) === String(nurseId),
+  );
+
+  const alreadySubmitted = existingReports.find(
+    (report) =>
+      String(report.nurse_id || "") === String(nurseId) &&
+      ["submitted", "reviewed"].includes(report.status),
+  );
+
+  const existingDraft = existingReports.find(
+    (report) =>
+      String(report.nurse_id || "") === String(nurseId) &&
+      report.status === "draft",
+  );
+
+  const hasSourceReports = bnsReports.length > 0 || bhwReports.length > 0;
+
+  const buildReportData = () => ({
+    report_type: "midwife_nurse_fhsis",
+    reporting_period: {
+      month,
+      month_name: MONTHS[month - 1],
+      year,
+    },
+    district: {
+      id: districtId,
+      name: district?.name || "",
+    },
+    prepared_by: {
+      midwife_id: currentUser.id,
+      name: displayName(currentUser),
+    },
+    submitted_to: selectedNurse
+      ? {
+          nurse_id: selectedNurse.id,
+          name: displayName(selectedNurse),
+          district_id: selectedNurse.district_id,
+        }
+      : null,
+    source_counts: {
+      bns_child_monthly_reports: bnsReports.length,
+      bhw_monthly_reports: bhwReports.length,
+      total_unique_source_reports: bnsReports.length + bhwReports.length,
+    },
+    bns_child_indicators: bnsTotals,
+    bhw_maternal_community_indicators: bhwTotals,
+    consolidation_notes: [
+      "Only reviewed source reports were included.",
+      "BNS reports were restricted to barangays belonging to the midwife's district.",
+      "BHW reports were restricted to active worker assignments covering local areas in the midwife's district.",
+      "Source report IDs were deduplicated before aggregation.",
+      "BNS age_0_11 and age_0_12 indicators are kept separate because their age ranges overlap.",
+      "BHW array record counts are displayed separately from numeric summary indicators to avoid adding detailed records to summary totals.",
+    ],
+  });
+
+  const buildSourceSnapshot = () => ({
+    snapshot_created_at: new Date().toISOString(),
+    reporting_period: { month, year },
+    district_id: districtId,
+    midwife_id: currentUser.id,
+    nurse_id: selectedNurse?.id || null,
+    source_rules: {
+      status: "reviewed",
+      bns_district_filter: "barangays.district_id = midwife.district_id",
+      bhw_district_filter:
+        "active worker_area_assignments -> local_areas -> barangays.district_id",
+      bhw_area_ids_checked_against_active_assignments: true,
+      deduplicated_by_source_report_id: true,
+    },
+    bns_child_monthly_reports: bnsReports.map((report) => ({
+      source_type: "bns_child_monthly_reports",
+      source_report_id: report.id,
+      bns_id: report.bns_id,
+      barangay_id: report.barangay_id,
+      barangay_name: report.barangayName,
+      source_name: report.sourceName,
+      status: report.status,
+      report_month: report.report_month,
+      report_year: report.report_year,
+      submitted_at: report.submitted_at,
+      reviewed_at: report.reviewed_at,
+      report_data: report.report_data,
+    })),
+    bhw_monthly_reports: bhwReports.map((report) => ({
+      source_type: "bhw_monthly_reports",
+      source_report_id: report.id,
+      bhw_id: report.bhw_id,
+      barangay_name: report.barangayName,
+      covered_area_ids: report.coveredAreaIds,
+      status: report.status,
+      month: report.month,
+      year: report.year,
+      submitted_at: report.submitted_at,
+      reviewed_at: report.reviewed_at,
+      report_data: report.report_data,
+    })),
+  });
+
+  const handleSubmit = async () => {
+    setError("");
+    setNotice("");
+
+    if (!selectedNurse) {
+      setError("Please select a nurse from your district.");
+      return;
+    }
+
+    if (String(selectedNurse.district_id) !== String(districtId)) {
+      setError(
+        "Submission blocked: the selected nurse is not assigned to your district.",
+      );
+      return;
+    }
+
+    if (!hasSourceReports) {
+      setError(
+        "There are no reviewed BNS or BHW reports for this reporting period in your district.",
+      );
+      return;
+    }
+
+    if (alreadySubmitted) {
+      setError(
+        `A report for this month and nurse has already been ${alreadySubmitted.status}. Refresh the page to check its current status.`,
+      );
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Submit the ${MONTHS[month - 1]} ${year} district FHSIS report to ${displayName(
+        selectedNurse,
+      )}? Only the reviewed reports shown on this page will be included.`,
+    );
+
+    if (!confirmed) return;
+
+    setSubmitting(true);
+
+    try {
+      // Revalidate both users immediately before submission.
+      const { data: midwifeCheck, error: midwifeCheckError } = await supabase
+        .from("users")
+        .select("id, role, district_id")
+        .eq("id", currentUser.id)
+        .maybeSingle();
+
+      if (midwifeCheckError) throw midwifeCheckError;
+
+      if (
+        !midwifeCheck ||
+        midwifeCheck.role !== "midwife" ||
+        String(midwifeCheck.district_id) !== String(districtId)
+      ) {
+        throw new Error(
+          "Your Midwife role or district assignment changed. Please refresh and try again.",
+        );
+      }
+
+      const { data: nurseCheck, error: nurseCheckError } = await supabase
+        .from("users")
+        .select("id, role, district_id, is_active")
+        .eq("id", selectedNurse.id)
+        .maybeSingle();
+
+      if (nurseCheckError) throw nurseCheckError;
+
+      if (
+        !nurseCheck ||
+        nurseCheck.role !== "nurse" ||
+        nurseCheck.is_active !== true ||
+        String(nurseCheck.district_id) !== String(districtId)
+      ) {
+        throw new Error(
+          "The selected nurse is no longer active or is not assigned to your district.",
+        );
+      }
+
+      // Recheck for an existing submitted report before inserting.
+      const { data: duplicateCheck, error: duplicateError } = await supabase
+        .from("midwife_nurse_fhsis_reports")
+        .select("id, status")
+        .eq("reporting_month", month)
+        .eq("reporting_year", year)
+        .eq("district_id", districtId)
+        .eq("midwife_id", currentUser.id)
+        .eq("nurse_id", selectedNurse.id)
+        .in("status", ["submitted", "reviewed"])
+        .limit(1);
+
+      if (duplicateError) throw duplicateError;
+
+      if ((duplicateCheck || []).length > 0) {
+        throw new Error(
+          "This report has already been submitted to the selected nurse.",
+        );
+      }
+
+      // Recheck source report status so a report returned or otherwise
+      // changed after loading is not silently included.
+      const currentBnsIds = bnsReports.map((report) => report.id);
+      const currentBhwIds = bhwReports.map((report) => report.id);
+
+      if (currentBnsIds.length > 0) {
+        const { data, error: checkError } = await supabase
+          .from("bns_child_monthly_reports")
+          .select("id, status, report_month, report_year, barangay_id")
+          .in("id", currentBnsIds);
+
+        if (checkError) throw checkError;
+
+        const valid = new Map(
+          (data || [])
+            .filter(
+              (row) =>
+                row.status === "reviewed" &&
+                Number(row.report_month) === Number(month) &&
+                Number(row.report_year) === Number(year),
+            )
+            .map((row) => [String(row.id), row]),
+        );
+
+        if (valid.size !== currentBnsIds.length) {
+          throw new Error(
+            "One or more BNS reports changed status or reporting period. Refresh the report before submitting.",
+          );
+        }
+
+        if (
+          (data || []).some(
+            (row) =>
+              !row.barangay_id ||
+              !bnsReports.some(
+                (source) =>
+                  String(source.id) === String(row.id) &&
+                  String(source.barangay_id) === String(row.barangay_id),
+              ),
+          )
+        ) {
+          throw new Error(
+            "A BNS report's barangay assignment changed. Refresh the report before submitting.",
+          );
+        }
+      }
+
+      if (currentBhwIds.length > 0) {
+        const { data, error: checkError } = await supabase
+          .from("bhw_monthly_reports")
+          .select("id, status, month, year")
+          .in("id", currentBhwIds);
+
+        if (checkError) throw checkError;
+
+        const valid = new Set(
+          (data || [])
+            .filter(
+              (row) =>
+                row.status === "reviewed" &&
+                Number(row.month) === Number(month) &&
+                Number(row.year) === Number(year),
+            )
+            .map((row) => String(row.id)),
+        );
+
+        if (valid.size !== currentBhwIds.length) {
+          throw new Error(
+            "One or more BHW reports changed status or reporting period. Refresh the report before submitting.",
+          );
+        }
+      }
+
+      const payload = {
+        reporting_month: month,
+        reporting_year: year,
+        district_id: districtId,
+        midwife_id: currentUser.id,
+        nurse_id: selectedNurse.id,
+        report_title: `District FHSIS Report - ${MONTHS[month - 1]} ${year}`,
+        report_data: buildReportData(),
+        source_snapshot: buildSourceSnapshot(),
+        status: "submitted",
+        submitted_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      // Reuse an existing draft for the same month, district, midwife and
+      // nurse. Otherwise insert a new report.
+      if (existingDraft) {
+        const { error: updateError } = await supabase
+          .from("midwife_nurse_fhsis_reports")
+          .update(payload)
+          .eq("id", existingDraft.id)
+          .eq("status", "draft");
+
+        if (updateError) throw updateError;
+      } else {
+        const { error: insertError } = await supabase
+          .from("midwife_nurse_fhsis_reports")
+          .insert(payload);
+
+        if (insertError) throw insertError;
+      }
+
+      setNotice(
+        `The ${MONTHS[month - 1]} ${year} FHSIS report was submitted to ${displayName(
+          selectedNurse,
+        )}.`,
+      );
+
+      setRefreshKey((current) => current + 1);
+    } catch (err) {
+      console.error("FHSIS submission failed:", err);
+      setError(
+        err?.message || "The report could not be submitted. Please try again.",
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const renderBnsSection = () => (
+    <SectionCard
+      title="BNS Child Indicators"
+      description="Consolidated from reviewed BNS child monthly reports in this district."
+      icon={Baby}
+    >
+      <div className="border-b border-slate-100 bg-slate-50 px-5 py-3 text-sm text-slate-600">
+        <span className="font-semibold text-slate-800">
+          {bnsReports.length}
+        </span>{" "}
+        unique reviewed BNS report{bnsReports.length === 1 ? "" : "s"} included
+      </div>
+
+      {BNS_AGE_FIELDS.map(({ key, label }) => (
+        <div key={key} className="border-b border-slate-100 last:border-0">
+          <div className="px-5 pt-4">
+            <h3 className="font-semibold text-slate-800">{label}</h3>
+            {key === "age_0_11" && (
+              <p className="mt-1 text-xs text-amber-700">
+                This is kept separate from the 0–12 month indicator because the
+                age ranges overlap.
+              </p>
+            )}
+          </div>
+          <MetricTable
+            rows={BNS_METRICS.map((metric) => ({
+              key: metric.key,
+              label: metric.label,
+              value: bnsTotals[key][metric.key],
+            }))}
+          />
+        </div>
+      ))}
+
+      <div className="p-4">
+        <SourceReportList
+          title="BNS source reports"
+          reports={bnsReports}
+          emptyText="No reviewed BNS reports match this period and district."
+        />
+      </div>
+    </SectionCard>
+  );
+
+  const renderBhwSection = () => (
+    <SectionCard
+      title="BHW Maternal and Community Indicators"
+      description="Consolidated from reviewed BHW reports covering active assigned local areas in this district."
+      icon={HeartPulse}
+    >
+      <div className="border-b border-slate-100 bg-slate-50 px-5 py-3 text-sm text-slate-600">
+        <span className="font-semibold text-slate-800">
+          {bhwReports.length}
+        </span>{" "}
+        unique reviewed BHW report{bhwReports.length === 1 ? "" : "s"} included
+      </div>
+
+      {BHW_OBJECT_FIELDS.map(({ key, label, fields }) => (
+        <div key={key} className="border-b border-slate-100 last:border-0">
+          <div className="px-5 pt-4">
+            <h3 className="font-semibold text-slate-800">{label}</h3>
+          </div>
+          <MetricTable
+            rows={fields.map((field) => ({
+              key: field.key,
+              label: field.label,
+              value: bhwTotals[key][field.key],
+            }))}
+          />
+        </div>
+      ))}
+
+      <div className="border-b border-slate-100">
+        <div className="px-5 pt-4">
+          <h3 className="font-semibold text-slate-800">
+            Family planning indicators
+          </h3>
+          <p className="mt-1 text-xs text-slate-500">
+            Totals are shown separately for each method and reporting group.
+          </p>
+        </div>
+
+        {FAMILY_PLANNING_GROUPS.map(({ key, label }) => (
+          <div key={key}>
+            <h4 className="px-5 pt-4 text-sm font-medium text-slate-600">
+              {label}
+            </h4>
+            <MetricTable
+              rows={FAMILY_PLANNING_METHODS.map((method) => ({
+                key: method.key,
+                label: method.label,
+                value: bhwTotals.family_planning[key][method.key],
+              }))}
+            />
+          </div>
+        ))}
+      </div>
+
+      <div className="border-b border-slate-100">
+        <div className="px-5 pt-4">
+          <h3 className="font-semibold text-slate-800">
+            Detailed record counts
+          </h3>
+          <p className="mt-1 text-xs text-slate-500">
+            These counts describe records in the source report snapshots. They
+            are not added to the numeric summary indicators above.
+          </p>
+        </div>
+        <MetricTable
+          rows={[
+            ...BHW_ARRAY_FIELDS.map(({ key, label }) => ({
+              key,
+              label,
+              value: bhwTotals.records[key],
+            })),
+            ...PRENATAL_TRIMESTERS.map(({ key, label }) => ({
+              key,
+              label: `Prenatal checkups — ${label.toLowerCase()}`,
+              value: bhwTotals.prenatal_checkup[key],
+            })),
+          ]}
+        />
+      </div>
+
+      <div className="p-4">
+        <SourceReportList
+          title="BHW source reports"
+          reports={bhwReports}
+          emptyText="No reviewed BHW reports cover an active assigned local area in this district for this period."
+        />
+      </div>
+    </SectionCard>
+  );
+
+  return (
+    <DashboardLayout>
+      <div className="mx-auto max-w-7xl space-y-6 pb-10">
+        <div className="flex flex-col justify-between gap-4 md:flex-row md:items-start">
+          <div>
+            <div className="flex items-center gap-2 text-sm font-medium text-emerald-700">
+              <ShieldCheck size={17} />
+              Midwife to Nurse Reporting
+            </div>
+            <h1 className="mt-2 text-2xl font-bold tracking-tight text-slate-900 md:text-3xl">
+              District FHSIS Report
+            </h1>
+            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
+              Consolidate reviewed BNS and BHW reports for your district,
+              inspect the source breakdown, and submit the report to the
+              assigned district nurse.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setRefreshKey((current) => current + 1)}
+            disabled={loading || submitting}
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+            Refresh reports
+          </button>
+        </div>
+
+        {error && (
+          <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+            <AlertCircle size={19} className="mt-0.5 shrink-0" />
+            <p>{error}</p>
+          </div>
+        )}
+
+        {notice && (
+          <div className="flex items-start gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
+            <CheckCircle2 size={19} className="mt-0.5 shrink-0" />
+            <p>{notice}</p>
+          </div>
+        )}
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="mb-4 flex items-center gap-2">
+            <ClipboardList size={19} className="text-emerald-700" />
+            <h2 className="font-semibold text-slate-900">
+              Reporting information
+            </h2>
+          </div>
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+                Reporting month
+              </label>
+              <select
+                value={month}
+                onChange={(event) => setMonth(Number(event.target.value))}
+                disabled={loading || submitting}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+              >
+                {MONTHS.map((name, index) => (
+                  <option key={name} value={index + 1}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+                Reporting year
+              </label>
+              <select
+                value={year}
+                onChange={(event) => setYear(Number(event.target.value))}
+                disabled={loading || submitting}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+              >
+                {Array.from(
+                  { length: 7 },
+                  (_, index) => now.getFullYear() - 5 + index,
+                ).map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+                District
+              </label>
+              <div className="flex min-h-[42px] items-center rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm font-medium text-slate-700">
+                {district?.name || (loading ? "Loading…" : "Not assigned")}
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+                Receiving nurse
+              </label>
+              <select
+                value={nurseId}
+                onChange={(event) => setNurseId(event.target.value)}
+                disabled={loading || submitting || nurses.length === 0}
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+              >
+                <option value="">Select nurse</option>
+                {nurses.map((nurse) => (
+                  <option key={nurse.id} value={nurse.id}>
+                    {displayName(nurse)}
+                  </option>
+                ))}
+              </select>
+              {nurses.length === 0 && !loading && (
+                <p className="mt-1 text-xs text-amber-700">
+                  No active nurse is assigned to this district.
+                </p>
+              )}
+            </div>
+          </div>
+
+          <p className="mt-4 text-xs leading-5 text-slate-500">
+            Source reports are loaded only when their status is{" "}
+            <strong>reviewed</strong>. Changing the month or year reloads the
+            source reports for that reporting period.
+          </p>
+        </section>
+
+        {loading ? (
+          <div className="flex min-h-56 flex-col items-center justify-center gap-3 rounded-2xl border border-slate-200 bg-white">
+            <LoaderCircle size={30} className="animate-spin text-emerald-700" />
+            <p className="text-sm text-slate-500">
+              Loading reviewed district reports…
+            </p>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-500">BNS reports</p>
+                  <Baby size={19} className="text-emerald-700" />
+                </div>
+                <p className="mt-3 text-3xl font-bold text-slate-900">
+                  {bnsReports.length}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Reviewed child reports
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-500">BHW reports</p>
+                  <HeartPulse size={19} className="text-rose-600" />
+                </div>
+                <p className="mt-3 text-3xl font-bold text-slate-900">
+                  {bhwReports.length}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Reviewed maternal and community reports
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-500">Total sources</p>
+                  <FileText size={19} className="text-blue-600" />
+                </div>
+                <p className="mt-3 text-3xl font-bold text-slate-900">
+                  {bnsReports.length + bhwReports.length}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Unique reviewed source reports
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-slate-500">Receiving nurses</p>
+                  <Users size={19} className="text-violet-600" />
+                </div>
+                <p className="mt-3 text-3xl font-bold text-slate-900">
+                  {nurses.length}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Active nurses in your district
+                </p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-6">
+              {renderBnsSection()}
+              {renderBhwSection()}
+            </div>
+
+            <section className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-5">
+              <div className="flex flex-col justify-between gap-4 md:flex-row md:items-center">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Activity size={20} className="text-emerald-700" />
+                    <h2 className="font-semibold text-slate-900">
+                      Submit consolidated report
+                    </h2>
+                  </div>
+                  <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+                    The system will save the consolidated indicators and a
+                    traceable snapshot of every included source report. The
+                    report will be assigned to the selected nurse in your
+                    district.
+                  </p>
+
+                  {alreadySubmitted && (
+                    <p className="mt-2 text-sm font-medium text-amber-800">
+                      This report has already been {alreadySubmitted.status} to
+                      the selected nurse.
+                    </p>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSubmit}
+                  disabled={
+                    submitting ||
+                    loading ||
+                    !selectedNurse ||
+                    !hasSourceReports ||
+                    Boolean(alreadySubmitted)
+                  }
+                  className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+                >
+                  {submitting ? (
+                    <LoaderCircle size={18} className="animate-spin" />
+                  ) : (
+                    <Send size={18} />
+                  )}
+                  {submitting ? "Submitting…" : "Submit to Nurse"}
+                </button>
+              </div>
+
+              {!hasSourceReports && (
+                <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  No eligible reviewed source reports are available for this
+                  reporting period. The system will not submit an empty report.
+                </p>
+              )}
+            </section>
+
+            {existingReports.length > 0 && (
+              <SectionCard
+                title="Previously saved reports"
+                description={`Your district FHSIS reports for ${MONTHS[month - 1]} ${year}.`}
+                icon={FileText}
+              >
+                <div className="divide-y divide-slate-100">
+                  {existingReports.map((report) => (
+                    <div
+                      key={report.id}
+                      className="flex flex-col justify-between gap-2 px-5 py-4 sm:flex-row sm:items-center"
+                    >
+                      <div>
+                        <p className="font-medium text-slate-800">
+                          {report.report_title}
+                        </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Report ID: {report.id}
+                          {report.submitted_at
+                            ? ` · Submitted ${new Date(
+                                report.submitted_at,
+                              ).toLocaleString()}`
+                            : ""}
+                        </p>
+                        {report.review_notes && (
+                          <p className="mt-2 text-sm text-slate-600">
+                            Nurse notes: {report.review_notes}
+                          </p>
+                        )}
+                      </div>
+                      <span
+                        className={`inline-flex w-fit rounded-full px-3 py-1 text-xs font-semibold ${
+                          report.status === "reviewed"
+                            ? "bg-emerald-100 text-emerald-800"
+                            : report.status === "submitted"
+                              ? "bg-blue-100 text-blue-800"
+                              : report.status === "returned"
+                                ? "bg-amber-100 text-amber-800"
+                                : "bg-slate-100 text-slate-700"
+                        }`}
+                      >
+                        {report.status}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </SectionCard>
+            )}
+          </>
+        )}
+      </div>
+    </DashboardLayout>
+  );
+}

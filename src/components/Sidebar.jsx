@@ -164,18 +164,8 @@ const MENUS = {
       icon: LayoutDashboard,
     },
     {
-      name: "Health Records",
-      path: "/dashboard/nurse/records",
-      icon: FileText,
-    },
-    {
-      name: "Monitoring",
-      path: "/dashboard/nurse/monitoring",
-      icon: ClipboardList,
-    },
-    {
       name: "Reports",
-      path: "/dashboard/nurse/reports",
+      path: "/dashboard/nurse/fhsis-reports",
       icon: BarChart3,
     },
   ],
@@ -208,7 +198,7 @@ const MENUS = {
     },
     {
       name: "Submit to Nurse",
-      path: "/dashboard/midwife/submissions",
+      path: "/dashboard/midwife/fhsis-report",
       icon: ClipboardList,
     },
   ],

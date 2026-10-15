@@ -13,7 +13,7 @@ import Users from "./pages/admin/Users";
 import Workers from "./pages/midwife/Workers";
 import District from "./pages/admin/District";
 import Barangay from "./pages/admin/Barangay";
-
+import NurseFhsisReports from "./pages/nurse/NurseFhsisReports";
 import ProtectedRoute from "./components/ProtectedRoute";
 import BnsChildMonthlyReports from "./pages/midwife/BnsChildMonthlyReports";
 import BhwHousehold from "./pages/bhw/BhwHousehold";
@@ -26,7 +26,7 @@ import ChildRegistration from "./pages/bns/ChildRegistration";
 import BhwPregnantWomen from "./pages/bhw/BhwPregnantWomen";
 import BhwPregnantMonitoring from "./pages/bhw/BhwPregnantMonitoring";
 import BhwMonthlyReport from "./pages/bhw/BhwMonthlyReport";
-
+import MidwifeNurseFhsisReport from "./pages/midwife/MidwifeNurseFhsisReport";
 import Profile from "./pages/Profile";
 import PregnancyMonitoring from "./pages/midwife/PregnancyMonitoring";
 import ForgotPassword from "./pages/ForgotPassword";
@@ -112,7 +112,14 @@ function App() {
             </ProtectedRoute>
           }
         />
-
+        <Route
+          path="/dashboard/nurse/fhsis-reports"
+          element={
+            <ProtectedRoute allowedRoles={["nurse"]}>
+              <NurseFhsisReports />
+            </ProtectedRoute>
+          }
+        />
         {/* =====================================================
             MIDWIFE
         ===================================================== */}
@@ -174,6 +181,15 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["midwife"]}>
               <Profile />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/midwife/fhsis-report"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <MidwifeNurseFhsisReport />
             </ProtectedRoute>
           }
         />
