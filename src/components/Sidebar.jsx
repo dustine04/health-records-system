@@ -15,6 +15,7 @@ import {
   Menu,
   FileCheck2,
   Baby,
+  MapPin,
   AlertCircle,
   X,
   ChevronRight,
@@ -167,6 +168,11 @@ const MENUS = {
       name: "Reports",
       path: "/dashboard/nurse/fhsis-reports",
       icon: BarChart3,
+    },
+    {
+      name: "District Coverage",
+      path: "/dashboard/nurse/district-coverage",
+      icon: MapPin,
     },
   ],
 

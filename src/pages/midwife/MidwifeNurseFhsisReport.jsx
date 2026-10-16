@@ -35,22 +35,10 @@ const MONTHS = [
 ];
 
 const BNS_AGE_FIELDS = [
-  {
-    key: "age_0_11",
-    label: "Children aged 0–11 months",
-  },
-  {
-    key: "age_0_12",
-    label: "Children aged 0–12 months",
-  },
-  {
-    key: "age_13_23",
-    label: "Children aged 13–23 months",
-  },
-  {
-    key: "age_24_59",
-    label: "Children aged 24–59 months",
-  },
+  { key: "age_0_11", label: "Children aged 0–11 months" },
+  { key: "age_0_12", label: "Children aged 0–12 months" },
+  { key: "age_13_23", label: "Children aged 13–23 months" },
+  { key: "age_24_59", label: "Children aged 24–59 months" },
 ];
 
 const BNS_METRICS = [
@@ -85,28 +73,16 @@ const BHW_OBJECT_FIELDS = [
       { key: "total", label: "Total deliveries" },
       { key: "with_pnv4", label: "With PNV4" },
       { key: "home_delivery", label: "Home deliveries" },
-      {
-        key: "at_health_facility",
-        label: "Deliveries at a health facility",
-      },
-      {
-        key: "with_completed_4_hv",
-        label: "With completed 4 home visits",
-      },
+      { key: "at_health_facility", label: "Deliveries at a health facility" },
+      { key: "with_completed_4_hv", label: "With completed 4 home visits" },
     ],
   },
   {
     key: "breastfeeding",
     label: "Breastfeeding",
     fields: [
-      {
-        key: "initiated_breastfeeding",
-        label: "Initiated breastfeeding",
-      },
-      {
-        key: "exclusively_breastfed",
-        label: "Exclusively breastfed",
-      },
+      { key: "initiated_breastfeeding", label: "Initiated breastfeeding" },
+      { key: "exclusively_breastfed", label: "Exclusively breastfed" },
     ],
   },
   {
@@ -129,10 +105,7 @@ const BHW_OBJECT_FIELDS = [
     fields: [
       { key: "bench_conference", label: "Bench conferences" },
       { key: "care_giver_class", label: "Caregiver classes" },
-      {
-        key: "household_study_group",
-        label: "Household study groups",
-      },
+      { key: "household_study_group", label: "Household study groups" },
       {
         key: "individual_health_counseling",
         label: "Individual health counseling",
@@ -147,6 +120,7 @@ const FAMILY_PLANNING_GROUPS = [
   { key: "dropouts", label: "Dropouts" },
 ];
 
+// These are contraceptive methods, not age groups.
 const FAMILY_PLANNING_METHODS = [
   { key: "btl", label: "BTL" },
   { key: "coc", label: "COC" },
@@ -157,55 +131,25 @@ const FAMILY_PLANNING_METHODS = [
   { key: "dmpa", label: "DMPA" },
   { key: "condom", label: "Condom" },
   { key: "implant", label: "Implant" },
+];
+
+const FAMILY_PLANNING_AGE_GROUPS = [
   { key: "age_15_19", label: "Age 15–19" },
   { key: "age_20_49", label: "Age 20–49" },
 ];
 
 const BHW_ARRAY_FIELDS = [
-  {
-    key: "pregnant_women",
-    label: "Pregnant women records",
-  },
-  {
-    key: "deaths",
-    label: "Death records",
-  },
-  {
-    key: "delivery_details",
-    label: "Delivery detail records",
-  },
-  {
-    key: "women_deworming",
-    label: "Women deworming records",
-  },
-  {
-    key: "pregnant_deworming",
-    label: "Pregnant women deworming records",
-  },
-  {
-    key: "tb_dots_referrals",
-    label: "TB-DOTS referrals",
-  },
-  {
-    key: "teenage_pregnancy",
-    label: "Teenage pregnancy records",
-  },
-  {
-    key: "agencies_coordinated",
-    label: "Agencies coordinated with",
-  },
-  {
-    key: "nutrition_assessment",
-    label: "Nutrition assessment records",
-  },
-  {
-    key: "postpartum_vitamin_a",
-    label: "Postpartum vitamin A records",
-  },
-  {
-    key: "consultation_referrals",
-    label: "Consultation referrals",
-  },
+  { key: "pregnant_women", label: "Pregnant women records" },
+  { key: "deaths", label: "Death records" },
+  { key: "delivery_details", label: "Delivery detail records" },
+  { key: "women_deworming", label: "Women deworming records" },
+  { key: "pregnant_deworming", label: "Pregnant women deworming records" },
+  { key: "tb_dots_referrals", label: "TB-DOTS referrals" },
+  { key: "teenage_pregnancy", label: "Teenage pregnancy records" },
+  { key: "agencies_coordinated", label: "Agencies coordinated with" },
+  { key: "nutrition_assessment", label: "Nutrition assessment records" },
+  { key: "postpartum_vitamin_a", label: "Postpartum vitamin A records" },
+  { key: "consultation_referrals", label: "Consultation referrals" },
 ];
 
 const PRENATAL_TRIMESTERS = [
@@ -215,9 +159,16 @@ const PRENATAL_TRIMESTERS = [
 ];
 
 const asNumber = (value) => {
+  if (value === null || value === undefined || value === "") return 0;
+
   const number = Number(value);
   return Number.isFinite(number) ? number : 0;
 };
+
+const asObject = (value) =>
+  value && typeof value === "object" && !Array.isArray(value) ? value : {};
+
+const asArray = (value) => (Array.isArray(value) ? value : []);
 
 const emptyBnsTotals = () =>
   Object.fromEntries(
@@ -240,7 +191,9 @@ const emptyBhwTotals = () => {
     FAMILY_PLANNING_GROUPS.map(({ key }) => [
       key,
       Object.fromEntries(
-        FAMILY_PLANNING_METHODS.map(({ key: method }) => [method, 0]),
+        [...FAMILY_PLANNING_METHODS, ...FAMILY_PLANNING_AGE_GROUPS].map(
+          ({ key: field }) => [field, 0],
+        ),
       ),
     ]),
   );
@@ -257,39 +210,46 @@ const emptyBhwTotals = () => {
 };
 
 const addBnsReport = (totals, reportData) => {
-  const data = reportData && typeof reportData === "object" ? reportData : {};
+  const data = asObject(reportData);
 
   BNS_AGE_FIELDS.forEach(({ key }) => {
+    const ageData = asObject(data[key]);
+
     BNS_METRICS.forEach(({ key: metric }) => {
-      totals[key][metric] += asNumber(data[key]?.[metric]);
+      totals[key][metric] += asNumber(ageData[metric]);
     });
   });
 };
 
 const addBhwReport = (totals, reportData) => {
-  const data = reportData && typeof reportData === "object" ? reportData : {};
+  const data = asObject(reportData);
 
   BHW_OBJECT_FIELDS.forEach(({ key, fields }) => {
+    const section = asObject(data[key]);
+
     fields.forEach(({ key: field }) => {
-      totals[key][field] += asNumber(data[key]?.[field]);
+      totals[key][field] += asNumber(section[field]);
     });
   });
 
   FAMILY_PLANNING_GROUPS.forEach(({ key: group }) => {
-    FAMILY_PLANNING_METHODS.forEach(({ key: method }) => {
-      totals.family_planning[group][method] += asNumber(
-        data.family_planning?.[group]?.[method],
-      );
-    });
+    const groupData = asObject(asObject(data.family_planning)[group]);
+
+    [...FAMILY_PLANNING_METHODS, ...FAMILY_PLANNING_AGE_GROUPS].forEach(
+      ({ key: field }) => {
+        totals.family_planning[group][field] += asNumber(groupData[field]);
+      },
+    );
   });
 
   BHW_ARRAY_FIELDS.forEach(({ key }) => {
-    totals.records[key] += Array.isArray(data[key]) ? data[key].length : 0;
+    totals.records[key] += asArray(data[key]).length;
   });
 
   PRENATAL_TRIMESTERS.forEach(({ key }) => {
-    const entries = data.prenatal_checkup?.[key];
-    totals.prenatal_checkup[key] += Array.isArray(entries) ? entries.length : 0;
+    totals.prenatal_checkup[key] += asArray(
+      asObject(data.prenatal_checkup)[key],
+    ).length;
   });
 };
 
@@ -368,7 +328,7 @@ function SourceReportList({ title, reports, emptyText }) {
     <div className="rounded-xl border border-slate-200 bg-white">
       <button
         type="button"
-        onClick={() => setExpanded((current) => !current)}
+        onClick={() => setExpanded((value) => !value)}
         className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
       >
         <div>
@@ -422,7 +382,6 @@ function SourceReportList({ title, reports, emptyText }) {
 
 export default function MidwifeNurseFhsisReport() {
   const currentUser = useMemo(() => getUser(), []);
-
   const now = new Date();
 
   const [month, setMonth] = useState(now.getMonth() + 1);
@@ -465,7 +424,6 @@ export default function MidwifeNurseFhsisReport() {
         );
       }
 
-      // Confirm the district record and load only nurses in this district.
       const [
         districtResult,
         nursesResult,
@@ -516,7 +474,7 @@ export default function MidwifeNurseFhsisReport() {
         supabase
           .from("midwife_nurse_fhsis_reports")
           .select(
-            "id, reporting_month, reporting_year, district_id, midwife_id, nurse_id, report_title, status, submitted_at, reviewed_at, review_notes, created_at",
+            "id, reporting_month, reporting_year, district_id, midwife_id, nurse_id, report_title, status, submitted_at, reviewed_at, review_notes, reviewed_by, created_at",
           )
           .eq("reporting_month", month)
           .eq("reporting_year", year)
@@ -525,46 +483,43 @@ export default function MidwifeNurseFhsisReport() {
           .order("created_at", { ascending: false }),
       ]);
 
-      if (districtResult.error) throw districtResult.error;
-      if (nursesResult.error) throw nursesResult.error;
-      if (barangaysResult.error) throw barangaysResult.error;
-      if (bnsResult.error) throw bnsResult.error;
-      if (bhwResult.error) throw bhwResult.error;
-      if (priorReportsResult.error) throw priorReportsResult.error;
+      for (const result of [
+        districtResult,
+        nursesResult,
+        barangaysResult,
+        bnsResult,
+        bhwResult,
+        priorReportsResult,
+      ]) {
+        if (result.error) throw result.error;
+      }
 
-      const districtRow = districtResult.data;
-
-      if (!districtRow) {
+      if (!districtResult.data) {
         throw new Error("The district assigned to your account was not found.");
       }
 
-      setDistrict(districtRow);
+      const districtBarangays = barangaysResult.data || [];
+      const barangayIds = new Set(
+        districtBarangays.map((item) => String(item.id)),
+      );
+      const barangayNames = new Map(
+        districtBarangays.map((item) => [String(item.id), item.name]),
+      );
+
+      setDistrict(districtResult.data);
       setNurses(nursesResult.data || []);
       setExistingReports(priorReportsResult.data || []);
 
-      const districtBarangays = barangaysResult.data || [];
-      const barangayIds = new Set(
-        districtBarangays.map((barangay) => String(barangay.id)),
-      );
-
-      const barangayNames = new Map(
-        districtBarangays.map((barangay) => [
-          String(barangay.id),
-          barangay.name,
-        ]),
-      );
-
-      // BNS reports have an explicit barangay_id. Verify that each
-      // report's barangay belongs to the current midwife's district.
-      const eligibleBns = (bnsResult.data || []).filter(
-        (report) =>
-          report.barangay_id != null &&
-          barangayIds.has(String(report.barangay_id)),
-      );
-
+      // BNS: include only reports whose barangays belong to this district.
       const uniqueBns = Array.from(
         new Map(
-          eligibleBns.map((report) => [String(report.id), report]),
+          (bnsResult.data || [])
+            .filter(
+              (report) =>
+                report.barangay_id != null &&
+                barangayIds.has(String(report.barangay_id)),
+            )
+            .map((report) => [String(report.id), report]),
         ).values(),
       );
 
@@ -574,13 +529,13 @@ export default function MidwifeNurseFhsisReport() {
 
       let bnsUsersById = new Map();
 
-      if (bnsIds.length > 0) {
-        const { data, error: bnsUsersError } = await supabase
+      if (bnsIds.length) {
+        const { data, error: queryError } = await supabase
           .from("users")
           .select("id, username, first_name, middle_name, last_name, role")
           .in("id", bnsIds);
 
-        if (bnsUsersError) throw bnsUsersError;
+        if (queryError) throw queryError;
 
         bnsUsersById = new Map(
           (data || [])
@@ -594,18 +549,13 @@ export default function MidwifeNurseFhsisReport() {
         .map((report) => ({
           ...report,
           sourceName: displayName(bnsUsersById.get(String(report.bns_id))),
-          barangayName:
-            barangayNames.get(String(report.barangay_id)) ||
-            "District barangay",
+          barangayName: barangayNames.get(String(report.barangay_id)) || "",
         }));
 
-      // BHW reports have no barangay_id. Determine their district through
-      // active worker assignments -> local_areas -> barangays.
-      const candidateBhw = bhwResult.data || [];
-
+      // BHW: derive district coverage through active worker assignments.
       const uniqueCandidateBhw = Array.from(
         new Map(
-          candidateBhw.map((report) => [String(report.id), report]),
+          (bhwResult.data || []).map((report) => [String(report.id), report]),
         ).values(),
       );
 
@@ -615,13 +565,13 @@ export default function MidwifeNurseFhsisReport() {
 
       let verifiedBhw = [];
 
-      if (bhwIds.length > 0) {
-        const { data: bhwUsers, error: bhwUsersError } = await supabase
+      if (bhwIds.length) {
+        const { data: bhwUsers, error: usersError } = await supabase
           .from("users")
           .select("id, username, first_name, middle_name, last_name, role")
           .in("id", bhwIds);
 
-        if (bhwUsersError) throw bhwUsersError;
+        if (usersError) throw usersError;
 
         const bhwUsersById = new Map(
           (bhwUsers || [])
@@ -629,15 +579,9 @@ export default function MidwifeNurseFhsisReport() {
             .map((user) => [String(user.id), user]),
         );
 
-        const validBhwIds = [
-          ...new Set(
-            (bhwUsers || [])
-              .filter((user) => user.role === "bhw")
-              .map((user) => user.id),
-          ),
-        ];
+        const validBhwIds = [...bhwUsersById.values()].map((user) => user.id);
 
-        if (validBhwIds.length > 0) {
+        if (validBhwIds.length) {
           const { data: assignments, error: assignmentsError } = await supabase
             .from("worker_area_assignments")
             .select("id, worker_id, local_area_id, is_active")
@@ -647,16 +591,13 @@ export default function MidwifeNurseFhsisReport() {
           if (assignmentsError) throw assignmentsError;
 
           const assignmentRows = assignments || [];
-
           const localAreaIds = [
-            ...new Set(
-              assignmentRows.map((assignment) => assignment.local_area_id),
-            ),
+            ...new Set(assignmentRows.map((item) => item.local_area_id)),
           ];
 
           let areas = [];
 
-          if (localAreaIds.length > 0) {
+          if (localAreaIds.length) {
             const { data, error: areasError } = await supabase
               .from("local_areas")
               .select("id, name, type, barangay_id")
@@ -670,41 +611,33 @@ export default function MidwifeNurseFhsisReport() {
             areas.map((area) => [String(area.id), area]),
           );
 
-          const workerAssignments = new Map();
+          const activeAreasByWorker = new Map();
 
           assignmentRows.forEach((assignment) => {
-            const workerKey = String(assignment.worker_id);
             const area = areaById.get(String(assignment.local_area_id));
-
             if (!area) return;
 
-            if (!workerAssignments.has(workerKey)) {
-              workerAssignments.set(workerKey, []);
+            const key = String(assignment.worker_id);
+
+            if (!activeAreasByWorker.has(key)) {
+              activeAreasByWorker.set(key, []);
             }
 
-            workerAssignments.get(workerKey).push({
-              ...assignment,
-              area,
-            });
+            activeAreasByWorker.get(key).push(area);
           });
 
           verifiedBhw = uniqueCandidateBhw
             .filter((report) => bhwUsersById.has(String(report.bhw_id)))
             .map((report) => {
-              const assignedAreas =
-                workerAssignments.get(String(report.bhw_id)) || [];
+              const reportData = asObject(report.report_data);
+              const workerAreas =
+                activeAreasByWorker.get(String(report.bhw_id)) || [];
 
-              // If area_ids is provided in the report snapshot, honor it.
-              // It must still match an active assignment. If absent, use
-              // the worker's active assignments as the legacy fallback.
-              const reportData =
-                report.report_data && typeof report.report_data === "object"
-                  ? report.report_data
-                  : {};
-
+              // Respect the saved area_ids when present. Legacy reports
+              // without area_ids use the worker's active assignments.
               const hasAreaIds = Array.isArray(reportData.area_ids);
 
-              const coveredAreas = assignedAreas.filter(({ area }) => {
+              const coveredAreas = workerAreas.filter((area) => {
                 if (!barangayIds.has(String(area.barangay_id))) return false;
 
                 if (!hasAreaIds) return true;
@@ -714,16 +647,12 @@ export default function MidwifeNurseFhsisReport() {
                 );
               });
 
-              // A BHW report qualifies only if it covers at least one
-              // actively assigned local area in the current district.
-              if (coveredAreas.length === 0) return null;
+              if (!coveredAreas.length) return null;
 
               const coveredBarangayNames = [
                 ...new Set(
                   coveredAreas
-                    .map(({ area }) =>
-                      barangayNames.get(String(area.barangay_id)),
-                    )
+                    .map((area) => barangayNames.get(String(area.barangay_id)))
                     .filter(Boolean),
                 ),
               ];
@@ -733,43 +662,34 @@ export default function MidwifeNurseFhsisReport() {
                 sourceName: displayName(
                   bhwUsersById.get(String(report.bhw_id)),
                 ),
-                barangayName:
-                  coveredBarangayNames.join(", ") || "District barangay",
-                coveredAreaIds: coveredAreas.map(({ area }) => area.id),
+                barangayName: coveredBarangayNames.join(", "),
+                coveredAreaIds: coveredAreas.map((area) => area.id),
               };
             })
             .filter(Boolean);
         }
       }
 
-      // Defensive de-duplication: one source report ID is included only once.
-      const uniqueVerifiedBhw = Array.from(
-        new Map(
-          verifiedBhw.map((report) => [String(report.id), report]),
-        ).values(),
+      setBnsReports(verifiedBns);
+      setBhwReports(
+        Array.from(
+          new Map(
+            verifiedBhw.map((report) => [String(report.id), report]),
+          ).values(),
+        ),
       );
 
-      setBnsReports(verifiedBns);
-      setBhwReports(uniqueVerifiedBhw);
-
-      setNurseId((current) => {
-        if (
-          current &&
-          (nursesResult.data || []).some(
-            (nurse) => String(nurse.id) === String(current),
-          )
-        ) {
-          return current;
-        }
-
-        return "";
-      });
+      setNurseId((current) =>
+        current &&
+        (nursesResult.data || []).some(
+          (nurse) => String(nurse.id) === String(current),
+        )
+          ? current
+          : "",
+      );
     } catch (err) {
       console.error("Failed to load Midwife FHSIS data:", err);
-      setError(
-        err?.message ||
-          "Unable to load the district's reviewed source reports.",
-      );
+      setError(err?.message || "Unable to load district source reports.");
       setBnsReports([]);
       setBhwReports([]);
     } finally {
@@ -809,6 +729,12 @@ export default function MidwifeNurseFhsisReport() {
       report.status === "draft",
   );
 
+  const existingReturned = existingReports.find(
+    (report) =>
+      String(report.nurse_id || "") === String(nurseId) &&
+      report.status === "returned",
+  );
+
   const hasSourceReports = bnsReports.length > 0 || bhwReports.length > 0;
 
   const buildReportData = () => ({
@@ -840,13 +766,14 @@ export default function MidwifeNurseFhsisReport() {
     },
     bns_child_indicators: bnsTotals,
     bhw_maternal_community_indicators: bhwTotals,
-    consolidation_notes: [
-      "Only reviewed source reports were included.",
-      "BNS reports were restricted to barangays belonging to the midwife's district.",
-      "BHW reports were restricted to active worker assignments covering local areas in the midwife's district.",
-      "Source report IDs were deduplicated before aggregation.",
-      "BNS age_0_11 and age_0_12 indicators are kept separate because their age ranges overlap.",
-      "BHW array record counts are displayed separately from numeric summary indicators to avoid adding detailed records to summary totals.",
+    indicator_limitations: [
+      "This consolidation contains indicators available in the submitted BNS and BHW report_data JSON.",
+      "Family-planning age groups are separated from contraceptive methods.",
+      "Array record counts represent source snapshot records and are not added to numeric indicators.",
+      "Prenatal trimester counts represent visit entries, not necessarily unique pregnant women.",
+      "The complete official FHSIS A1 form requires additional indicators and source data not present in the current schemas.",
+      "Summed source indicators may include duplicate people when source reports overlap.",
+      "The age_0_11 and age_0_12 BNS indicators are separate and must not be added together as a unique-child total.",
     ],
   });
 
@@ -898,35 +825,33 @@ export default function MidwifeNurseFhsisReport() {
     setNotice("");
 
     if (!selectedNurse) {
-      setError("Please select a nurse from your district.");
+      setError("Please select an active nurse from your district.");
       return;
     }
 
     if (String(selectedNurse.district_id) !== String(districtId)) {
       setError(
-        "Submission blocked: the selected nurse is not assigned to your district.",
+        "Submission blocked: the nurse is not assigned to your district.",
       );
       return;
     }
 
     if (!hasSourceReports) {
       setError(
-        "There are no reviewed BNS or BHW reports for this reporting period in your district.",
+        "There are no reviewed BNS or BHW reports for this period in your district.",
       );
       return;
     }
 
     if (alreadySubmitted) {
       setError(
-        `A report for this month and nurse has already been ${alreadySubmitted.status}. Refresh the page to check its current status.`,
+        `This report has already been ${alreadySubmitted.status} for the selected nurse.`,
       );
       return;
     }
 
     const confirmed = window.confirm(
-      `Submit the ${MONTHS[month - 1]} ${year} district FHSIS report to ${displayName(
-        selectedNurse,
-      )}? Only the reviewed reports shown on this page will be included.`,
+      `Submit the ${MONTHS[month - 1]} ${year} district FHSIS report to ${displayName(selectedNurse)}?`,
     );
 
     if (!confirmed) return;
@@ -934,32 +859,33 @@ export default function MidwifeNurseFhsisReport() {
     setSubmitting(true);
 
     try {
-      // Revalidate both users immediately before submission.
-      const { data: midwifeCheck, error: midwifeCheckError } = await supabase
+      // Verify the current midwife and district against the database.
+      const { data: midwifeCheck, error: midwifeError } = await supabase
         .from("users")
-        .select("id, role, district_id")
+        .select("id, role, district_id, is_active")
         .eq("id", currentUser.id)
         .maybeSingle();
 
-      if (midwifeCheckError) throw midwifeCheckError;
+      if (midwifeError) throw midwifeError;
 
       if (
         !midwifeCheck ||
         midwifeCheck.role !== "midwife" ||
+        midwifeCheck.is_active === false ||
         String(midwifeCheck.district_id) !== String(districtId)
       ) {
         throw new Error(
-          "Your Midwife role or district assignment changed. Please refresh and try again.",
+          "Your account or district assignment changed. Please refresh.",
         );
       }
 
-      const { data: nurseCheck, error: nurseCheckError } = await supabase
+      const { data: nurseCheck, error: nurseError } = await supabase
         .from("users")
         .select("id, role, district_id, is_active")
         .eq("id", selectedNurse.id)
         .maybeSingle();
 
-      if (nurseCheckError) throw nurseCheckError;
+      if (nurseError) throw nurseError;
 
       if (
         !nurseCheck ||
@@ -968,12 +894,12 @@ export default function MidwifeNurseFhsisReport() {
         String(nurseCheck.district_id) !== String(districtId)
       ) {
         throw new Error(
-          "The selected nurse is no longer active or is not assigned to your district.",
+          "The selected nurse is no longer active or assigned to your district.",
         );
       }
 
-      // Recheck for an existing submitted report before inserting.
-      const { data: duplicateCheck, error: duplicateError } = await supabase
+      // Prevent accidental duplicate submissions.
+      const { data: duplicateRows, error: duplicateError } = await supabase
         .from("midwife_nurse_fhsis_reports")
         .select("id, status")
         .eq("reporting_month", month)
@@ -986,24 +912,26 @@ export default function MidwifeNurseFhsisReport() {
 
       if (duplicateError) throw duplicateError;
 
-      if ((duplicateCheck || []).length > 0) {
+      if ((duplicateRows || []).length) {
         throw new Error(
           "This report has already been submitted to the selected nurse.",
         );
       }
 
-      // Recheck source report status so a report returned or otherwise
-      // changed after loading is not silently included.
-      const currentBnsIds = bnsReports.map((report) => report.id);
-      const currentBhwIds = bhwReports.map((report) => report.id);
+      // Revalidate the BNS reports.
+      const bnsIds = bnsReports.map((report) => report.id);
 
-      if (currentBnsIds.length > 0) {
+      if (bnsIds.length) {
         const { data, error: checkError } = await supabase
           .from("bns_child_monthly_reports")
-          .select("id, status, report_month, report_year, barangay_id")
-          .in("id", currentBnsIds);
+          .select("id, bns_id, status, report_month, report_year, barangay_id")
+          .in("id", bnsIds);
 
         if (checkError) throw checkError;
+
+        const expected = new Map(
+          bnsReports.map((report) => [String(report.id), report]),
+        );
 
         const valid = new Map(
           (data || [])
@@ -1016,38 +944,43 @@ export default function MidwifeNurseFhsisReport() {
             .map((row) => [String(row.id), row]),
         );
 
-        if (valid.size !== currentBnsIds.length) {
+        if (valid.size !== bnsIds.length) {
           throw new Error(
-            "One or more BNS reports changed status or reporting period. Refresh the report before submitting.",
+            "A BNS report changed status or reporting period. Refresh before submitting.",
           );
         }
 
-        if (
-          (data || []).some(
-            (row) =>
-              !row.barangay_id ||
-              !bnsReports.some(
-                (source) =>
-                  String(source.id) === String(row.id) &&
-                  String(source.barangay_id) === String(row.barangay_id),
-              ),
-          )
-        ) {
-          throw new Error(
-            "A BNS report's barangay assignment changed. Refresh the report before submitting.",
-          );
+        for (const row of valid.values()) {
+          const original = expected.get(String(row.id));
+
+          if (
+            !original ||
+            String(original.bns_id) !== String(row.bns_id) ||
+            String(original.barangay_id) !== String(row.barangay_id)
+          ) {
+            throw new Error(
+              "A BNS report assignment changed. Refresh before submitting.",
+            );
+          }
         }
       }
 
-      if (currentBhwIds.length > 0) {
+      // Revalidate BHW report status, period and saved area coverage.
+      const bhwIds = bhwReports.map((report) => report.id);
+
+      if (bhwIds.length) {
         const { data, error: checkError } = await supabase
           .from("bhw_monthly_reports")
-          .select("id, status, month, year")
-          .in("id", currentBhwIds);
+          .select("id, bhw_id, status, month, year, report_data")
+          .in("id", bhwIds);
 
         if (checkError) throw checkError;
 
-        const valid = new Set(
+        const expected = new Map(
+          bhwReports.map((report) => [String(report.id), report]),
+        );
+
+        const valid = new Map(
           (data || [])
             .filter(
               (row) =>
@@ -1055,13 +988,38 @@ export default function MidwifeNurseFhsisReport() {
                 Number(row.month) === Number(month) &&
                 Number(row.year) === Number(year),
             )
-            .map((row) => String(row.id)),
+            .map((row) => [String(row.id), row]),
         );
 
-        if (valid.size !== currentBhwIds.length) {
+        if (valid.size !== bhwIds.length) {
           throw new Error(
-            "One or more BHW reports changed status or reporting period. Refresh the report before submitting.",
+            "A BHW report changed status or reporting period. Refresh before submitting.",
           );
+        }
+
+        for (const row of valid.values()) {
+          const original = expected.get(String(row.id));
+
+          if (!original || String(original.bhw_id) !== String(row.bhw_id)) {
+            throw new Error(
+              "A BHW report's worker assignment changed. Refresh before submitting.",
+            );
+          }
+
+          const savedAreaIds = asObject(row.report_data).area_ids;
+
+          if (
+            Array.isArray(savedAreaIds) &&
+            !savedAreaIds.some((id) =>
+              (original.coveredAreaIds || []).some(
+                (coveredId) => String(coveredId) === String(id),
+              ),
+            )
+          ) {
+            throw new Error(
+              "A BHW report's area coverage changed. Refresh before submitting.",
+            );
+          }
         }
       }
 
@@ -1079,16 +1037,42 @@ export default function MidwifeNurseFhsisReport() {
         updated_at: new Date().toISOString(),
       };
 
-      // Reuse an existing draft for the same month, district, midwife and
-      // nurse. Otherwise insert a new report.
       if (existingDraft) {
-        const { error: updateError } = await supabase
+        const { data, error: updateError } = await supabase
           .from("midwife_nurse_fhsis_reports")
           .update(payload)
           .eq("id", existingDraft.id)
-          .eq("status", "draft");
+          .eq("midwife_id", currentUser.id)
+          .eq("status", "draft")
+          .select("id")
+          .maybeSingle();
 
         if (updateError) throw updateError;
+
+        if (!data) {
+          throw new Error(
+            "The draft could not be updated. It may have changed; refresh and try again.",
+          );
+        }
+      } else if (existingReturned) {
+        // Resubmission updates the returned report rather than creating
+        // another report for the same period and nurse.
+        const { data, error: updateError } = await supabase
+          .from("midwife_nurse_fhsis_reports")
+          .update(payload)
+          .eq("id", existingReturned.id)
+          .eq("midwife_id", currentUser.id)
+          .eq("status", "returned")
+          .select("id")
+          .maybeSingle();
+
+        if (updateError) throw updateError;
+
+        if (!data) {
+          throw new Error(
+            "The returned report could not be updated. Refresh and try again.",
+          );
+        }
       } else {
         const { error: insertError } = await supabase
           .from("midwife_nurse_fhsis_reports")
@@ -1098,17 +1082,13 @@ export default function MidwifeNurseFhsisReport() {
       }
 
       setNotice(
-        `The ${MONTHS[month - 1]} ${year} FHSIS report was submitted to ${displayName(
-          selectedNurse,
-        )}.`,
+        `The ${MONTHS[month - 1]} ${year} report was submitted to ${displayName(selectedNurse)}.`,
       );
 
-      setRefreshKey((current) => current + 1);
+      setRefreshKey((value) => value + 1);
     } catch (err) {
       console.error("FHSIS submission failed:", err);
-      setError(
-        err?.message || "The report could not be submitted. Please try again.",
-      );
+      setError(err?.message || "The report could not be submitted.");
     } finally {
       setSubmitting(false);
     }
@@ -1120,21 +1100,18 @@ export default function MidwifeNurseFhsisReport() {
       description="Consolidated from reviewed BNS child monthly reports in this district."
       icon={Baby}
     >
-      <div className="border-b border-slate-100 bg-slate-50 px-5 py-3 text-sm text-slate-600">
-        <span className="font-semibold text-slate-800">
-          {bnsReports.length}
-        </span>{" "}
-        unique reviewed BNS report{bnsReports.length === 1 ? "" : "s"} included
+      <div className="bg-slate-50 px-5 py-3 text-sm text-slate-600">
+        <strong>{bnsReports.length}</strong> reviewed BNS reports included
       </div>
 
       {BNS_AGE_FIELDS.map(({ key, label }) => (
-        <div key={key} className="border-b border-slate-100 last:border-0">
+        <div key={key} className="border-t border-slate-100">
           <div className="px-5 pt-4">
             <h3 className="font-semibold text-slate-800">{label}</h3>
             {key === "age_0_11" && (
               <p className="mt-1 text-xs text-amber-700">
-                This is kept separate from the 0–12 month indicator because the
-                age ranges overlap.
+                The 0–11 and 0–12 month indicators overlap. They are displayed
+                separately and must not be added together as unique children.
               </p>
             )}
           </div>
@@ -1161,18 +1138,15 @@ export default function MidwifeNurseFhsisReport() {
   const renderBhwSection = () => (
     <SectionCard
       title="BHW Maternal and Community Indicators"
-      description="Consolidated from reviewed BHW reports covering active assigned local areas in this district."
+      description="Consolidated from reviewed BHW reports covering eligible assigned areas."
       icon={HeartPulse}
     >
-      <div className="border-b border-slate-100 bg-slate-50 px-5 py-3 text-sm text-slate-600">
-        <span className="font-semibold text-slate-800">
-          {bhwReports.length}
-        </span>{" "}
-        unique reviewed BHW report{bhwReports.length === 1 ? "" : "s"} included
+      <div className="bg-slate-50 px-5 py-3 text-sm text-slate-600">
+        <strong>{bhwReports.length}</strong> reviewed BHW reports included
       </div>
 
       {BHW_OBJECT_FIELDS.map(({ key, label, fields }) => (
-        <div key={key} className="border-b border-slate-100 last:border-0">
+        <div key={key} className="border-t border-slate-100">
           <div className="px-5 pt-4">
             <h3 className="font-semibold text-slate-800">{label}</h3>
           </div>
@@ -1186,13 +1160,14 @@ export default function MidwifeNurseFhsisReport() {
         </div>
       ))}
 
-      <div className="border-b border-slate-100">
+      <div className="border-t border-slate-100">
         <div className="px-5 pt-4">
           <h3 className="font-semibold text-slate-800">
             Family planning indicators
           </h3>
           <p className="mt-1 text-xs text-slate-500">
-            Totals are shown separately for each method and reporting group.
+            Age groups are separate from contraceptive methods. These totals
+            reflect the values actually present in the saved BHW reports.
           </p>
         </div>
 
@@ -1202,24 +1177,27 @@ export default function MidwifeNurseFhsisReport() {
               {label}
             </h4>
             <MetricTable
-              rows={FAMILY_PLANNING_METHODS.map((method) => ({
-                key: method.key,
-                label: method.label,
-                value: bhwTotals.family_planning[key][method.key],
+              rows={[
+                ...FAMILY_PLANNING_METHODS,
+                ...FAMILY_PLANNING_AGE_GROUPS,
+              ].map((item) => ({
+                key: item.key,
+                label: item.label,
+                value: bhwTotals.family_planning[key][item.key],
               }))}
             />
           </div>
         ))}
       </div>
 
-      <div className="border-b border-slate-100">
+      <div className="border-t border-slate-100">
         <div className="px-5 pt-4">
           <h3 className="font-semibold text-slate-800">
             Detailed record counts
           </h3>
           <p className="mt-1 text-xs text-slate-500">
-            These counts describe records in the source report snapshots. They
-            are not added to the numeric summary indicators above.
+            These count entries in the saved source snapshots. They are not
+            added to the numeric summary indicators.
           </p>
         </div>
         <MetricTable
@@ -1231,7 +1209,7 @@ export default function MidwifeNurseFhsisReport() {
             })),
             ...PRENATAL_TRIMESTERS.map(({ key, label }) => ({
               key,
-              label: `Prenatal checkups — ${label.toLowerCase()}`,
+              label: `Prenatal checkup entries — ${label.toLowerCase()}`,
               value: bhwTotals.prenatal_checkup[key],
             })),
           ]}
@@ -1242,7 +1220,7 @@ export default function MidwifeNurseFhsisReport() {
         <SourceReportList
           title="BHW source reports"
           reports={bhwReports}
-          emptyText="No reviewed BHW reports cover an active assigned local area in this district for this period."
+          emptyText="No reviewed BHW reports cover eligible assigned areas for this period."
         />
       </div>
     </SectionCard>
@@ -1262,16 +1240,16 @@ export default function MidwifeNurseFhsisReport() {
             </h1>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
               Consolidate reviewed BNS and BHW reports for your district,
-              inspect the source breakdown, and submit the report to the
-              assigned district nurse.
+              inspect the source breakdown, and submit to an active nurse in the
+              same district.
             </p>
           </div>
 
           <button
             type="button"
-            onClick={() => setRefreshKey((current) => current + 1)}
+            onClick={() => setRefreshKey((value) => value + 1)}
             disabled={loading || submitting}
-            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm disabled:opacity-50"
           >
             <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
             Refresh reports
@@ -1309,7 +1287,7 @@ export default function MidwifeNurseFhsisReport() {
                 value={month}
                 onChange={(event) => setMonth(Number(event.target.value))}
                 disabled={loading || submitting}
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
               >
                 {MONTHS.map((name, index) => (
                   <option key={name} value={index + 1}>
@@ -1327,7 +1305,7 @@ export default function MidwifeNurseFhsisReport() {
                 value={year}
                 onChange={(event) => setYear(Number(event.target.value))}
                 disabled={loading || submitting}
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
               >
                 {Array.from(
                   { length: 7 },
@@ -1357,7 +1335,7 @@ export default function MidwifeNurseFhsisReport() {
                 value={nurseId}
                 onChange={(event) => setNurseId(event.target.value)}
                 disabled={loading || submitting || nurses.length === 0}
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
               >
                 <option value="">Select nurse</option>
                 {nurses.map((nurse) => (
@@ -1366,7 +1344,7 @@ export default function MidwifeNurseFhsisReport() {
                   </option>
                 ))}
               </select>
-              {nurses.length === 0 && !loading && (
+              {!loading && nurses.length === 0 && (
                 <p className="mt-1 text-xs text-amber-700">
                   No active nurse is assigned to this district.
                 </p>
@@ -1375,9 +1353,8 @@ export default function MidwifeNurseFhsisReport() {
           </div>
 
           <p className="mt-4 text-xs leading-5 text-slate-500">
-            Source reports are loaded only when their status is{" "}
-            <strong>reviewed</strong>. Changing the month or year reloads the
-            source reports for that reporting period.
+            Only reviewed source reports for the selected month and year are
+            included.
           </p>
         </section>
 
@@ -1391,57 +1368,50 @@ export default function MidwifeNurseFhsisReport() {
         ) : (
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-500">BNS reports</p>
-                  <Baby size={19} className="text-emerald-700" />
+              {[
+                {
+                  label: "BNS reports",
+                  value: bnsReports.length,
+                  description: "Reviewed child reports",
+                  icon: Baby,
+                  color: "text-emerald-700",
+                },
+                {
+                  label: "BHW reports",
+                  value: bhwReports.length,
+                  description: "Reviewed maternal and community reports",
+                  icon: HeartPulse,
+                  color: "text-rose-600",
+                },
+                {
+                  label: "Total sources",
+                  value: bnsReports.length + bhwReports.length,
+                  description: "Unique source reports",
+                  icon: FileText,
+                  color: "text-blue-600",
+                },
+                {
+                  label: "Receiving nurses",
+                  value: nurses.length,
+                  description: "Active nurses in your district",
+                  icon: Users,
+                  color: "text-violet-600",
+                },
+              ].map(({ label, value, description, icon: Icon, color }) => (
+                <div
+                  key={label}
+                  className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+                >
+                  <div className="flex items-center justify-between">
+                    <p className="text-sm text-slate-500">{label}</p>
+                    <Icon size={19} className={color} />
+                  </div>
+                  <p className="mt-3 text-3xl font-bold text-slate-900">
+                    {value}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">{description}</p>
                 </div>
-                <p className="mt-3 text-3xl font-bold text-slate-900">
-                  {bnsReports.length}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Reviewed child reports
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-500">BHW reports</p>
-                  <HeartPulse size={19} className="text-rose-600" />
-                </div>
-                <p className="mt-3 text-3xl font-bold text-slate-900">
-                  {bhwReports.length}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Reviewed maternal and community reports
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-500">Total sources</p>
-                  <FileText size={19} className="text-blue-600" />
-                </div>
-                <p className="mt-3 text-3xl font-bold text-slate-900">
-                  {bnsReports.length + bhwReports.length}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Unique reviewed source reports
-                </p>
-              </div>
-
-              <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-slate-500">Receiving nurses</p>
-                  <Users size={19} className="text-violet-600" />
-                </div>
-                <p className="mt-3 text-3xl font-bold text-slate-900">
-                  {nurses.length}
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Active nurses in your district
-                </p>
-              </div>
+              ))}
             </div>
 
             <div className="grid grid-cols-1 gap-6">
@@ -1459,16 +1429,22 @@ export default function MidwifeNurseFhsisReport() {
                     </h2>
                   </div>
                   <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
-                    The system will save the consolidated indicators and a
-                    traceable snapshot of every included source report. The
-                    report will be assigned to the selected nurse in your
-                    district.
+                    The system saves consolidated indicators and a snapshot of
+                    every included source report. The selected nurse must belong
+                    to your district.
                   </p>
 
                   {alreadySubmitted && (
                     <p className="mt-2 text-sm font-medium text-amber-800">
                       This report has already been {alreadySubmitted.status} to
-                      the selected nurse.
+                      this nurse.
+                    </p>
+                  )}
+
+                  {existingReturned && !alreadySubmitted && (
+                    <p className="mt-2 text-sm text-amber-800">
+                      A returned report exists. Submitting will update that
+                      report.
                     </p>
                   )}
                 </div>
@@ -1497,7 +1473,7 @@ export default function MidwifeNurseFhsisReport() {
               {!hasSourceReports && (
                 <p className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                   No eligible reviewed source reports are available for this
-                  reporting period. The system will not submit an empty report.
+                  period. An empty report cannot be submitted.
                 </p>
               )}
             </section>
@@ -1505,7 +1481,7 @@ export default function MidwifeNurseFhsisReport() {
             {existingReports.length > 0 && (
               <SectionCard
                 title="Previously saved reports"
-                description={`Your district FHSIS reports for ${MONTHS[month - 1]} ${year}.`}
+                description={`Your district reports for ${MONTHS[month - 1]} ${year}.`}
                 icon={FileText}
               >
                 <div className="divide-y divide-slate-100">
@@ -1521,11 +1497,14 @@ export default function MidwifeNurseFhsisReport() {
                         <p className="mt-1 text-xs text-slate-500">
                           Report ID: {report.id}
                           {report.submitted_at
-                            ? ` · Submitted ${new Date(
-                                report.submitted_at,
-                              ).toLocaleString()}`
+                            ? ` · Submitted ${new Date(report.submitted_at).toLocaleString()}`
                             : ""}
                         </p>
+                        {report.reviewed_by && (
+                          <p className="mt-1 text-xs text-slate-500">
+                            Reviewed by nurse ID: {report.reviewed_by}
+                          </p>
+                        )}
                         {report.review_notes && (
                           <p className="mt-2 text-sm text-slate-600">
                             Nurse notes: {report.review_notes}
