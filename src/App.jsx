@@ -23,7 +23,7 @@ import BnsHousehold from "./pages/bns/BnsHousehold";
 import BnsChildMonthlyReport from "./pages/bns/BnsChildMonthlyReport";
 import ChildMonitoring from "./pages/bns/ChildMonitoring";
 import ChildRegistration from "./pages/bns/ChildRegistration";
-
+import ChoFhsisReports from "./pages/admin/ChoFhsisReports";
 import BhwPregnantWomen from "./pages/bhw/BhwPregnantWomen";
 import BhwPregnantMonitoring from "./pages/bhw/BhwPregnantMonitoring";
 import BhwMonthlyReport from "./pages/bhw/BhwMonthlyReport";
@@ -78,6 +78,15 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["cho_admin"]}>
               <Barangay />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/admin/fhsis-reports"
+          element={
+            <ProtectedRoute allowedRoles={["cho_admin"]}>
+              <ChoFhsisReports />
             </ProtectedRoute>
           }
         />

@@ -321,7 +321,12 @@ function SectionCard({ title, description, icon: Icon, children }) {
   );
 }
 
-function SourceReportList({ title, reports, emptyText }) {
+function SourceReportList({
+  title,
+  reports,
+  emptyText,
+  statusLabel = "Reviewed",
+}) {
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -334,10 +339,11 @@ function SourceReportList({ title, reports, emptyText }) {
         <div>
           <p className="font-medium text-slate-800">{title}</p>
           <p className="mt-0.5 text-xs text-slate-500">
-            {reports.length} reviewed source report
+            {reports.length} {statusLabel.toLowerCase()} source report
             {reports.length === 1 ? "" : "s"}
           </p>
         </div>
+
         {expanded ? (
           <ChevronDown size={18} className="text-slate-500" />
         ) : (
@@ -357,10 +363,12 @@ function SourceReportList({ title, reports, emptyText }) {
                     <p className="text-sm font-semibold text-slate-800">
                       {report.sourceName || `Source report #${report.id}`}
                     </p>
+
                     <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700">
-                      Reviewed
+                      {statusLabel}
                     </span>
                   </div>
+
                   <p className="mt-1 text-xs text-slate-500">
                     Report ID: {report.id}
                     {report.barangayName ? ` · ${report.barangayName}` : ""}
@@ -460,7 +468,7 @@ export default function MidwifeNurseFhsisReport() {
           )
           .eq("report_month", month)
           .eq("report_year", year)
-          .eq("status", "reviewed"),
+          .eq("status", "approved"),
 
         supabase
           .from("bhw_monthly_reports")
@@ -784,7 +792,8 @@ export default function MidwifeNurseFhsisReport() {
     midwife_id: currentUser.id,
     nurse_id: selectedNurse?.id || null,
     source_rules: {
-      status: "reviewed",
+      bns_status: "approved",
+      bhw_status: "reviewed",
       bns_district_filter: "barangays.district_id = midwife.district_id",
       bhw_district_filter:
         "active worker_area_assignments -> local_areas -> barangays.district_id",
@@ -937,7 +946,7 @@ export default function MidwifeNurseFhsisReport() {
           (data || [])
             .filter(
               (row) =>
-                row.status === "reviewed" &&
+                row.status === "approved" &&
                 Number(row.report_month) === Number(month) &&
                 Number(row.report_year) === Number(year),
             )
@@ -1097,7 +1106,7 @@ export default function MidwifeNurseFhsisReport() {
   const renderBnsSection = () => (
     <SectionCard
       title="BNS Child Indicators"
-      description="Consolidated from reviewed BNS child monthly reports in this district."
+      description="Consolidated from approved BNS child monthly reports in this district."
       icon={Baby}
     >
       <div className="bg-slate-50 px-5 py-3 text-sm text-slate-600">
@@ -1129,7 +1138,8 @@ export default function MidwifeNurseFhsisReport() {
         <SourceReportList
           title="BNS source reports"
           reports={bnsReports}
-          emptyText="No reviewed BNS reports match this period and district."
+          statusLabel="Approved"
+          emptyText="No approved BNS reports match this reporting period and district."
         />
       </div>
     </SectionCard>

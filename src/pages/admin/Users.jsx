@@ -3,7 +3,8 @@ import {
   Search,
   Plus,
   Pencil,
-  Trash2,
+  Power,
+  CheckCircle2,
   X,
   UserRound,
   Stethoscope,
@@ -52,7 +53,7 @@ function Users() {
 
   const [showModal, setShowModal] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
-  const [deleteUser, setDeleteUser] = useState(null);
+  const [statusChangeUser, setStatusChangeUser] = useState(null);
 
   const [form, setForm] = useState(INITIAL_FORM);
 
@@ -266,28 +267,45 @@ function Users() {
     }
   };
 
-  const handleDelete = async () => {
-    if (!deleteUser) return;
+  const handleToggleStatus = async () => {
+    if (!statusChangeUser) return;
+
+    const user = statusChangeUser;
+    const currentlyActive = user.is_active !== false;
+    const nextStatus = !currentlyActive;
 
     setSaving(true);
 
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from("users")
-        .delete()
-        .eq("id", deleteUser.id);
+        .update({ is_active: nextStatus })
+        .eq("id", user.id)
+        .select("*")
+        .single();
 
       if (error) throw error;
 
       setUsers((current) =>
-        current.filter((user) => user.id !== deleteUser.id),
+        current.map((item) =>
+          item.id === user.id
+            ? { ...item, ...data, is_active: nextStatus }
+            : item,
+        ),
       );
 
-      setDeleteUser(null);
-      alert("User deleted successfully.");
+      setStatusChangeUser(null);
+      alert(
+        nextStatus
+          ? "User account activated successfully."
+          : "User account deactivated successfully.",
+      );
     } catch (error) {
-      console.error("Error deleting user:", error);
-      alert(error.message || "Failed to delete user.");
+      console.error("Error updating account status:", error);
+      alert(
+        error.message ||
+          `Failed to ${nextStatus ? "activate" : "deactivate"} the account. Verify that the users table has an is_active column.`,
+      );
     } finally {
       setSaving(false);
     }
@@ -320,8 +338,8 @@ function Users() {
             </h2>
 
             <p className="mt-1 text-sm text-gray-500">
-              Create staff accounts and assign nurses and midwives to their
-              designated districts.
+              Create staff accounts, assign districts, and deactivate accounts
+              without deleting historical records.
             </p>
           </div>
 
@@ -422,6 +440,9 @@ function Users() {
                       <th className="px-6 py-4 text-xs font-semibold uppercase text-gray-500">
                         Assigned District
                       </th>
+                      <th className="px-6 py-4 text-xs font-semibold uppercase text-gray-500">
+                        Account Status
+                      </th>
                       <th className="px-6 py-4 text-right text-xs font-semibold uppercase text-gray-500">
                         Actions
                       </th>
@@ -480,6 +501,18 @@ function Users() {
                           </td>
 
                           <td className="px-6 py-4">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                                user.is_active === false
+                                  ? "bg-red-50 text-red-700"
+                                  : "bg-green-50 text-green-700"
+                              }`}
+                            >
+                              {user.is_active === false ? "Inactive" : "Active"}
+                            </span>
+                          </td>
+
+                          <td className="px-6 py-4">
                             <div className="flex justify-end gap-2">
                               <button
                                 type="button"
@@ -490,14 +523,25 @@ function Users() {
                                 <Pencil size={17} />
                               </button>
 
-                              <button
-                                type="button"
-                                onClick={() => setDeleteUser(user)}
-                                title="Delete staff"
-                                className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-500 transition hover:bg-red-50 hover:text-red-600"
-                              >
-                                <Trash2 size={17} />
-                              </button>
+                              {user.is_active === false ? (
+                                <button
+                                  type="button"
+                                  onClick={() => setStatusChangeUser(user)}
+                                  title="Activate staff account"
+                                  className="flex h-9 w-9 items-center justify-center rounded-lg text-green-600 transition hover:bg-green-50 hover:text-green-700"
+                                >
+                                  <CheckCircle2 size={18} />
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setStatusChangeUser(user)}
+                                  title="Deactivate staff account"
+                                  className="flex h-9 w-9 items-center justify-center rounded-lg text-red-500 transition hover:bg-red-50 hover:text-red-600"
+                                >
+                                  <Power size={18} />
+                                </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -507,7 +551,7 @@ function Users() {
                     {filteredUsers.length === 0 && (
                       <tr>
                         <td
-                          colSpan={5}
+                          colSpan={6}
                           className="px-6 py-12 text-center text-sm text-gray-500"
                         >
                           No staff accounts found.
@@ -557,6 +601,15 @@ function Users() {
                           {districtMap.get(String(user.district_id)) ||
                             "Not assigned"}
                         </span>
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                            user.is_active === false
+                              ? "bg-red-50 text-red-700"
+                              : "bg-green-50 text-green-700"
+                          }`}
+                        >
+                          {user.is_active === false ? "Inactive" : "Active"}
+                        </span>
                       </div>
 
                       <div className="flex justify-end gap-2">
@@ -569,14 +622,25 @@ function Users() {
                           Edit
                         </button>
 
-                        <button
-                          type="button"
-                          onClick={() => setDeleteUser(user)}
-                          className="inline-flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700"
-                        >
-                          <Trash2 size={15} />
-                          Delete
-                        </button>
+                        {user.is_active === false ? (
+                          <button
+                            type="button"
+                            onClick={() => setStatusChangeUser(user)}
+                            className="inline-flex items-center gap-2 rounded-lg bg-green-50 px-3 py-2 text-sm font-medium text-green-700"
+                          >
+                            <CheckCircle2 size={15} />
+                            Activate
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setStatusChangeUser(user)}
+                            className="inline-flex items-center gap-2 rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700"
+                          >
+                            <Power size={15} />
+                            Deactivate
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -793,49 +857,77 @@ function Users() {
           </div>
         )}
 
-        {/* Delete confirmation */}
-        {deleteUser && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
-            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-red-50">
-                <Trash2 size={22} className="text-red-600" />
+        {/* Activate / Deactivate confirmation */}
+        {statusChangeUser &&
+          (() => {
+            const isCurrentlyActive = statusChangeUser.is_active !== false;
+            const action = isCurrentlyActive ? "Deactivate" : "Activate";
+            const ActionIcon = isCurrentlyActive ? Power : CheckCircle2;
+
+            return (
+              <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
+                <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+                  <div
+                    className={`mb-4 flex h-12 w-12 items-center justify-center rounded-full ${
+                      isCurrentlyActive ? "bg-red-50" : "bg-green-50"
+                    }`}
+                  >
+                    <ActionIcon
+                      size={22}
+                      className={
+                        isCurrentlyActive ? "text-red-600" : "text-green-600"
+                      }
+                    />
+                  </div>
+
+                  <h3 className="text-lg font-semibold text-gray-800">
+                    {action} Staff Account?
+                  </h3>
+
+                  <p className="mt-2 text-sm leading-6 text-gray-500">
+                    Are you sure you want to {action.toLowerCase()} the account
+                    for{" "}
+                    <span className="font-medium text-gray-800">
+                      {statusChangeUser.first_name} {statusChangeUser.last_name}
+                    </span>
+                    ?{" "}
+                    {isCurrentlyActive
+                      ? "The account will be marked inactive. Historical records and related data will be preserved."
+                      : "The account will be marked active again. Historical records and related data will be preserved."}
+                  </p>
+
+                  <div className="mt-6 flex justify-end gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setStatusChangeUser(null)}
+                      disabled={saving}
+                      className="rounded-lg bg-gray-100 px-4 py-2.5 text-sm font-medium text-gray-600 transition hover:bg-gray-200 disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleToggleStatus}
+                      disabled={saving}
+                      className={`inline-flex items-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium text-white transition disabled:cursor-not-allowed disabled:opacity-50 ${
+                        isCurrentlyActive
+                          ? "bg-red-600 hover:bg-red-700"
+                          : "bg-green-600 hover:bg-green-700"
+                      }`}
+                    >
+                      {saving ? (
+                        <Loader2 size={16} className="animate-spin" />
+                      ) : (
+                        <ActionIcon size={16} />
+                      )}
+                      {saving ? `${action}ing...` : `${action} Account`}
+                    </button>
+                  </div>
+                </div>
               </div>
-
-              <h3 className="text-lg font-semibold text-gray-800">
-                Delete Staff Account?
-              </h3>
-
-              <p className="mt-2 text-sm text-gray-500">
-                Are you sure you want to delete{" "}
-                <span className="font-medium text-gray-800">
-                  {deleteUser.first_name} {deleteUser.last_name}
-                </span>
-                ? This action cannot be undone.
-              </p>
-
-              <div className="mt-6 flex justify-end gap-3">
-                <button
-                  type="button"
-                  onClick={() => setDeleteUser(null)}
-                  disabled={saving}
-                  className="rounded-lg bg-gray-100 px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-200"
-                >
-                  Cancel
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleDelete}
-                  disabled={saving}
-                  className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                >
-                  {saving && <Loader2 size={16} className="animate-spin" />}
-                  Delete Account
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+            );
+          })()}
       </div>
     </DashboardLayout>
   );

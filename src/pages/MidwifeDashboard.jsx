@@ -212,7 +212,7 @@ function MidwifeDashboard() {
   const [barangayFilter, setBarangayFilter] = useState("all");
   const [showAllAppointments, setShowAllAppointments] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
-
+  const [assignedDistrict, setAssignedDistrict] = useState(null);
   /* =========================================================
      LOAD CURRENT SESSION
   ========================================================= */
@@ -285,7 +285,22 @@ function MidwifeDashboard() {
 
     setLoading(true);
     setErrorMessage("");
+    /*
+     * LOAD THE DISTRICT ASSIGNED TO THE CURRENT MIDWIFE
+     */
+    if (user.district_id != null) {
+      const { data: districtData, error: districtError } = await supabase
+        .from("districts")
+        .select("id, name")
+        .eq("id", user.district_id)
+        .maybeSingle();
 
+      if (districtError) throw districtError;
+
+      setAssignedDistrict(districtData || null);
+    } else {
+      setAssignedDistrict(null);
+    }
     try {
       /*
        * STEP 1:
@@ -887,6 +902,19 @@ function MidwifeDashboard() {
                     month: "short",
                     day: "numeric",
                   })}
+                </span>
+
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-white/10 px-3 py-1.5">
+                  <MapPin size={15} />
+
+                  <span>
+                    District:{" "}
+                    <strong className="font-semibold text-white">
+                      {loading
+                        ? "Loading..."
+                        : assignedDistrict?.name || "Not assigned"}
+                    </strong>
+                  </span>
                 </span>
 
                 {lastUpdated && (

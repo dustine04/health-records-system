@@ -3,8 +3,8 @@ import {
   Activity,
   AlertCircle,
   ArrowLeft,
-  CheckCircle2,
   ChevronRight,
+  CheckCircle2,
   Clock,
   FileText,
   HeartPulse,
@@ -41,8 +41,12 @@ const STATUS = {
     className: "bg-amber-100 text-amber-800",
   },
   reviewed: {
-    label: "Reviewed",
+    label: "Approved - Ready to Forward",
     className: "bg-emerald-100 text-emerald-800",
+  },
+  forwarded_to_cho: {
+    label: "Forwarded to CHO",
+    className: "bg-indigo-100 text-indigo-800",
   },
   returned: {
     label: "Returned",
@@ -222,6 +226,11 @@ const formatReportingPeriod = (value, report) => {
   }`.trim();
 };
 
+const formatLabel = (value) =>
+  String(value || "unknown")
+    .replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+
 const displayName = (user) =>
   [user?.first_name, user?.middle_name, user?.last_name]
     .filter((part) => typeof part === "string" && part.trim())
@@ -245,14 +254,6 @@ const formatDate = (value) => {
     minute: "2-digit",
   });
 };
-
-const formatLabel = (value) =>
-  String(value ?? "")
-    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 
 const readUser = () => {
   try {
@@ -513,120 +514,6 @@ function BhwRecordTable({ data }) {
   );
 }
 
-function OtherDataTable({ data, excludedKeys = [] }) {
-  if (!isObject(data)) {
-    return <p className="text-sm text-slate-500">No additional data.</p>;
-  }
-
-  const entries = Object.entries(data).filter(
-    ([key]) => !excludedKeys.includes(key),
-  );
-
-  if (!entries.length) {
-    return (
-      <p className="text-sm italic text-slate-500">
-        No additional indicators were recorded.
-      </p>
-    );
-  }
-
-  return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="bg-slate-100">
-            <th className="border border-slate-300 px-3 py-2 text-left text-xs uppercase">
-              Indicator
-            </th>
-            <th className="border border-slate-300 px-3 py-2 text-left text-xs uppercase">
-              Value
-            </th>
-          </tr>
-        </thead>
-
-        <tbody>
-          {entries.map(([key, value], index) => (
-            <tr key={key} className={index % 2 ? "bg-slate-50" : "bg-white"}>
-              <td className="border border-slate-300 px-3 py-2 font-medium">
-                {formatLabel(key)}
-              </td>
-              <td className="whitespace-pre-wrap break-words border border-slate-300 px-3 py-2">
-                {fmt(value)}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-/* -------------------------------------------------------------------------- */
-/*                          SOURCE REPORT TRACEABILITY                        */
-/* -------------------------------------------------------------------------- */
-
-function SourceSnapshotViewer({ snapshot }) {
-  if (!isObject(snapshot) || Object.keys(snapshot).length === 0) {
-    return (
-      <p className="text-sm italic text-slate-500">
-        No source snapshot was saved with this report.
-      </p>
-    );
-  }
-
-  const sourceLists = [
-    ["bns_reports", "BNS Source Reports"],
-    ["bhw_reports", "BHW Source Reports"],
-  ];
-
-  return (
-    <div className="space-y-4">
-      {sourceLists.map(([key, title]) => {
-        const entries = Array.isArray(snapshot[key]) ? snapshot[key] : [];
-
-        return (
-          <div key={key}>
-            <h4 className="mb-2 text-sm font-bold">{title}</h4>
-
-            <DataTable
-              headers={["Source Report", "Worker", "Barangay / Area", "Status"]}
-              rows={entries.map((entry, index) => ({
-                key: entry?.id ?? `${key}-${index}`,
-                cells: [
-                  `#${fmt(entry?.id)}`,
-                  entry?.sourceName ??
-                    entry?.worker_name ??
-                    entry?.bns_name ??
-                    entry?.bhw_name ??
-                    entry?.worker_id ??
-                    "—",
-                  entry?.barangayName ??
-                    entry?.barangay_name ??
-                    entry?.local_area_name ??
-                    entry?.barangay_id ??
-                    "—",
-                  entry?.status ?? "Reviewed",
-                ],
-              }))}
-              emptyText={`No ${title.toLowerCase()} were listed in this snapshot.`}
-            />
-          </div>
-        );
-      })}
-
-      <details className="rounded-lg border border-slate-200 p-3 print:hidden">
-        <summary className="cursor-pointer text-sm font-semibold text-slate-700">
-          View complete saved source snapshot
-        </summary>
-
-        <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words rounded bg-slate-50 p-3 text-xs">
-          {JSON.stringify(snapshot, null, 2)}
-        </pre>
-      </details>
-    </div>
-  );
-}
-
 /* -------------------------------------------------------------------------- */
 /*                           PRINTABLE FHSIS REPORT                           */
 /* -------------------------------------------------------------------------- */
@@ -681,36 +568,25 @@ function FhsisReportDocument({ report, midwife, nurse, districtName }) {
         ? `User #${report.reviewed_by}`
         : "";
 
+  // Match the exact keys saved by the Midwife submission component.
+  // Older report rows are supported as a fallback.
   const bnsReportCount =
+    sourceCounts.bns_child_monthly_reports ??
     sourceCounts.bns ??
-    (Array.isArray(sourceSnapshot.bns_reports)
-      ? sourceSnapshot.bns_reports.length
-      : "—");
+    (Array.isArray(sourceSnapshot.bns_child_monthly_reports)
+      ? sourceSnapshot.bns_child_monthly_reports.length
+      : Array.isArray(sourceSnapshot.bns_reports)
+        ? sourceSnapshot.bns_reports.length
+        : 0);
 
   const bhwReportCount =
+    sourceCounts.bhw_monthly_reports ??
     sourceCounts.bhw ??
-    (Array.isArray(sourceSnapshot.bhw_reports)
-      ? sourceSnapshot.bhw_reports.length
-      : "—");
-
-  // Internal metadata should not appear as report indicators.
-  const excludedAdditionalKeys = [
-    "reporting_period",
-    "district",
-    "district_id",
-    "prepared_by",
-    "submitted_to",
-    "nurse_id",
-    "source_counts",
-    "source_snapshot",
-    "report_type",
-    "reportType",
-    "bns_child_indicators",
-    "bhw_maternal_community_indicators",
-    "consolidation_notes",
-  ];
-
-  // Keep the rest of your existing return (...) below.
+    (Array.isArray(sourceSnapshot.bhw_monthly_reports)
+      ? sourceSnapshot.bhw_monthly_reports.length
+      : Array.isArray(sourceSnapshot.bhw_reports)
+        ? sourceSnapshot.bhw_reports.length
+        : 0);
 
   return (
     <div>
@@ -848,44 +724,6 @@ function FhsisReportDocument({ report, midwife, nurse, districtName }) {
           />
         </ReportSection>
 
-        <ReportSection
-          number="VII"
-          title="Additional Consolidated Indicators"
-          description="Other values present in the saved report data."
-        >
-          <OtherDataTable data={data} excludedKeys={excludedAdditionalKeys} />
-
-          {data.consolidation_notes && (
-            <div className="mt-3 border border-slate-300 p-3">
-              <p className="text-xs font-bold uppercase tracking-wide">
-                Consolidation Notes
-              </p>
-
-              {Array.isArray(data.consolidation_notes) ? (
-                <ul className="mt-2 list-disc space-y-1 pl-5 text-sm">
-                  {data.consolidation_notes.map((note, index) => (
-                    <li key={index} className="break-words">
-                      {fmt(note)}
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="mt-1 whitespace-pre-wrap break-words text-sm">
-                  {fmt(data.consolidation_notes)}
-                </p>
-              )}
-            </div>
-          )}
-        </ReportSection>
-
-        <ReportSection
-          number="VIII"
-          title="Source Report Traceability"
-          description="Reference information for the BNS and BHW reports used to prepare this consolidated report."
-        >
-          <SourceSnapshotViewer snapshot={sourceSnapshot} />
-        </ReportSection>
-
         <section className="grid grid-cols-1 gap-8 border border-slate-300 p-5 sm:grid-cols-2">
           <div>
             <div className="mb-8 border-b border-slate-500" />
@@ -909,10 +747,8 @@ function FhsisReportDocument({ report, midwife, nurse, districtName }) {
         </section>
 
         <p className="text-xs leading-5 text-slate-500">
-          System-generated consolidated report. Figures shown here are taken
-          from the saved report data and its source snapshot. Confirm the
-          indicators and required official form fields before official
-          submission.
+          System-generated consolidated report. Please verify the figures and
+          required official form fields before official submission.
         </p>
       </div>
     </div>
@@ -931,12 +767,14 @@ function ReportDetailsModal({
   onClose,
   onReview,
   onReturn,
+  onForward,
   actionLoading,
 }) {
   const [returnNotes, setReturnNotes] = useState("");
   const [showReturnForm, setShowReturnForm] = useState(false);
 
   const canProcess = report.status === "submitted";
+  const canForward = report.status === "reviewed";
 
   const reviewerName =
     report.reviewed_by &&
@@ -1099,19 +937,47 @@ function ReportDetailsModal({
               </button>
             </div>
           ) : (
-            <div className="rounded-lg bg-slate-50 p-4 text-sm text-slate-600 print:hidden">
-              This report has already been processed. Review actions are
-              disabled.
-              {report.reviewed_by && (
-                <p className="mt-1">
-                  <strong>Reviewer:</strong> {reviewerName}
-                </p>
-              )}
-              {report.reviewed_at && (
-                <p className="mt-1">
-                  <strong>Processed on:</strong>{" "}
-                  {formatDate(report.reviewed_at)}
-                </p>
+            <div className="space-y-4 rounded-lg bg-slate-50 p-4 text-sm text-slate-600 print:hidden">
+              <div>
+                {report.status === "reviewed"
+                  ? "This report has been approved by the Nurse and is ready to be forwarded to the City Health Office (CHO) for final review."
+                  : report.status === "forwarded_to_cho"
+                    ? "This report has been forwarded to the CHO for final review."
+                    : "This report has already been processed. Review actions are disabled."}
+                {report.reviewed_by && (
+                  <p className="mt-1">
+                    <strong>Reviewed by:</strong> {reviewerName}
+                  </p>
+                )}
+                {report.reviewed_at && (
+                  <p className="mt-1">
+                    <strong>Reviewed on:</strong>{" "}
+                    {formatDate(report.reviewed_at)}
+                  </p>
+                )}
+                {report.forwarded_at && (
+                  <p className="mt-1">
+                    <strong>Forwarded on:</strong>{" "}
+                    {formatDate(report.forwarded_at)}
+                  </p>
+                )}
+              </div>
+              {canForward && (
+                <div className="flex justify-end border-t border-slate-200 pt-4">
+                  <button
+                    type="button"
+                    onClick={onForward}
+                    disabled={actionLoading}
+                    className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50"
+                  >
+                    {actionLoading ? (
+                      <LoaderCircle size={17} className="animate-spin" />
+                    ) : (
+                      <ChevronRight size={17} />
+                    )}
+                    Forward Approved Report to CHO
+                  </button>
+                </div>
               )}
             </div>
           )}
@@ -1177,6 +1043,8 @@ export default function NurseFhsisReports() {
             "submitted_at",
             "reviewed_by",
             "reviewed_at",
+            "forwarded_by",
+            "forwarded_at",
             "review_notes",
             "created_at",
             "updated_at",
@@ -1184,7 +1052,7 @@ export default function NurseFhsisReports() {
         )
         .eq("nurse_id", currentUser.id)
         .eq("district_id", currentUser.district_id)
-        .in("status", ["submitted", "reviewed", "returned"])
+        .in("status", ["submitted", "reviewed", "returned", "forwarded_to_cho"])
         .order("submitted_at", { ascending: false });
 
       if (reportError) throw reportError;
@@ -1282,8 +1150,15 @@ export default function NurseFhsisReports() {
   const processReport = async (nextStatus, notes = "") => {
     if (!selectedReport || !user) return;
 
-    if (selectedReport.status !== "submitted") {
-      setError("Only pending reports can be reviewed or returned.");
+    const isForwarding = nextStatus === "forwarded_to_cho";
+    const expectedStatus = isForwarding ? "reviewed" : "submitted";
+
+    if (selectedReport.status !== expectedStatus) {
+      setError(
+        isForwarding
+          ? "Only reports approved by the Nurse can be forwarded to the CHO."
+          : "Only pending reports can be reviewed or returned.",
+      );
       return;
     }
 
@@ -1300,19 +1175,19 @@ export default function NurseFhsisReports() {
       return;
     }
 
-    if (!["reviewed", "returned"].includes(nextStatus)) {
+    if (!["reviewed", "returned", "forwarded_to_cho"].includes(nextStatus)) {
       setError("Invalid report action.");
       return;
     }
 
     const actionLabel =
       nextStatus === "reviewed"
-        ? "mark this report as reviewed"
-        : "return this report";
+        ? "approve this report"
+        : nextStatus === "returned"
+          ? "return this report to the Midwife"
+          : "forward this approved report to the CHO for final review";
 
-    if (!window.confirm(`Are you sure you want to ${actionLabel}?`)) {
-      return;
-    }
+    if (!window.confirm(`Are you sure you want to ${actionLabel}?`)) return;
 
     setActionLoading(true);
     setError("");
@@ -1320,20 +1195,28 @@ export default function NurseFhsisReports() {
 
     try {
       const now = new Date().toISOString();
+      const updatePayload = { status: nextStatus, updated_at: now };
+
+      if (nextStatus === "reviewed") {
+        updatePayload.reviewed_by = user.id;
+        updatePayload.reviewed_at = now;
+        updatePayload.review_notes = notes.trim() || null;
+      } else if (nextStatus === "returned") {
+        updatePayload.reviewed_by = user.id;
+        updatePayload.reviewed_at = now;
+        updatePayload.review_notes = notes.trim();
+      } else if (isForwarding) {
+        updatePayload.forwarded_by = user.id;
+        updatePayload.forwarded_at = now;
+      }
 
       const { data: updatedRows, error: updateError } = await supabase
         .from("midwife_nurse_fhsis_reports")
-        .update({
-          status: nextStatus,
-          reviewed_by: user.id,
-          reviewed_at: now,
-          review_notes: notes.trim() || null,
-          updated_at: now,
-        })
+        .update(updatePayload)
         .eq("id", selectedReport.id)
         .eq("nurse_id", user.id)
         .eq("district_id", user.district_id)
-        .eq("status", "submitted")
+        .eq("status", expectedStatus)
         .select(
           [
             "id",
@@ -1349,6 +1232,8 @@ export default function NurseFhsisReports() {
             "submitted_at",
             "reviewed_by",
             "reviewed_at",
+            "forwarded_by",
+            "forwarded_at",
             "review_notes",
             "created_at",
             "updated_at",
@@ -1356,19 +1241,19 @@ export default function NurseFhsisReports() {
         );
 
       if (updateError) throw updateError;
-
       if (!updatedRows?.length) {
         throw new Error(
-          "The report was not updated. It may have already been processed or its assignment may have changed. Refresh the page and try again.",
+          "The report was not updated. It may have already been processed or its assignment may have changed. Refresh and try again.",
         );
       }
 
       setNotice(
         nextStatus === "reviewed"
-          ? "The FHSIS report has been marked as reviewed."
-          : "The FHSIS report has been returned to the Midwife.",
+          ? "The report has been approved. You can now forward it to the CHO for final review."
+          : nextStatus === "returned"
+            ? "The report has been returned to the Midwife."
+            : "The approved FHSIS report has been forwarded to the CHO for final review.",
       );
-
       setSelectedReport(null);
       await loadReports(user);
     } catch (err) {
@@ -1427,40 +1312,85 @@ export default function NurseFhsisReports() {
         @media print {
           @page {
             size: A4 landscape;
-            margin: 12mm;
+            margin: 10mm;
           }
 
+          /* Hide the application UI completely, not merely with visibility.
+             Visibility:hidden preserves layout space and can create blank pages. */
           body * {
-            visibility: hidden !important;
+            display: none !important;
+          }
+
+          /* Keep only the ancestor chain needed to reach the printable report. */
+          body *:has(#fhsis-print-area) {
+            display: block !important;
+            position: static !important;
+            inset: auto !important;
+            width: auto !important;
+            max-width: none !important;
+            height: auto !important;
+            min-height: 0 !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: visible !important;
+            transform: none !important;
+            box-shadow: none !important;
+            border-radius: 0 !important;
+            background: #fff !important;
           }
 
           #fhsis-print-area,
           #fhsis-print-area * {
+            display: revert !important;
             visibility: visible !important;
+            color: #000 !important;
+            box-shadow: none !important;
+            text-shadow: none !important;
           }
 
           #fhsis-print-area {
-            position: absolute !important;
-            inset: 0 auto auto 0 !important;
+            position: static !important;
             width: 100% !important;
-            color: #000 !important;
+            max-width: none !important;
+            margin: 0 !important;
+            padding: 0 !important;
+            overflow: visible !important;
             background: #fff !important;
             font-size: 9pt !important;
           }
 
+          #fhsis-print-area .print\:hidden,
+          #fhsis-print-area button,
+          #fhsis-print-area pre,
+          #fhsis-print-area details {
+            display: none !important;
+          }
+
           #fhsis-print-area .fhsis-section {
             break-inside: avoid;
-            box-shadow: none !important;
+            page-break-inside: avoid;
           }
 
           #fhsis-print-area table {
             width: 100% !important;
+            border-collapse: collapse !important;
             font-size: 8pt !important;
+            break-inside: auto;
+          }
+
+          #fhsis-print-area thead {
+            display: table-header-group !important;
+          }
+
+          #fhsis-print-area tr {
+            break-inside: avoid;
+            page-break-inside: avoid;
           }
 
           #fhsis-print-area th,
           #fhsis-print-area td {
-            padding: 4px 6px !important;
+            padding: 3px 5px !important;
+            border-color: #999 !important;
           }
 
           #fhsis-print-area .bg-slate-100,
@@ -1470,10 +1400,12 @@ export default function NurseFhsisReports() {
             -webkit-print-color-adjust: exact;
           }
 
-          #fhsis-print-area pre,
-          #fhsis-print-area details,
-          .print\\:hidden {
-            display: none !important;
+          html,
+          body,
+          #root {
+            height: auto !important;
+            min-height: 0 !important;
+            overflow: visible !important;
           }
         }
       `}</style>
@@ -1594,7 +1526,8 @@ export default function NurseFhsisReports() {
               >
                 <option value="all">All statuses</option>
                 <option value="submitted">Pending Review</option>
-                <option value="reviewed">Reviewed</option>
+                <option value="reviewed">Approved - Ready to Forward</option>
+                <option value="forwarded_to_cho">Forwarded to CHO</option>
                 <option value="returned">Returned</option>
               </select>
             </div>
@@ -1766,10 +1699,10 @@ export default function NurseFhsisReports() {
             <div className="text-sm text-blue-900">
               <p className="font-semibold">Nurse review workflow</p>
               <p className="mt-1 leading-6">
-                Check the consolidated indicators and BNS/BHW source
-                information. Mark the report as reviewed when acceptable, or
-                return it to the Midwife with a clear explanation of the
-                corrections required.
+                Review the consolidated indicators. Return reports that need
+                corrections. When a report is acceptable, approve it first, then
+                use “Forward Approved Report to CHO” to send it to the City
+                Health Office for the final workflow step.
               </p>
             </div>
           </div>
@@ -1787,6 +1720,7 @@ export default function NurseFhsisReports() {
           }}
           onReview={() => processReport("reviewed")}
           onReturn={(notes) => processReport("returned", notes)}
+          onForward={() => processReport("forwarded_to_cho")}
           actionLoading={actionLoading}
         />
       )}

@@ -153,7 +153,7 @@ const MENUS = {
     },
     {
       name: "Reports",
-      path: "/dashboard/admin/reports",
+      path: "/dashboard/admin/fhsis-reports",
       icon: BarChart3,
     },
   ],
