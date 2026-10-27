@@ -796,65 +796,82 @@ export default function BnsChildMonthlyReports() {
 
       // -----------------------------------------------------
 
-      // 1. Fetch only BNS users created by this Midwife.
+      // 1. Fetch BNS workers in this Midwife's district.
+      // BNS workers register their own accounts, so account creator
+      // information must not be used to determine district access.
 
       // -----------------------------------------------------
 
-      const { data: bnsData, error: bnsError } = await supabase
-
-        .from("users")
-
-        .select(
-          `
-
-        id,
-
-        first_name,
-
-        middle_name,
-
-        last_name,
-
-        username,
-
-        role,
-
-        barangay_id,
-
-        district_id,
-
-        created_by_midwife_id
-
-      `,
-        )
-
-        .eq("role", "bns")
-
-        .eq("created_by_midwife_id", currentUser.id);
-
-      if (bnsError) {
-        throw bnsError;
+      if (
+        currentUser.district_id === null ||
+        currentUser.district_id === undefined ||
+        currentUser.district_id === ""
+      ) {
+        setReports([]);
+        setBnsUsers({});
+        setBarangayMap({});
+        setLocalAreaMap({});
+        setSelectedReport(null);
+        setErrorMessage(
+          "Your account has no assigned district. Please contact the CHO administrator.",
+        );
+        return;
       }
 
-      const ownedBnsUsers = bnsData || [];
+      const { data: districtBarangays, error: districtBarangaysError } =
+        await supabase
+          .from("barangays")
+          .select("id, name, district_id")
+          .eq("district_id", currentUser.district_id);
+
+      if (districtBarangaysError) throw districtBarangaysError;
+
+      const districtBarangayIds = [
+        ...new Set(
+          (districtBarangays || [])
+            .map((barangay) => barangay.id)
+            .filter((id) => id !== null && id !== undefined),
+        ),
+      ];
 
       const loadedBnsUsers = {};
+      let districtBnsUsers = [];
 
-      ownedBnsUsers.forEach((bns) => {
+      if (districtBarangayIds.length > 0) {
+        const { data: bnsData, error: bnsError } = await supabase
+          .from("users")
+          .select(
+            `
+              id,
+              first_name,
+              middle_name,
+              last_name,
+              username,
+              role,
+              barangay_id,
+              district_id
+            `,
+          )
+          .eq("role", "bns")
+          .in("barangay_id", districtBarangayIds);
+
+        if (bnsError) throw bnsError;
+        districtBnsUsers = bnsData || [];
+      }
+
+      districtBnsUsers.forEach((bns) => {
         loadedBnsUsers[String(bns.id)] = bns;
       });
 
       const bnsIds = [
         ...new Set(
-          ownedBnsUsers
-
+          districtBnsUsers
             .map((bns) => bns.id)
-
             .filter((id) => id !== null && id !== undefined),
         ),
       ];
 
-      // No BNS accounts created by this Midwife means no reports.
+      // No BNS workers in this district means there are no reports to load.
 
       if (bnsIds.length === 0) {
         setReports([]);
@@ -950,7 +967,7 @@ export default function BnsChildMonthlyReports() {
 
       // -----------------------------------------------------
 
-      // 4. Fetch active Purok/Sitio assignments for owned BNS.
+      // 4. Fetch active Purok/Sitio assignments for district BNS workers.
 
       // -----------------------------------------------------
 
@@ -1022,7 +1039,7 @@ export default function BnsChildMonthlyReports() {
 
       const enrichedReports = safeReports
 
-        // Extra ownership check before showing any report.
+        // Ensure each report belongs to a BNS worker in this district.
 
         .filter((report) =>
           Object.prototype.hasOwnProperty.call(
@@ -1095,47 +1112,32 @@ export default function BnsChildMonthlyReports() {
   }
 
   const scopedReports = useMemo(() => {
-    if (!user?.id || user.role !== "midwife") {
+    if (
+      !user?.id ||
+      user.role !== "midwife" ||
+      user.district_id === null ||
+      user.district_id === undefined ||
+      user.district_id === ""
+    ) {
       return [];
     }
 
-    const hasBarangay =
-      user.barangay_id !== null &&
-      user.barangay_id !== undefined &&
-      user.barangay_id !== "";
-
-    const hasDistrict =
-      user.district_id !== null &&
-      user.district_id !== undefined &&
-      user.district_id !== "";
-
+    // District is the access boundary. The Midwife can review reports from
+    // BNS workers registered in any barangay belonging to the same district.
+    // Do not restrict access by who originally created a worker account
+    // or by the Midwife's optional barangay assignment.
     return reports.filter((report) => {
-      // Always require the BNS to have been created by this Midwife.
+      const workerBarangayId = report.bns?.barangay_id;
+      const reportBarangayId = report.barangay_id;
+      const reportDistrictId = report.barangay?.district_id;
 
-      const belongsToMidwife =
-        String(report.bns?.created_by_midwife_id) === String(user.id);
-
-      if (!belongsToMidwife) {
-        return false;
-      }
-
-      // Preserve the existing barangay restriction.
-
-      if (hasBarangay) {
-        return String(report.barangay_id) === String(user.barangay_id);
-      }
-
-      // If there is no barangay assignment, apply district restriction.
-
-      if (hasDistrict) {
-        return (
-          String(report.barangay?.district_id) === String(user.district_id)
-        );
-      }
-
-      // Do not fall back to unrestricted reports.
-
-      return false;
+      return (
+        workerBarangayId !== null &&
+        workerBarangayId !== undefined &&
+        reportBarangayId !== null &&
+        reportBarangayId !== undefined &&
+        String(reportDistrictId) === String(user.district_id)
+      );
     });
   }, [reports, user]);
 

@@ -409,7 +409,6 @@ export default function MidwifeNurseFhsisReport() {
   const [refreshKey, setRefreshKey] = useState(0);
 
   const districtId = currentUser?.district_id;
-
   const loadReportData = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -507,9 +506,11 @@ export default function MidwifeNurseFhsisReport() {
       }
 
       const districtBarangays = barangaysResult.data || [];
+
       const barangayIds = new Set(
         districtBarangays.map((item) => String(item.id)),
       );
+
       const barangayNames = new Map(
         districtBarangays.map((item) => [String(item.id), item.name]),
       );
@@ -518,8 +519,88 @@ export default function MidwifeNurseFhsisReport() {
       setNurses(nursesResult.data || []);
       setExistingReports(priorReportsResult.data || []);
 
-      // BNS: include only reports whose barangays belong to this district.
-      const uniqueBns = Array.from(
+      // --------------------------------------------------
+      // ACTIVE AREAS ASSIGNED BY THIS MIDWIFE ONLY
+      // --------------------------------------------------
+      //
+      // The assigned_by field must contain the logged-in
+      // midwife's users.id.
+      //
+      // This prevents reports assigned to another midwife
+      // from being included merely because they share
+      // the same district.
+      // --------------------------------------------------
+
+      const { data: assignments, error: assignmentsError } = await supabase
+        .from("worker_area_assignments")
+        .select("id, worker_id, local_area_id, assigned_by, is_active")
+        .eq("assigned_by", currentUser.id)
+        .eq("is_active", true);
+
+      if (assignmentsError) throw assignmentsError;
+
+      const assignmentRows = assignments || [];
+
+      const assignedWorkerIds = new Set(
+        assignmentRows.map((item) => String(item.worker_id)),
+      );
+
+      const assignedAreaIds = [
+        ...new Set(assignmentRows.map((item) => String(item.local_area_id))),
+      ];
+
+      let assignedAreas = [];
+
+      if (assignedAreaIds.length > 0) {
+        const { data, error: areasError } = await supabase
+          .from("local_areas")
+          .select("id, name, type, barangay_id")
+          .in("id", assignedAreaIds);
+
+        if (areasError) throw areasError;
+
+        assignedAreas = data || [];
+      }
+
+      // Only areas in this midwife's district are eligible.
+      const areasById = new Map(
+        assignedAreas
+          .filter((area) => barangayIds.has(String(area.barangay_id)))
+          .map((area) => [String(area.id), area]),
+      );
+
+      // Worker ID -> areas assigned to this midwife.
+      const areasByWorker = new Map();
+
+      assignmentRows.forEach((assignment) => {
+        const area = areasById.get(String(assignment.local_area_id));
+
+        if (!area) return;
+
+        const workerKey = String(assignment.worker_id);
+
+        if (!areasByWorker.has(workerKey)) {
+          areasByWorker.set(workerKey, []);
+        }
+
+        areasByWorker.get(workerKey).push(area);
+      });
+
+      // --------------------------------------------------
+      // BNS REPORTS
+      // --------------------------------------------------
+      //
+      // A BNS report is included only when:
+      // 1. It is approved.
+      // 2. Its reporting month/year matches.
+      // 3. Its barangay belongs to this district.
+      // 4. The BNS has an active area assignment made
+      //    by the logged-in midwife.
+      // 5. The report's barangay matches one of the
+      //    BNS worker's areas assigned by this midwife.
+      // --------------------------------------------------
+
+      const uniqueCandidateBns = Array.from(
         new Map(
           (bnsResult.data || [])
             .filter(
@@ -532,35 +613,67 @@ export default function MidwifeNurseFhsisReport() {
       );
 
       const bnsIds = [
-        ...new Set(uniqueBns.map((report) => String(report.bns_id))),
+        ...new Set(uniqueCandidateBns.map((report) => String(report.bns_id))),
       ];
 
       let bnsUsersById = new Map();
 
-      if (bnsIds.length) {
-        const { data, error: queryError } = await supabase
+      if (bnsIds.length > 0) {
+        const { data, error: usersError } = await supabase
           .from("users")
-          .select("id, username, first_name, middle_name, last_name, role")
+          .select(
+            "id, username, first_name, middle_name, last_name, role, district_id",
+          )
           .in("id", bnsIds);
 
-        if (queryError) throw queryError;
+        if (usersError) throw usersError;
 
         bnsUsersById = new Map(
           (data || [])
-            .filter((user) => user.role === "bns")
+            .filter(
+              (user) =>
+                user.role === "bns" && assignedWorkerIds.has(String(user.id)),
+            )
             .map((user) => [String(user.id), user]),
         );
       }
 
-      const verifiedBns = uniqueBns
-        .filter((report) => bnsUsersById.has(String(report.bns_id)))
+      const verifiedBns = uniqueCandidateBns
+        .filter((report) => {
+          const workerId = String(report.bns_id);
+          const worker = bnsUsersById.get(workerId);
+          const workerAreas = areasByWorker.get(workerId) || [];
+
+          if (!worker) return false;
+
+          // The report's barangay must be covered by this
+          // midwife's active assignments for this BNS.
+          return workerAreas.some(
+            (area) => String(area.barangay_id) === String(report.barangay_id),
+          );
+        })
         .map((report) => ({
           ...report,
           sourceName: displayName(bnsUsersById.get(String(report.bns_id))),
           barangayName: barangayNames.get(String(report.barangay_id)) || "",
         }));
 
-      // BHW: derive district coverage through active worker assignments.
+      // --------------------------------------------------
+      // BHW REPORTS
+      // --------------------------------------------------
+      //
+      // A BHW report is included only when:
+      // 1. It is reviewed for the selected period.
+      // 2. The BHW has an active area assigned by this
+      //    particular midwife.
+      // 3. The assigned area belongs to this district.
+      // 4. If report_data.area_ids exists, it intersects
+      //    the BHW's currently assigned areas.
+      //
+      // Legacy reports without area_ids use the BHW's
+      // current eligible assignments.
+      // --------------------------------------------------
+
       const uniqueCandidateBhw = Array.from(
         new Map(
           (bhwResult.data || []).map((report) => [String(report.id), report]),
@@ -573,112 +686,76 @@ export default function MidwifeNurseFhsisReport() {
 
       let verifiedBhw = [];
 
-      if (bhwIds.length) {
+      if (bhwIds.length > 0) {
         const { data: bhwUsers, error: usersError } = await supabase
           .from("users")
-          .select("id, username, first_name, middle_name, last_name, role")
+          .select(
+            "id, username, first_name, middle_name, last_name, role, district_id",
+          )
           .in("id", bhwIds);
 
         if (usersError) throw usersError;
 
         const bhwUsersById = new Map(
           (bhwUsers || [])
-            .filter((user) => user.role === "bhw")
+            .filter(
+              (user) =>
+                user.role === "bhw" && assignedWorkerIds.has(String(user.id)),
+            )
             .map((user) => [String(user.id), user]),
         );
 
-        const validBhwIds = [...bhwUsersById.values()].map((user) => user.id);
+        verifiedBhw = uniqueCandidateBhw
+          .filter((report) => bhwUsersById.has(String(report.bhw_id)))
+          .map((report) => {
+            const reportData = asObject(report.report_data);
 
-        if (validBhwIds.length) {
-          const { data: assignments, error: assignmentsError } = await supabase
-            .from("worker_area_assignments")
-            .select("id, worker_id, local_area_id, is_active")
-            .in("worker_id", validBhwIds)
-            .eq("is_active", true);
+            const workerAreas = areasByWorker.get(String(report.bhw_id)) || [];
 
-          if (assignmentsError) throw assignmentsError;
+            const hasAreaIds = Array.isArray(reportData.area_ids);
 
-          const assignmentRows = assignments || [];
-          const localAreaIds = [
-            ...new Set(assignmentRows.map((item) => item.local_area_id)),
-          ];
+            const coveredAreas = workerAreas.filter((area) => {
+              if (!barangayIds.has(String(area.barangay_id))) {
+                return false;
+              }
 
-          let areas = [];
+              // Older reports may not contain area_ids.
+              if (!hasAreaIds) return true;
 
-          if (localAreaIds.length) {
-            const { data, error: areasError } = await supabase
-              .from("local_areas")
-              .select("id, name, type, barangay_id")
-              .in("id", localAreaIds);
+              return reportData.area_ids.some(
+                (id) => String(id) === String(area.id),
+              );
+            });
 
-            if (areasError) throw areasError;
-            areas = data || [];
-          }
+            if (coveredAreas.length === 0) return null;
 
-          const areaById = new Map(
-            areas.map((area) => [String(area.id), area]),
-          );
+            const coveredBarangayNames = [
+              ...new Set(
+                coveredAreas
+                  .map((area) => barangayNames.get(String(area.barangay_id)))
+                  .filter(Boolean),
+              ),
+            ];
 
-          const activeAreasByWorker = new Map();
-
-          assignmentRows.forEach((assignment) => {
-            const area = areaById.get(String(assignment.local_area_id));
-            if (!area) return;
-
-            const key = String(assignment.worker_id);
-
-            if (!activeAreasByWorker.has(key)) {
-              activeAreasByWorker.set(key, []);
-            }
-
-            activeAreasByWorker.get(key).push(area);
-          });
-
-          verifiedBhw = uniqueCandidateBhw
-            .filter((report) => bhwUsersById.has(String(report.bhw_id)))
-            .map((report) => {
-              const reportData = asObject(report.report_data);
-              const workerAreas =
-                activeAreasByWorker.get(String(report.bhw_id)) || [];
-
-              // Respect the saved area_ids when present. Legacy reports
-              // without area_ids use the worker's active assignments.
-              const hasAreaIds = Array.isArray(reportData.area_ids);
-
-              const coveredAreas = workerAreas.filter((area) => {
-                if (!barangayIds.has(String(area.barangay_id))) return false;
-
-                if (!hasAreaIds) return true;
-
-                return reportData.area_ids.some(
-                  (id) => String(id) === String(area.id),
-                );
-              });
-
-              if (!coveredAreas.length) return null;
-
-              const coveredBarangayNames = [
-                ...new Set(
-                  coveredAreas
-                    .map((area) => barangayNames.get(String(area.barangay_id)))
-                    .filter(Boolean),
-                ),
-              ];
-
-              return {
-                ...report,
-                sourceName: displayName(
-                  bhwUsersById.get(String(report.bhw_id)),
-                ),
-                barangayName: coveredBarangayNames.join(", "),
-                coveredAreaIds: coveredAreas.map((area) => area.id),
-              };
-            })
-            .filter(Boolean);
-        }
+            return {
+              ...report,
+              sourceName: displayName(bhwUsersById.get(String(report.bhw_id))),
+              barangayName: coveredBarangayNames.join(", "),
+              coveredAreaIds: coveredAreas.map((area) => area.id),
+            };
+          })
+          .filter(Boolean);
       }
 
-      setBnsReports(verifiedBns);
+      // Remove duplicate source report IDs.
+      setBnsReports(
+        Array.from(
+          new Map(
+            verifiedBns.map((report) => [String(report.id), report]),
+          ).values(),
+        ),
+      );
+
       setBhwReports(
         Array.from(
           new Map(
@@ -687,6 +764,8 @@ export default function MidwifeNurseFhsisReport() {
         ),
       );
 
+      // Keep the selected nurse if that nurse remains active
+      // and assigned to the current midwife's district.
       setNurseId((current) =>
         current &&
         (nursesResult.data || []).some(
@@ -794,10 +873,22 @@ export default function MidwifeNurseFhsisReport() {
     source_rules: {
       bns_status: "approved",
       bhw_status: "reviewed",
+
       bns_district_filter: "barangays.district_id = midwife.district_id",
+
       bhw_district_filter:
         "active worker_area_assignments -> local_areas -> barangays.district_id",
+
+      assignment_owner_filter:
+        "worker_area_assignments.assigned_by = current midwife users.id",
+
+      active_assignment_filter: "worker_area_assignments.is_active = true",
+
+      bns_requires_active_assignment_by_current_midwife: true,
+      bns_report_barangay_must_match_assigned_area: true,
+      bhw_requires_active_assignment_by_current_midwife: true,
       bhw_area_ids_checked_against_active_assignments: true,
+
       deduplicated_by_source_report_id: true,
     },
     bns_child_monthly_reports: bnsReports.map((report) => ({

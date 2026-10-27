@@ -285,23 +285,33 @@ function MidwifeDashboard() {
 
     setLoading(true);
     setErrorMessage("");
-    /*
-     * LOAD THE DISTRICT ASSIGNED TO THE CURRENT MIDWIFE
-     */
-    if (user.district_id != null) {
-      const { data: districtData, error: districtError } = await supabase
-        .from("districts")
-        .select("id, name")
-        .eq("id", user.district_id)
-        .maybeSingle();
-
-      if (districtError) throw districtError;
-
-      setAssignedDistrict(districtData || null);
-    } else {
-      setAssignedDistrict(null);
-    }
+    setWorkerCount(0);
+    setReportCounts({
+      submitted: 0,
+      approved: 0,
+      returned: 0,
+      draft: 0,
+      other: 0,
+    });
     try {
+      /*
+       * LOAD THE DISTRICT ASSIGNED TO THE CURRENT MIDWIFE.
+       * Keep this inside try/catch so a lookup failure does not leave the
+       * dashboard stuck in its loading state.
+       */
+      if (user.district_id != null) {
+        const { data: districtData, error: districtError } = await supabase
+          .from("districts")
+          .select("id, name")
+          .eq("id", user.district_id)
+          .maybeSingle();
+
+        if (districtError) throw districtError;
+        setAssignedDistrict(districtData || null);
+      } else {
+        setAssignedDistrict(null);
+      }
+
       /*
        * STEP 1:
        * Load pregnancy records.
@@ -460,44 +470,57 @@ function MidwifeDashboard() {
 
       /*
        * STEP 5:
-       * Retrieve ONLY BNS/BHW accounts created by this midwife.
-       *
-       * Do not rely on district_id or barangay_id for ownership.
-       * created_by_midwife_id is the ownership filter.
+       * Load all registered BNS/BHW workers assigned to barangays in this
+       * midwife's district. BNS and BHW workers register their own accounts,
+       * so account creator/ownership is not used to determine district scope.
        */
-      const { data: ownedWorkers, error: workersError } = await supabase
-        .from("users")
-        .select("id, role")
-        .in("role", ["bns", "bhw"])
-        .eq("created_by_midwife_id", user.id);
+      let districtBarangayIds = [];
+      let workers = [];
 
-      if (workersError) throw workersError;
+      if (user.district_id != null) {
+        const { data: districtBarangays, error: barangayError } = await supabase
+          .from("barangays")
+          .select("id")
+          .eq("district_id", user.district_id);
 
-      const workers = ownedWorkers || [];
+        if (barangayError) throw barangayError;
+
+        districtBarangayIds = (districtBarangays || []).map(
+          (barangay) => barangay.id,
+        );
+      }
+
+      if (districtBarangayIds.length > 0) {
+        const { data: districtWorkers, error: workersError } = await supabase
+          .from("users")
+          .select("id, role, barangay_id, is_active")
+          .in("role", ["bns", "bhw"])
+          .in("barangay_id", districtBarangayIds);
+
+        if (workersError) throw workersError;
+        workers = districtWorkers || [];
+      }
 
       setWorkerCount(workers.length);
 
       /*
        * STEP 6:
-       * Use only this midwife's BHW IDs when loading BHW reports.
-       *
-       * BNS monthly reports are stored separately and are not included
-       * in bhw_monthly_reports.
+       * Load BHW monthly reports for BHW workers whose barangays belong to
+       * this midwife's district. BNS monthly reports are stored separately.
        */
-      const ownedBhwIds = workers
+      const districtBhwIds = workers
         .filter((worker) => worker.role === "bhw")
         .map((worker) => worker.id);
 
       let reports = [];
 
-      if (ownedBhwIds.length > 0) {
+      if (districtBhwIds.length > 0) {
         const { data: reportData, error: reportError } = await supabase
           .from("bhw_monthly_reports")
           .select("id, status, bhw_id")
-          .in("bhw_id", ownedBhwIds);
+          .in("bhw_id", districtBhwIds);
 
         if (reportError) throw reportError;
-
         reports = reportData || [];
       }
 
@@ -1026,7 +1049,7 @@ function MidwifeDashboard() {
             <StatCard
               title="BNS / BHW Workers"
               value={statistics.workers}
-              description="BNS and BHW accounts you created"
+              description="Registered BNS and BHW workers in your district"
               icon={Users}
               iconClass="bg-violet-50 text-violet-600"
               loading={loading}
@@ -1285,7 +1308,8 @@ function MidwifeDashboard() {
               </div>
 
               <p className="mt-2 text-sm text-gray-500">
-                BHW monthly report counts from the BHW accounts you created.
+                BHW monthly report counts for workers registered in your
+                district.
               </p>
             </div>
 
@@ -1391,10 +1415,10 @@ function MidwifeDashboard() {
           </div>
 
           <p className="mt-3 text-xs leading-5 text-gray-500">
-            These counts include only records in{" "}
-            <code>bhw_monthly_reports</code> associated with BHW accounts
-            created by the logged-in midwife. BNS reports stored in a separate
-            table are not included.
+            These counts include records in <code>bhw_monthly_reports</code>{" "}
+            submitted by BHW workers assigned to barangays within your district.
+            BNS monthly reports are stored in a separate table and are not
+            included in these BHW report counts.
           </p>
         </section>
 
@@ -1749,7 +1773,7 @@ function MidwifeDashboard() {
               icon={Users}
               iconClass="bg-violet-50 text-violet-700"
               title="Community health workers"
-              description="Manage the BNS and BHW accounts you created."
+              description="View registered BNS and BHW workers in your district and assign their Purok/Sitio areas."
               buttonText="Manage workers"
               onClick={openWorkers}
             />

@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   Stethoscope,
   UserRound,
+  UserPlus,
 } from "lucide-react";
 
 import { supabase } from "../lib/supabase";
@@ -45,7 +46,7 @@ function Login() {
         setRememberUsername(true);
       }
     } catch {
-      // The login form remains usable if browser storage is unavailable.
+      // Login remains usable if browser storage is unavailable.
     }
   }, []);
 
@@ -70,16 +71,16 @@ function Login() {
         .from("users")
         .select(
           `
-          id,
-          username,
-          first_name,
-          middle_name,
-          last_name,
-          role,
-          district_id,
-          barangay_id,
-          is_active
-        `,
+            id,
+            username,
+            first_name,
+            middle_name,
+            last_name,
+            role,
+            district_id,
+            barangay_id,
+            is_active
+          `,
         )
         .eq("username", cleanUsername)
         .eq("password", password)
@@ -123,11 +124,12 @@ function Login() {
       }
 
       setSuccess("Login successful. Opening your dashboard...");
-
       navigate(destination, { replace: true });
     } catch (err) {
       console.error("Unexpected login error:", err);
-      setError("Something went wrong. Please check your connection and retry.");
+      setError(
+        "Something went wrong. Please check your connection and try again.",
+      );
     } finally {
       setLoading(false);
     }
@@ -135,11 +137,8 @@ function Login() {
 
   return (
     <main className="min-h-screen bg-slate-50 lg:grid lg:grid-cols-[1.35fr_1fr]">
-      {/* =====================================================
-          LEFT PANEL — HEALTHCARE BRANDING
-      ====================================================== */}
+      {/* LEFT PANEL — HEALTHCARE BRANDING */}
       <section className="relative hidden min-h-screen overflow-hidden bg-slate-950 lg:flex lg:flex-col lg:justify-between lg:p-8 xl:p-10">
-        {/* Background image */}
         <img
           src="/login.png"
           alt="Healthcare professionals providing community health services"
@@ -149,10 +148,8 @@ function Login() {
           }}
         />
 
-        {/* Image overlays */}
         <div className="absolute inset-0 bg-gradient-to-br from-slate-950/85 via-slate-900/50 to-blue-950/70" />
 
-        {/* Decorative shapes */}
         <div className="absolute -right-32 top-20 h-96 w-96 rounded-full border border-white/10" />
         <div className="absolute -right-20 top-32 h-72 w-72 rounded-full border border-white/10" />
         <div className="absolute -bottom-40 -left-32 h-96 w-96 rounded-full bg-cyan-400/10 blur-3xl" />
@@ -212,7 +209,7 @@ function Login() {
           </div>
         </div>
 
-        {/* Bottom footer */}
+        {/* Left footer */}
         <div className="relative z-10 flex items-center justify-between border-t border-white/15 pt-5 text-xs text-slate-300">
           <span>© 2026 City Health Office</span>
           <span className="flex items-center gap-2">
@@ -222,16 +219,13 @@ function Login() {
         </div>
       </section>
 
-      {/* =====================================================
-          RIGHT PANEL — LOGIN FORM
-      ====================================================== */}
+      {/* RIGHT PANEL — LOGIN FORM */}
       <section className="relative flex min-h-screen items-center justify-center overflow-hidden px-5 py-10 sm:px-10 lg:px-12 xl:px-16">
-        {/* Soft background decorations */}
         <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-blue-100/70 blur-3xl" />
         <div className="pointer-events-none absolute -bottom-24 -left-24 h-72 w-72 rounded-full bg-cyan-100/60 blur-3xl" />
 
         <div className="relative z-10 w-full max-w-md">
-          {/* Mobile-only logo */}
+          {/* Mobile logo */}
           <div className="mb-10 flex items-center gap-3 lg:hidden">
             <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-blue-600 text-white shadow-lg shadow-blue-600/20">
               <HeartPulse size={27} />
@@ -245,7 +239,7 @@ function Login() {
             </div>
           </div>
 
-          {/* Form heading */}
+          {/* Heading */}
           <div className="mb-8">
             <div className="mb-5 flex h-14 w-14 items-center justify-center rounded-2xl border border-blue-100 bg-blue-50 text-blue-600 shadow-sm">
               <LockKeyhole size={26} />
@@ -271,9 +265,7 @@ function Login() {
               role="alert"
               className="mb-5 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700"
             >
-              <span className="mt-0.5 shrink-0">
-                <Activity size={18} />
-              </span>
+              <Activity size={18} className="mt-0.5 shrink-0" />
               <p className="leading-6">{error}</p>
             </div>
           )}
@@ -291,7 +283,6 @@ function Login() {
 
           {/* Login form */}
           <form onSubmit={handleLogin} className="space-y-5">
-            {/* Username */}
             <div>
               <label
                 htmlFor="username"
@@ -325,7 +316,6 @@ function Login() {
               </div>
             </div>
 
-            {/* Password */}
             <div>
               <div className="mb-2 flex items-center justify-between gap-3">
                 <label
@@ -398,7 +388,7 @@ function Login() {
               </span>
             </div>
 
-            {/* Submit button */}
+            {/* Submit */}
             <button
               type="submit"
               disabled={loading}
@@ -421,8 +411,36 @@ function Login() {
             </button>
           </form>
 
+          {/* BNS/BHW registration link */}
+          <div className="mt-6 rounded-xl border border-blue-100 bg-blue-50/70 p-4">
+            <div className="flex items-start gap-3">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-blue-600 shadow-sm">
+                <UserPlus size={20} />
+              </div>
+
+              <div className="flex-1">
+                <p className="text-sm font-semibold text-slate-800">
+                  New community health worker?
+                </p>
+                <p className="mt-1 text-xs leading-5 text-slate-500">
+                  BNS and BHW applicants can register for an MCHMS account.
+                  Account activation is required before signing in.
+                </p>
+
+                <button
+                  type="button"
+                  onClick={() => navigate("/register")}
+                  className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-blue-700 transition hover:text-blue-900 hover:underline"
+                >
+                  Register as BNS or BHW
+                  <ArrowRight size={16} />
+                </button>
+              </div>
+            </div>
+          </div>
+
           {/* Security note */}
-          <div className="mt-8 flex items-start gap-3 rounded-xl border border-slate-200/80 bg-white/70 p-4">
+          <div className="mt-6 flex items-start gap-3 rounded-xl border border-slate-200/80 bg-white/70 p-4">
             <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
               <ShieldCheck size={20} />
             </div>

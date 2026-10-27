@@ -14,7 +14,6 @@ import {
   Clock3,
   RotateCcw,
 } from "lucide-react";
-
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
 import { useNavigate } from "react-router-dom";
@@ -44,21 +43,17 @@ const statusConfig = {
 
 function getFullName(user) {
   if (!user) return "Unknown BHW";
-
-  return [user.first_name, user.middle_name, user.last_name]
-    .filter(Boolean)
-    .join(" ");
+  return (
+    [user.first_name, user.middle_name, user.last_name]
+      .filter(Boolean)
+      .join(" ") || "Unknown BHW"
+  );
 }
 
 function formatDate(date) {
   if (!date) return "—";
-
   const parsed = new Date(date);
-
-  if (Number.isNaN(parsed.getTime())) {
-    return String(date);
-  }
-
+  if (Number.isNaN(parsed.getTime())) return String(date);
   return parsed.toLocaleDateString("en-PH", {
     year: "numeric",
     month: "short",
@@ -68,64 +63,37 @@ function formatDate(date) {
 
 function formatMonthYear(month, year) {
   if (!month || !year) return "—";
-
   const monthNumber = Number(month);
-
   if (Number.isNaN(monthNumber) || monthNumber < 1 || monthNumber > 12) {
     return `${month} ${year}`;
   }
-
   return new Date(Number(year), monthNumber - 1, 1).toLocaleDateString(
     "en-PH",
-    {
-      month: "long",
-      year: "numeric",
-    },
+    { month: "long", year: "numeric" },
   );
 }
 
 function getPregnantWomenCount(report) {
-  const data = report?.report_data;
-
-  if (!data) return 0;
-
-  if (Array.isArray(data.pregnant_women)) {
-    return data.pregnant_women.length;
-  }
-
-  return 0;
+  return Array.isArray(report?.report_data?.pregnant_women)
+    ? report.report_data.pregnant_women.length
+    : 0;
 }
 
 function getTotalPregnancyCount(report) {
-  const tracking = report?.report_data?.pregnancy_tracking;
-
-  if (tracking?.total !== undefined && tracking?.total !== null) {
-    return Number(tracking.total) || 0;
-  }
-
-  return getPregnantWomenCount(report);
+  const total = report?.report_data?.pregnancy_tracking?.total;
+  return total !== undefined && total !== null
+    ? Number(total) || 0
+    : getPregnantWomenCount(report);
 }
 
 function getNewPregnancyCount(report) {
-  const tracking = report?.report_data?.pregnancy_tracking;
-
-  if (tracking?.new !== undefined && tracking?.new !== null) {
-    return Number(tracking.new) || 0;
-  }
-
-  return 0;
+  const value = report?.report_data?.pregnancy_tracking?.new;
+  return value !== undefined && value !== null ? Number(value) || 0 : 0;
 }
 
-/**
- * Safely retrieve the currently logged-in user.
- *
- * This project stores the logged-in user in localStorage
- * under the key "user".
- */
 function getCurrentUser() {
   try {
     const storedUser = localStorage.getItem("user");
-
     return storedUser ? JSON.parse(storedUser) : null;
   } catch (error) {
     console.error("Unable to read logged-in user:", error);
@@ -135,185 +103,143 @@ function getCurrentUser() {
 
 export default function MidwifeMonthlyReports() {
   const navigate = useNavigate();
-
   const [reports, setReports] = useState([]);
   const [bhwUsers, setBhwUsers] = useState([]);
-
+  const [districtName, setDistrictName] = useState("");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-
   const [error, setError] = useState("");
-
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState("submitted");
-
   const [selectedReport, setSelectedReport] = useState(null);
 
   useEffect(() => {
     fetchReports();
-    // Initial loading for the currently logged-in Midwife.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   /**
-   * =========================================================
-   * FETCH REPORTS BELONGING ONLY TO THIS MIDWIFE'S BHW USERS
-   * =========================================================
-   *
-   * Step 1:
-   * Read the logged-in Midwife from localStorage.
-   *
-   * Step 2:
-   * Retrieve users where:
-   *   role = "bhw"
-   *   created_by_midwife_id = current Midwife ID
-   *
-   * Step 3:
-   * Retrieve monthly reports where bhw_id belongs to those
-   * BHW accounts.
-   *
-   * Step 4:
-   * Attach the corresponding BHW information to each report.
-   *
-   * Reports are not regenerated here. The page displays the
-   * report_data snapshot saved by the BHW.
+   * Access rule:
+   * A Midwife can see BHW accounts assigned to barangays in the
+   * Midwife's district. Account ownership/creator fields are not used.
+   * Monthly report_data is displayed as the submitted snapshot.
    */
   async function fetchReports(showRefresh = false) {
     try {
-      if (showRefresh) {
-        setRefreshing(true);
-      } else {
-        setLoading(true);
-      }
-
+      if (showRefresh) setRefreshing(true);
+      else setLoading(true);
       setError("");
 
       const currentUser = getCurrentUser();
-
       if (!currentUser?.id) {
         throw new Error(
           "Unable to identify the logged-in Midwife. Please log in again.",
         );
       }
-
       if (currentUser.role && currentUser.role !== "midwife") {
         throw new Error("Only a Midwife account can access this page.");
       }
-
-      const midwifeId = Number(currentUser.id);
-
-      if (!Number.isSafeInteger(midwifeId) || midwifeId <= 0) {
-        throw new Error("The logged-in Midwife ID is invalid.");
+      if (!currentUser.district_id) {
+        throw new Error(
+          "Your Midwife account does not have a district assigned. Please contact the CHO administrator.",
+        );
       }
 
-      // -------------------------------------------------------
-      // STEP 1: Retrieve BHW accounts created by this Midwife.
-      // -------------------------------------------------------
+      // 1. Resolve the Midwife's district and its barangays.
+      const { data: districtData, error: districtError } = await supabase
+        .from("districts")
+        .select("id, name")
+        .eq("id", currentUser.district_id)
+        .maybeSingle();
+      if (districtError) throw districtError;
+      setDistrictName(districtData?.name || "");
 
-      const { data: userData, error: userError } = await supabase
-        .from("users")
-        .select(
-          `
-          id,
-          first_name,
-          middle_name,
-          last_name,
-          username,
-          role,
-          barangay_id,
-          district_id,
-          created_by_midwife_id
-        `,
-        )
-        .eq("role", "bhw")
-        .eq("created_by_midwife_id", midwifeId);
+      const { data: barangayData, error: barangayError } = await supabase
+        .from("barangays")
+        .select("id, name, district_id")
+        .eq("district_id", currentUser.district_id);
+      if (barangayError) throw barangayError;
 
-      if (userError) {
-        throw userError;
-      }
+      const barangays = barangayData || [];
+      const barangayIds = [
+        ...new Set(
+          barangays
+            .map((barangay) => Number(barangay.id))
+            .filter((id) => Number.isSafeInteger(id) && id > 0),
+        ),
+      ];
 
-      const ownBhwUsers = userData || [];
-
-      setBhwUsers(ownBhwUsers);
-
-      // No BHW accounts created by this Midwife means there
-      // cannot be any reports belonging to their BHW accounts.
-
-      if (ownBhwUsers.length === 0) {
+      if (barangayIds.length === 0) {
+        setBhwUsers([]);
         setReports([]);
         setSelectedReport(null);
         return;
       }
 
-      // -------------------------------------------------------
-      // STEP 2: Get the IDs of those BHW accounts.
-      // -------------------------------------------------------
+      // 2. Find BHW accounts whose assigned barangay belongs to this district.
+      const { data: userData, error: userError } = await supabase
+        .from("users")
+        .select(
+          "id, first_name, middle_name, last_name, username, role, barangay_id, district_id, is_active",
+        )
+        .eq("role", "bhw")
+        .in("barangay_id", barangayIds);
+      if (userError) throw userError;
+
+      const districtBhwUsers = userData || [];
+      setBhwUsers(districtBhwUsers);
+
+      if (districtBhwUsers.length === 0) {
+        setReports([]);
+        setSelectedReport(null);
+        return;
+      }
 
       const bhwIds = [
         ...new Set(
-          ownBhwUsers
+          districtBhwUsers
             .map((user) => Number(user.id))
             .filter((id) => Number.isSafeInteger(id) && id > 0),
         ),
       ];
-
       if (bhwIds.length === 0) {
         setReports([]);
         setSelectedReport(null);
         return;
       }
 
-      // -------------------------------------------------------
-      // STEP 3: Retrieve only reports submitted by those BHWs.
-      // -------------------------------------------------------
-
+      // 3. Load monthly reports submitted by BHWs in this district.
       const { data: reportData, error: reportError } = await supabase
         .from("bhw_monthly_reports")
         .select(
-          `
-          id,
-          bhw_id,
-          month,
-          year,
-          status,
-          report_data,
-          submitted_at,
-          updated_at
-        `,
+          "id, bhw_id, month, year, status, report_data, submitted_at, updated_at",
         )
         .in("bhw_id", bhwIds)
         .order("year", { ascending: false })
         .order("month", { ascending: false })
         .order("submitted_at", { ascending: false });
-
-      if (reportError) {
-        throw reportError;
-      }
-
-      const reportRows = reportData || [];
-
-      // -------------------------------------------------------
-      // STEP 4: Match each report with its BHW account.
-      // -------------------------------------------------------
+      if (reportError) throw reportError;
 
       const userMap = new Map(
-        ownBhwUsers.map((user) => [String(user.id), user]),
+        districtBhwUsers.map((user) => [String(user.id), user]),
       );
-
-      const combinedReports = reportRows
+      const barangayMap = new Map(
+        barangays.map((barangay) => [String(barangay.id), barangay]),
+      );
+      const combinedReports = (reportData || [])
         .filter((report) => userMap.has(String(report.bhw_id)))
-        .map((report) => ({
-          ...report,
-          bhw: userMap.get(String(report.bhw_id)) || null,
-        }));
+        .map((report) => {
+          const bhw = userMap.get(String(report.bhw_id));
+          return {
+            ...report,
+            bhw,
+            barangay: barangayMap.get(String(bhw?.barangay_id)) || null,
+          };
+        });
 
       setReports(combinedReports);
-
-      // Clear a preview if the selected report no longer exists
-      // in the current Midwife's accessible report list.
       setSelectedReport((previous) => {
         if (!previous) return null;
-
         return (
           combinedReports.find(
             (report) => String(report.id) === String(previous.id),
@@ -322,11 +248,9 @@ export default function MidwifeMonthlyReports() {
       });
     } catch (err) {
       console.error("Error loading Midwife monthly reports:", err);
-
       setReports([]);
       setBhwUsers([]);
       setSelectedReport(null);
-
       setError(err?.message || "Unable to load monthly pregnancy reports.");
     } finally {
       setLoading(false);
@@ -334,24 +258,16 @@ export default function MidwifeMonthlyReports() {
     }
   }
 
-  /**
-   * =========================================================
-   * FILTERED REPORTS
-   * =========================================================
-   */
   const filteredReports = useMemo(() => {
     const search = searchTerm.trim().toLowerCase();
-
     return reports.filter((report) => {
-      if (statusFilter !== "all" && report.status !== statusFilter) {
+      if (statusFilter !== "all" && report.status !== statusFilter)
         return false;
-      }
-
       if (!search) return true;
-
-      const searchableText = [
+      const text = [
         getFullName(report.bhw),
         report.bhw?.username,
+        report.barangay?.name,
         formatMonthYear(report.month, report.year),
         report.status,
         String(report.month || ""),
@@ -360,56 +276,32 @@ export default function MidwifeMonthlyReports() {
         .filter(Boolean)
         .join(" ")
         .toLowerCase();
-
-      return searchableText.includes(search);
+      return text.includes(search);
     });
   }, [reports, searchTerm, statusFilter]);
 
-  /**
-   * =========================================================
-   * STATISTICS
-   * =========================================================
-   */
-  const statistics = useMemo(() => {
-    const submitted = reports.filter(
-      (report) => report.status === "submitted",
-    ).length;
+  const statistics = useMemo(
+    () => ({
+      submitted: reports.filter((report) => report.status === "submitted")
+        .length,
+      reviewed: reports.filter((report) => report.status === "reviewed").length,
+      returned: reports.filter((report) => report.status === "returned").length,
+      pregnancyCount: reports.reduce(
+        (sum, report) => sum + getPregnantWomenCount(report),
+        0,
+      ),
+    }),
+    [reports],
+  );
 
-    const reviewed = reports.filter(
-      (report) => report.status === "reviewed",
-    ).length;
-
-    const returned = reports.filter(
-      (report) => report.status === "returned",
-    ).length;
-
-    const pregnancyCount = reports.reduce(
-      (total, report) => total + getPregnantWomenCount(report),
-      0,
-    );
-
-    return {
-      submitted,
-      reviewed,
-      returned,
-      pregnancyCount,
-    };
-  }, [reports]);
-
-  /**
-   * =========================================================
-   * LOADING SCREEN
-   * =========================================================
-   */
   if (loading) {
     return (
       <DashboardLayout>
         <div className="flex min-h-[60vh] items-center justify-center">
           <div className="flex flex-col items-center gap-3">
             <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
-
             <p className="text-sm text-gray-500">
-              Loading your BHW monthly pregnancy reports...
+              Loading district BHW monthly pregnancy reports...
             </p>
           </div>
         </div>
@@ -417,28 +309,28 @@ export default function MidwifeMonthlyReports() {
     );
   }
 
+  const openFullReport = (report) =>
+    navigate(`/dashboard/midwife/monthly-reports/${report.id}`);
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* HEADER */}
-
         <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-100">
               <FileCheck2 className="h-6 w-6 text-blue-600" />
             </div>
-
             <div>
               <h1 className="text-2xl font-bold text-gray-900">
                 Monthly Pregnancy Reports
               </h1>
-
               <p className="text-sm text-gray-500">
-                Review monthly reports submitted by your BHW accounts.
+                Review monthly reports submitted by BHWs assigned to your
+                district
+                {districtName ? ` — ${districtName}` : ""}.
               </p>
             </div>
           </div>
-
           <button
             type="button"
             onClick={() => fetchReports(true)}
@@ -448,22 +340,16 @@ export default function MidwifeMonthlyReports() {
             <RefreshCw
               className={`h-4 w-4 ${refreshing ? "animate-spin" : ""}`}
             />
-
             {refreshing ? "Refreshing..." : "Refresh"}
           </button>
         </div>
 
-        {/* ERROR */}
-
         {error && (
           <div className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-red-700">
             <AlertCircle className="mt-0.5 h-5 w-5 shrink-0" />
-
             <div className="min-w-0 flex-1">
               <p className="font-semibold">Unable to load reports</p>
-
               <p className="mt-1 text-sm">{error}</p>
-
               <button
                 type="button"
                 onClick={() => fetchReports(true)}
@@ -475,146 +361,100 @@ export default function MidwifeMonthlyReports() {
           </div>
         )}
 
-        {/* STATISTICS */}
-
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <button
-            type="button"
-            onClick={() => setStatusFilter("submitted")}
-            className={`rounded-xl border bg-white p-5 text-left shadow-sm transition hover:shadow-md ${
-              statusFilter === "submitted"
-                ? "border-blue-300 ring-2 ring-blue-100"
-                : "border-gray-200"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-500">
-                  Pending Review
-                </p>
-
-                <p className="mt-1 text-2xl font-bold text-gray-900">
-                  {statistics.submitted}
-                </p>
-              </div>
-
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100">
-                <Clock3 className="h-5 w-5 text-blue-600" />
-              </div>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter("reviewed")}
-            className={`rounded-xl border bg-white p-5 text-left shadow-sm transition hover:shadow-md ${
-              statusFilter === "reviewed"
-                ? "border-green-300 ring-2 ring-green-100"
-                : "border-gray-200"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-500">Reviewed</p>
-
-                <p className="mt-1 text-2xl font-bold text-gray-900">
-                  {statistics.reviewed}
-                </p>
-              </div>
-
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-100">
-                <CheckCircle2 className="h-5 w-5 text-green-600" />
-              </div>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter("returned")}
-            className={`rounded-xl border bg-white p-5 text-left shadow-sm transition hover:shadow-md ${
-              statusFilter === "returned"
-                ? "border-orange-300 ring-2 ring-orange-100"
-                : "border-gray-200"
-            }`}
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-500">Returned</p>
-
-                <p className="mt-1 text-2xl font-bold text-gray-900">
-                  {statistics.returned}
-                </p>
-              </div>
-
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-orange-100">
-                <RotateCcw className="h-5 w-5 text-orange-600" />
-              </div>
-            </div>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setStatusFilter("all")}
-            className="rounded-xl border border-gray-200 bg-white p-5 text-left shadow-sm transition hover:shadow-md"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-gray-500">
-                  Women in Reports
-                </p>
-
-                <p className="mt-1 text-2xl font-bold text-gray-900">
-                  {statistics.pregnancyCount}
-                </p>
-              </div>
-
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-pink-100">
-                <UserRound className="h-5 w-5 text-pink-600" />
-              </div>
-            </div>
-          </button>
+          {[
+            {
+              key: "submitted",
+              label: "Pending Review",
+              value: statistics.submitted,
+              icon: Clock3,
+              bgClass: "bg-blue-100",
+              iconClass: "text-blue-600",
+            },
+            {
+              key: "reviewed",
+              label: "Reviewed",
+              value: statistics.reviewed,
+              icon: CheckCircle2,
+              bgClass: "bg-green-100",
+              iconClass: "text-green-600",
+            },
+            {
+              key: "returned",
+              label: "Returned",
+              value: statistics.returned,
+              icon: RotateCcw,
+              bgClass: "bg-orange-100",
+              iconClass: "text-orange-600",
+            },
+            {
+              key: "all",
+              label: "Women in Reports",
+              value: statistics.pregnancyCount,
+              icon: UserRound,
+              bgClass: "bg-pink-100",
+              iconClass: "text-pink-600",
+            },
+          ].map((item) => {
+            const Icon = item.icon;
+            const active = statusFilter === item.key;
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setStatusFilter(item.key)}
+                className={`rounded-xl border bg-white p-5 text-left shadow-sm transition hover:shadow-md ${active ? "border-blue-300 ring-2 ring-blue-100" : "border-gray-200"}`}
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-gray-500">
+                      {item.label}
+                    </p>
+                    <p className="mt-1 text-2xl font-bold text-gray-900">
+                      {item.value}
+                    </p>
+                  </div>
+                  <div
+                    className={`flex h-10 w-10 items-center justify-center rounded-lg ${item.bgClass}`}
+                  >
+                    <Icon className={`h-5 w-5 ${item.iconClass}`} />
+                  </div>
+                </div>
+              </button>
+            );
+          })}
         </div>
-
-        {/* BHW ACCOUNT SUMMARY */}
 
         <div className="flex flex-col gap-2 rounded-xl border border-blue-200 bg-blue-50 p-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-start gap-3">
             <UserRound className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
-
             <div>
               <p className="font-semibold text-blue-900">
-                Your assigned BHW accounts
+                BHW accounts in your district
               </p>
-
               <p className="mt-1 text-sm text-blue-800">
-                Only reports submitted by BHW accounts you created are displayed
-                on this page.
+                Reports are shown according to the BHW's assigned barangay and
+                your district, not who created the account.
               </p>
             </div>
           </div>
-
           <div className="rounded-lg border border-blue-200 bg-white px-4 py-2 text-center">
             <p className="text-xs text-gray-500">BHW Accounts</p>
-
             <p className="text-xl font-bold text-blue-700">{bhwUsers.length}</p>
           </div>
         </div>
-
-        {/* SEARCH AND STATUS FILTER */}
 
         <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
           <div className="flex flex-col gap-3 lg:flex-row">
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-gray-400" />
-
               <input
                 type="text"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="Search BHW name, month, year..."
+                placeholder="Search BHW name, barangay, month, year..."
                 className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-10 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
               />
-
               {searchTerm && (
                 <button
                   type="button"
@@ -626,7 +466,6 @@ export default function MidwifeMonthlyReports() {
                 </button>
               )}
             </div>
-
             <div className="w-full lg:w-52">
               <select
                 value={statusFilter}
@@ -643,22 +482,18 @@ export default function MidwifeMonthlyReports() {
           </div>
         </div>
 
-        {/* REPORT LIST */}
-
         <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
           <div className="border-b border-gray-200 px-5 py-4">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <h2 className="font-semibold text-gray-900">
-                  BHW Submitted Reports
+                  BHW Monthly Reports
                 </h2>
-
                 <p className="text-sm text-gray-500">
                   {filteredReports.length} report
                   {filteredReports.length !== 1 ? "s" : ""} found
                 </p>
               </div>
-
               {statusFilter !== "all" && (
                 <button
                   type="button"
@@ -676,17 +511,14 @@ export default function MidwifeMonthlyReports() {
               <div className="flex h-14 w-14 items-center justify-center rounded-full bg-gray-100">
                 <ClipboardList className="h-7 w-7 text-gray-400" />
               </div>
-
               <h3 className="mt-4 font-semibold text-gray-900">
                 No monthly reports found
               </h3>
-
               <p className="mt-1 max-w-md text-sm text-gray-500">
                 {bhwUsers.length === 0
-                  ? "You have no BHW accounts created under your Midwife account yet."
-                  : "No reports from your BHW accounts match the current search and status filter."}
+                  ? "No BHW accounts are currently assigned to barangays in your district."
+                  : "No reports from district BHW accounts match the current search and status filter."}
               </p>
-
               {searchTerm && (
                 <button
                   type="button"
@@ -699,49 +531,34 @@ export default function MidwifeMonthlyReports() {
             </div>
           ) : (
             <>
-              {/* DESKTOP TABLE */}
-
               <div className="hidden overflow-x-auto md:block">
                 <table className="w-full text-left">
                   <thead className="border-b border-gray-200 bg-gray-50">
                     <tr>
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        BHW
-                      </th>
-
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        Report Period
-                      </th>
-
-                      <th className="px-5 py-3 text-center text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        Women
-                      </th>
-
-                      <th className="px-5 py-3 text-center text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        New
-                      </th>
-
-                      <th className="px-5 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        Submitted
-                      </th>
-
-                      <th className="px-5 py-3 text-center text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        Status
-                      </th>
-
-                      <th className="px-5 py-3 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        Action
-                      </th>
+                      {[
+                        "BHW",
+                        "Barangay",
+                        "Report Period",
+                        "Women",
+                        "New",
+                        "Submitted",
+                        "Status",
+                        "Action",
+                      ].map((heading, index) => (
+                        <th
+                          key={heading}
+                          className={`px-5 py-3 text-xs font-semibold uppercase tracking-wide text-gray-500 ${[3, 4, 6].includes(index) ? "text-center" : ""} ${index === 7 ? "text-right" : ""}`}
+                        >
+                          {heading}
+                        </th>
+                      ))}
                     </tr>
                   </thead>
-
                   <tbody className="divide-y divide-gray-100">
                     {filteredReports.map((report) => {
                       const config =
                         statusConfig[report.status] || statusConfig.submitted;
-
                       const StatusIcon = config.icon;
-
                       return (
                         <tr
                           key={report.id}
@@ -752,45 +569,34 @@ export default function MidwifeMonthlyReports() {
                               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-orange-100">
                                 <UserRound className="h-5 w-5 text-orange-600" />
                               </div>
-
                               <div className="min-w-0">
                                 <p className="font-semibold text-gray-900">
                                   {getFullName(report.bhw)}
                                 </p>
-
                                 <p className="text-xs text-gray-500">
                                   {report.bhw?.username || "BHW"}
                                 </p>
                               </div>
                             </div>
                           </td>
-
+                          <td className="px-5 py-4 text-sm text-gray-700">
+                            {report.barangay?.name || "—"}
+                          </td>
                           <td className="px-5 py-4">
                             <div className="flex items-center gap-2 text-sm font-medium text-gray-900">
                               <CalendarDays className="h-4 w-4 text-gray-400" />
-
                               {formatMonthYear(report.month, report.year)}
                             </div>
                           </td>
-
-                          <td className="px-5 py-4 text-center">
-                            <span className="font-semibold text-gray-900">
-                              {getPregnantWomenCount(report)}
-                            </span>
+                          <td className="px-5 py-4 text-center font-semibold text-gray-900">
+                            {getPregnantWomenCount(report)}
                           </td>
-
-                          <td className="px-5 py-4 text-center">
-                            <span className="font-semibold text-blue-600">
-                              {getNewPregnancyCount(report)}
-                            </span>
+                          <td className="px-5 py-4 text-center font-semibold text-blue-600">
+                            {getNewPregnancyCount(report)}
                           </td>
-
-                          <td className="px-5 py-4">
-                            <span className="text-sm text-gray-600">
-                              {formatDate(report.submitted_at)}
-                            </span>
+                          <td className="px-5 py-4 text-sm text-gray-600">
+                            {formatDate(report.submitted_at)}
                           </td>
-
                           <td className="px-5 py-4 text-center">
                             <span
                               className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${config.className}`}
@@ -799,15 +605,10 @@ export default function MidwifeMonthlyReports() {
                               {config.label}
                             </span>
                           </td>
-
                           <td className="px-5 py-4 text-right">
                             <button
                               type="button"
-                              onClick={() =>
-                                navigate(
-                                  `/dashboard/midwife/monthly-reports/${report.id}`,
-                                )
-                              }
+                              onClick={() => openFullReport(report)}
                               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-medium text-white transition hover:bg-blue-700"
                             >
                               <Eye className="h-4 w-4" />
@@ -821,15 +622,11 @@ export default function MidwifeMonthlyReports() {
                 </table>
               </div>
 
-              {/* MOBILE CARDS */}
-
               <div className="divide-y divide-gray-100 md:hidden">
                 {filteredReports.map((report) => {
                   const config =
                     statusConfig[report.status] || statusConfig.submitted;
-
                   const StatusIcon = config.icon;
-
                   return (
                     <div key={report.id} className="space-y-4 p-5">
                       <div className="flex items-start justify-between gap-3">
@@ -837,18 +634,15 @@ export default function MidwifeMonthlyReports() {
                           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-orange-100">
                             <UserRound className="h-5 w-5 text-orange-600" />
                           </div>
-
                           <div className="min-w-0">
                             <p className="truncate font-semibold text-gray-900">
                               {getFullName(report.bhw)}
                             </p>
-
                             <p className="text-xs text-gray-500">
                               {report.bhw?.username || "BHW"}
                             </p>
                           </div>
                         </div>
-
                         <span
                           className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium ${config.className}`}
                         >
@@ -856,52 +650,45 @@ export default function MidwifeMonthlyReports() {
                           {config.label}
                         </span>
                       </div>
-
                       <div className="grid grid-cols-2 gap-3">
                         <div className="rounded-lg bg-gray-50 p-3">
+                          <p className="text-xs text-gray-500">Barangay</p>
+                          <p className="mt-1 text-sm font-semibold text-gray-900">
+                            {report.barangay?.name || "—"}
+                          </p>
+                        </div>
+                        <div className="rounded-lg bg-gray-50 p-3">
                           <p className="text-xs text-gray-500">Report Period</p>
-
                           <p className="mt-1 text-sm font-semibold text-gray-900">
                             {formatMonthYear(report.month, report.year)}
                           </p>
                         </div>
-
                         <div className="rounded-lg bg-gray-50 p-3">
                           <p className="text-xs text-gray-500">Submitted</p>
-
                           <p className="mt-1 text-sm font-semibold text-gray-900">
                             {formatDate(report.submitted_at)}
                           </p>
                         </div>
-
                         <div className="rounded-lg bg-pink-50 p-3">
                           <p className="text-xs text-gray-500">
                             Pregnant Women
                           </p>
-
                           <p className="mt-1 text-lg font-bold text-pink-700">
                             {getPregnantWomenCount(report)}
                           </p>
                         </div>
-
                         <div className="rounded-lg bg-blue-50 p-3">
                           <p className="text-xs text-gray-500">
                             New This Month
                           </p>
-
                           <p className="mt-1 text-lg font-bold text-blue-700">
                             {getNewPregnancyCount(report)}
                           </p>
                         </div>
                       </div>
-
                       <button
                         type="button"
-                        onClick={() =>
-                          navigate(
-                            `/dashboard/midwife/monthly-reports/${report.id}`,
-                          )
-                        }
+                        onClick={() => openFullReport(report)}
                         className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
                       >
                         <Eye className="h-4 w-4" />
@@ -914,236 +701,194 @@ export default function MidwifeMonthlyReports() {
             </>
           )}
         </div>
-      </div>
 
-      {/* QUICK REPORT PREVIEW MODAL */}
-
-      {selectedReport && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) {
-              setSelectedReport(null);
-            }
-          }}
-        >
-          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
-            {/* MODAL HEADER */}
-
-            <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
-              <div>
-                <div className="flex items-center gap-2">
-                  <FileCheck2 className="h-5 w-5 text-blue-600" />
-
-                  <h2 className="text-lg font-bold text-gray-900">
-                    Monthly Pregnancy Report
-                  </h2>
-                </div>
-
-                <p className="mt-1 text-sm text-gray-500">
-                  {formatMonthYear(selectedReport.month, selectedReport.year)}
-                </p>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setSelectedReport(null)}
-                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
-                aria-label="Close report preview"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            {/* MODAL BODY */}
-
-            <div className="overflow-y-auto p-5">
-              <div className="space-y-5">
-                {/* SUBMITTED BY */}
-
-                <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    Submitted By
-                  </p>
-
-                  <div className="mt-3 flex items-center gap-3">
-                    <div className="flex h-11 w-11 items-center justify-center rounded-full bg-orange-100">
-                      <UserRound className="h-5 w-5 text-orange-600" />
-                    </div>
-
-                    <div>
-                      <p className="font-semibold text-gray-900">
-                        {getFullName(selectedReport.bhw)}
-                      </p>
-
-                      <p className="text-sm text-gray-500">
-                        {selectedReport.bhw?.username ||
-                          "Barangay Health Worker"}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* REPORT INFORMATION */}
-
+        {selectedReport && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+            onMouseDown={(e) => {
+              if (e.target === e.currentTarget) setSelectedReport(null);
+            }}
+          >
+            <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+              <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
                 <div>
-                  <h3 className="font-semibold text-gray-900">
-                    Report Information
-                  </h3>
-
-                  <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <div className="rounded-lg border border-gray-200 p-3">
-                      <p className="text-xs text-gray-500">Reporting Period</p>
-
-                      <p className="mt-1 font-semibold text-gray-900">
-                        {formatMonthYear(
-                          selectedReport.month,
-                          selectedReport.year,
-                        )}
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-gray-200 p-3">
-                      <p className="text-xs text-gray-500">Submitted Date</p>
-
-                      <p className="mt-1 font-semibold text-gray-900">
-                        {formatDate(selectedReport.submitted_at)}
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-gray-200 p-3">
-                      <p className="text-xs text-gray-500">Pregnant Women</p>
-
-                      <p className="mt-1 text-xl font-bold text-pink-600">
-                        {getPregnantWomenCount(selectedReport)}
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-gray-200 p-3">
-                      <p className="text-xs text-gray-500">Newly Registered</p>
-
-                      <p className="mt-1 text-xl font-bold text-blue-600">
-                        {getNewPregnancyCount(selectedReport)}
-                      </p>
-                    </div>
-
-                    <div className="rounded-lg border border-gray-200 p-3 sm:col-span-2">
-                      <p className="text-xs text-gray-500">Total Pregnancies</p>
-
-                      <p className="mt-1 text-xl font-bold text-gray-900">
-                        {getTotalPregnancyCount(selectedReport)}
-                      </p>
-                    </div>
+                  <div className="flex items-center gap-2">
+                    <FileCheck2 className="h-5 w-5 text-blue-600" />
+                    <h2 className="text-lg font-bold text-gray-900">
+                      Monthly Pregnancy Report
+                    </h2>
                   </div>
-                </div>
-
-                {/* PREGNANT WOMEN */}
-
-                <div>
-                  <h3 className="font-semibold text-gray-900">
-                    Pregnant Women Included
-                  </h3>
-
                   <p className="mt-1 text-sm text-gray-500">
-                    These records are taken from the submitted report snapshot.
+                    {formatMonthYear(selectedReport.month, selectedReport.year)}
                   </p>
-
-                  <div className="mt-3 space-y-2">
-                    {Array.isArray(
-                      selectedReport.report_data?.pregnant_women,
-                    ) &&
-                    selectedReport.report_data.pregnant_women.length > 0 ? (
-                      selectedReport.report_data.pregnant_women.map(
-                        (woman, index) => (
-                          <div
-                            key={
-                              woman.pregnant_woman_id ||
-                              `${selectedReport.id}-${index}`
-                            }
-                            className="flex items-center gap-3 rounded-lg border border-gray-200 p-3"
-                          >
-                            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-pink-100 text-sm font-bold text-pink-700">
-                              {index + 1}
-                            </div>
-
-                            <div className="min-w-0 flex-1">
-                              <p className="font-medium text-gray-900">
-                                {woman.name || "Unnamed pregnant woman"}
-                              </p>
-
-                              <p className="text-xs text-gray-500">
-                                Pregnancy ID: {woman.pregnant_woman_id || "—"}
-                              </p>
-                            </div>
-
-                            <div className="text-right">
-                              <p className="text-xs text-gray-500">ANC</p>
-
-                              <p className="font-semibold text-gray-900">
-                                {woman.anc ?? 0}
-                              </p>
-                            </div>
-                          </div>
-                        ),
-                      )
-                    ) : (
-                      <div className="rounded-lg border border-dashed border-gray-300 p-5 text-center text-sm text-gray-500">
-                        No individual pregnancy records were included in this
-                        report.
-                      </div>
-                    )}
-                  </div>
                 </div>
-
-                {/* REVIEW INFORMATION */}
-
-                <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
-                  <div className="flex gap-3">
-                    <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
-
-                    <div>
-                      <p className="font-semibold text-blue-900">
-                        Review workflow
-                      </p>
-
-                      <p className="mt-1 text-sm leading-6 text-blue-800">
-                        This preview displays the report snapshot submitted by
-                        the BHW. Open the full report to inspect the available
-                        details and continue the review process.
-                      </p>
+                <button
+                  type="button"
+                  onClick={() => setSelectedReport(null)}
+                  className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                  aria-label="Close report preview"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="overflow-y-auto p-5">
+                <div className="space-y-5">
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                      Submitted By
+                    </p>
+                    <div className="mt-3 flex items-center gap-3">
+                      <div className="flex h-11 w-11 items-center justify-center rounded-full bg-orange-100">
+                        <UserRound className="h-5 w-5 text-orange-600" />
+                      </div>
+                      <div>
+                        <p className="font-semibold text-gray-900">
+                          {getFullName(selectedReport.bhw)}
+                        </p>
+                        <p className="text-sm text-gray-500">
+                          {selectedReport.bhw?.username ||
+                            "Barangay Health Worker"}
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          Barangay: {selectedReport.barangay?.name || "—"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-gray-900">
+                      Report Information
+                    </h3>
+                    <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <div className="rounded-lg border border-gray-200 p-3">
+                        <p className="text-xs text-gray-500">
+                          Reporting Period
+                        </p>
+                        <p className="mt-1 font-semibold text-gray-900">
+                          {formatMonthYear(
+                            selectedReport.month,
+                            selectedReport.year,
+                          )}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 p-3">
+                        <p className="text-xs text-gray-500">Submitted Date</p>
+                        <p className="mt-1 font-semibold text-gray-900">
+                          {formatDate(selectedReport.submitted_at)}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 p-3">
+                        <p className="text-xs text-gray-500">Pregnant Women</p>
+                        <p className="mt-1 text-xl font-bold text-pink-600">
+                          {getPregnantWomenCount(selectedReport)}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 p-3">
+                        <p className="text-xs text-gray-500">
+                          Newly Registered
+                        </p>
+                        <p className="mt-1 text-xl font-bold text-blue-600">
+                          {getNewPregnancyCount(selectedReport)}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-gray-200 p-3 sm:col-span-2">
+                        <p className="text-xs text-gray-500">
+                          Total Pregnancies
+                        </p>
+                        <p className="mt-1 text-xl font-bold text-gray-900">
+                          {getTotalPregnancyCount(selectedReport)}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-gray-900">
+                      Pregnant Women Included
+                    </h3>
+                    <p className="mt-1 text-sm text-gray-500">
+                      These records are taken from the submitted report
+                      snapshot.
+                    </p>
+                    <div className="mt-3 space-y-2">
+                      {Array.isArray(
+                        selectedReport.report_data?.pregnant_women,
+                      ) &&
+                      selectedReport.report_data.pregnant_women.length > 0 ? (
+                        selectedReport.report_data.pregnant_women.map(
+                          (woman, index) => (
+                            <div
+                              key={
+                                woman.pregnant_woman_id ||
+                                `${selectedReport.id}-${index}`
+                              }
+                              className="flex items-center gap-3 rounded-lg border border-gray-200 p-3"
+                            >
+                              <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-pink-100 text-sm font-bold text-pink-700">
+                                {index + 1}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <p className="font-medium text-gray-900">
+                                  {woman.name || "Unnamed pregnant woman"}
+                                </p>
+                                <p className="text-xs text-gray-500">
+                                  Pregnancy ID: {woman.pregnant_woman_id || "—"}
+                                </p>
+                              </div>
+                              <div className="text-right">
+                                <p className="text-xs text-gray-500">ANC</p>
+                                <p className="font-semibold text-gray-900">
+                                  {woman.anc ?? 0}
+                                </p>
+                              </div>
+                            </div>
+                          ),
+                        )
+                      ) : (
+                        <div className="rounded-lg border border-dashed border-gray-300 p-5 text-center text-sm text-gray-500">
+                          No individual pregnancy records were included in this
+                          report.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="flex gap-3">
+                      <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-blue-600" />
+                      <div>
+                        <p className="font-semibold text-blue-900">
+                          Review workflow
+                        </p>
+                        <p className="mt-1 text-sm leading-6 text-blue-800">
+                          This preview displays the report snapshot submitted by
+                          the BHW. Open the full report to inspect the available
+                          details and continue the review process.
+                        </p>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
-            </div>
-
-            {/* MODAL FOOTER */}
-
-            <div className="flex flex-col-reverse gap-2 border-t border-gray-200 bg-gray-50 px-5 py-4 sm:flex-row sm:justify-end">
-              <button
-                type="button"
-                onClick={() => setSelectedReport(null)}
-                className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
-              >
-                Close
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  navigate(
-                    `/dashboard/midwife/monthly-reports/${selectedReport.id}`,
-                  );
-                }}
-                className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
-              >
-                <Eye className="h-4 w-4" />
-                Open Full Report
-              </button>
+              <div className="flex flex-col-reverse gap-2 border-t border-gray-200 bg-gray-50 px-5 py-4 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => setSelectedReport(null)}
+                  className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+                >
+                  Close
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openFullReport(selectedReport)}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
+                >
+                  <Eye className="h-4 w-4" />
+                  Open Full Report
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </DashboardLayout>
   );
 }

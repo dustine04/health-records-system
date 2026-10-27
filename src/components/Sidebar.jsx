@@ -147,11 +147,6 @@ const MENUS = {
       icon: Map,
     },
     {
-      name: "Health Records",
-      path: "/dashboard/admin/records",
-      icon: FileText,
-    },
-    {
       name: "Reports",
       path: "/dashboard/admin/fhsis-reports",
       icon: BarChart3,

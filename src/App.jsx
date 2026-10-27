@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 
 import Login from "./pages/Login";
+import Register from "./pages/Register";
 
 import AdminDashboard from "./pages/AdminDashboard";
 import NurseDashboard from "./pages/NurseDashboard";
@@ -41,6 +42,7 @@ function App() {
         ===================================================== */}
 
         <Route path="/" element={<Login />} />
+        <Route path="/Register" element={<Register />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         {/* =====================================================
             ADMIN
