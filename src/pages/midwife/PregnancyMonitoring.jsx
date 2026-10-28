@@ -340,6 +340,51 @@ const formatDate = (value) => {
   });
 };
 
+/*
+ * Calculate gestational age from the first day of the LMP through
+ * the ANC visit date. Date-only UTC arithmetic avoids timezone shifts.
+ * The database field stores completed weeks; days are shown as a hint.
+ */
+const calculateGestationalAge = (lmp, visitDate) => {
+  if (!lmp || !visitDate) return null;
+
+  const parseDateOnly = (value) => {
+    const parts = String(value).slice(0, 10).split("-").map(Number);
+    if (parts.length !== 3 || parts.some((part) => !Number.isFinite(part))) {
+      return null;
+    }
+
+    const [year, month, day] = parts;
+    const timestamp = Date.UTC(year, month - 1, day);
+    const check = new Date(timestamp);
+
+    if (
+      check.getUTCFullYear() !== year ||
+      check.getUTCMonth() !== month - 1 ||
+      check.getUTCDate() !== day
+    ) {
+      return null;
+    }
+
+    return timestamp;
+  };
+
+  const lmpTime = parseDateOnly(lmp);
+  const visitTime = parseDateOnly(visitDate);
+
+  if (lmpTime === null || visitTime === null || visitTime < lmpTime) {
+    return null;
+  }
+
+  const totalDays = Math.floor((visitTime - lmpTime) / 86400000);
+
+  return {
+    weeks: Math.floor(totalDays / 7),
+    days: totalDays % 7,
+    totalDays,
+  };
+};
+
 const getCheckupStatus = (nextVisitDate, pregnancyStatus = "active") => {
   const inactiveStatuses = [
     "delivered",
@@ -785,11 +830,21 @@ export default function PregnancyMonitoring() {
   };
 
   const openAddAnc = () => {
+    const visitDate = today();
+    const gestationalAge = calculateGestationalAge(
+      selectedPregnancy?.lmp,
+      visitDate,
+    );
+
     setEditingAnc(null);
     setAncForm({
       ...emptyAncForm,
       visit_number: getNextVisitNumber(),
-      visit_date: today(),
+      visit_date: visitDate,
+      gestational_age_weeks:
+        gestationalAge && gestationalAge.totalDays >= 0
+          ? String(gestationalAge.weeks)
+          : "",
     });
     setAncModal(true);
   };
@@ -823,12 +878,38 @@ export default function PregnancyMonitoring() {
       }
     });
 
+    // Recalculate from the pregnancy's LMP and this visit's date,
+    // rather than relying on a manually entered or stale saved value.
+    const gestationalAge = calculateGestationalAge(
+      selectedPregnancy?.lmp,
+      form.visit_date,
+    );
+    form.gestational_age_weeks =
+      gestationalAge && gestationalAge.totalDays >= 0
+        ? String(gestationalAge.weeks)
+        : "";
+
     setAncForm(form);
     setAncModal(true);
   };
 
   const handleAncChange = (field, value) => {
-    setAncForm((prev) => ({ ...prev, [field]: value }));
+    setAncForm((prev) => {
+      const next = { ...prev, [field]: value };
+
+      if (field === "visit_date") {
+        const gestationalAge = calculateGestationalAge(
+          selectedPregnancy?.lmp,
+          value,
+        );
+        next.gestational_age_weeks =
+          gestationalAge && gestationalAge.totalDays >= 0
+            ? String(gestationalAge.weeks)
+            : "";
+      }
+
+      return next;
+    });
   };
 
   /* =========================================================
@@ -1720,13 +1801,27 @@ export default function PregnancyMonitoring() {
                   required
                 />
                 <FormInput
-                  label="Gestational Age (weeks)"
+                  label="Gestational Age (completed weeks)"
                   type="number"
                   value={ancForm.gestational_age_weeks}
-                  onChange={(value) =>
-                    handleAncChange("gestational_age_weeks", value)
-                  }
+                  readOnly
                 />
+                <div className="md:col-span-3 -mt-2 text-xs text-gray-500">
+                  {selectedPregnancy?.lmp
+                    ? (() => {
+                        const gestationalAge = calculateGestationalAge(
+                          selectedPregnancy.lmp,
+                          ancForm.visit_date,
+                        );
+
+                        if (!gestationalAge) {
+                          return "Gestational age cannot be calculated. Check that the visit date is on or after the recorded LMP.";
+                        }
+
+                        return `Calculated from LMP (${formatDate(selectedPregnancy.lmp)}): ${gestationalAge.weeks} week${gestationalAge.weeks === 1 ? "" : "s"} and ${gestationalAge.days} day${gestationalAge.days === 1 ? "" : "s"}.`;
+                      })()
+                    : "No LMP is recorded for this pregnancy. Add the LMP to the pregnancy record to calculate gestational age."}
+                </div>
               </div>
             </FormSection>
 
@@ -2248,6 +2343,7 @@ function FormInput({
   required = false,
   step,
   placeholder,
+  readOnly = false,
 }) {
   return (
     <div>
@@ -2257,11 +2353,16 @@ function FormInput({
       <input
         type={type}
         value={value ?? ""}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => onChange?.(e.target.value)}
         required={required}
         step={step}
         placeholder={placeholder}
-        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+        readOnly={readOnly}
+        className={`w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm outline-none transition ${
+          readOnly
+            ? "cursor-not-allowed bg-gray-100 text-gray-600"
+            : "bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+        }`}
       />
     </div>
   );

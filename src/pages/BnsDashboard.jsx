@@ -355,7 +355,7 @@ function BnsDashboard() {
       description: "Open the record-entry page available to your account.",
       icon: Plus,
       iconClass: "bg-violet-100 text-violet-600",
-      path: "/dashboard/bns/add-record",
+      path: "/dashboard/bns/child-registration",
     },
   ];
 

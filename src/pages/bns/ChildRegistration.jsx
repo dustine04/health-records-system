@@ -20,6 +20,18 @@ function ChildRegistration() {
   const user = storedUser ? JSON.parse(storedUser) : null;
 
   const [children, setChildren] = useState([]);
+  const [assignedAreas, setAssignedAreas] = useState([]);
+  const [newChildMode, setNewChildMode] = useState(false);
+  const [newHousehold, setNewHousehold] = useState({
+    household_code: "",
+    household_head: "",
+    local_area_id: "",
+    first_name: "",
+    middle_name: "",
+    last_name: "",
+    sex: "",
+    birth_date: "",
+  });
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
 
@@ -94,6 +106,20 @@ function ChildRegistration() {
         .eq("is_active", true);
 
       if (assignmentError) throw assignmentError;
+
+      const availableAreas = (assignments || [])
+        .filter((item) => item.local_areas?.id)
+        .map((item) => ({
+          id: item.local_areas.id,
+          name: item.local_areas.name,
+          type: item.local_areas.type,
+          barangay_name: item.local_areas.barangays?.name || "",
+        }))
+        .filter(
+          (area, index, all) =>
+            all.findIndex((a) => String(a.id) === String(area.id)) === index,
+        );
+      setAssignedAreas(availableAreas);
 
       const areaIds = (assignments || [])
         .map((item) => item.local_area_id)
@@ -215,6 +241,17 @@ function ChildRegistration() {
   // =====================================================
 
   const resetForm = () => {
+    setNewChildMode(false);
+    setNewHousehold({
+      household_code: "",
+      household_head: "",
+      local_area_id: "",
+      first_name: "",
+      middle_name: "",
+      last_name: "",
+      sex: "",
+      birth_date: "",
+    });
     setForm({
       resident_id: "",
 
@@ -248,6 +285,7 @@ function ChildRegistration() {
   };
 
   const openAddModal = (child) => {
+    setNewChildMode(false);
     const fullName = [child.first_name, child.middle_name, child.last_name]
       .filter(Boolean)
       .join(" ");
@@ -288,7 +326,64 @@ function ChildRegistration() {
     setShowModal(true);
   };
 
+  const openNewChildModal = () => {
+    setEditingRecord(null);
+    setNewChildMode(true);
+    setNewHousehold({
+      household_code: "",
+      household_head: "",
+      local_area_id: assignedAreas[0] ? String(assignedAreas[0].id) : "",
+      first_name: "",
+      middle_name: "",
+      last_name: "",
+      sex: "",
+      birth_date: "",
+    });
+    setForm({
+      resident_id: "",
+      date_of_registration: new Date().toISOString().split("T")[0],
+      document_record_no: "",
+      family_serial_no: "",
+      child_name: "",
+      date_of_birth: "",
+      sex: "",
+      mother_name: "",
+      mother_tt_status: "",
+      weight_kg: "",
+      height_cm: "",
+      muac_cm: "",
+      date_nbs_done: "",
+      nbs_result: "",
+      tt_date_given: "",
+      tt_date_assessed: "",
+      complete_address: "",
+      referred_health_facility: "",
+      referral_result: "",
+    });
+    setShowModal(true);
+  };
+
+  const handleNewHouseholdChange = (e) => {
+    const { name, value } = e.target;
+    const next = { ...newHousehold, [name]: value };
+    setNewHousehold(next);
+
+    if (["first_name", "middle_name", "last_name"].includes(name)) {
+      setForm((current) => ({
+        ...current,
+        child_name: [next.first_name, next.middle_name, next.last_name]
+          .filter(Boolean)
+          .join(" "),
+      }));
+    } else if (name === "birth_date") {
+      setForm((current) => ({ ...current, date_of_birth: value }));
+    } else if (name === "sex") {
+      setForm((current) => ({ ...current, sex: value }));
+    }
+  };
+
   const openEditModal = (child) => {
+    setNewChildMode(false);
     const record = child.health_record;
 
     if (!record) {
@@ -357,16 +452,91 @@ function ChildRegistration() {
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    if (!form.resident_id) {
+    if (!newChildMode && !form.resident_id) {
       alert("Please select a child.");
       return;
     }
 
+    if (newChildMode) {
+      if (
+        !newHousehold.local_area_id ||
+        !newHousehold.household_code.trim() ||
+        !newHousehold.household_head.trim() ||
+        !newHousehold.first_name.trim() ||
+        !newHousehold.last_name.trim() ||
+        !newHousehold.birth_date ||
+        !newHousehold.sex
+      ) {
+        alert(
+          "Please complete the household area, household code, household head, and the child's name, date of birth, and sex.",
+        );
+        return;
+      }
+      if (assignedAreas.length === 0) {
+        alert(
+          "You do not have an active assigned Purok/Sitio. Please ask your Midwife to assign an area first.",
+        );
+        return;
+      }
+    }
+
+    let createdHouseholdId = null;
+    let createdResidentId = null;
+
     try {
       setSaving(true);
 
+      let residentId = form.resident_id ? Number(form.resident_id) : null;
+
+      if (newChildMode) {
+        const currentUser = JSON.parse(localStorage.getItem("user") || "null");
+
+        if (!currentUser?.id) {
+          throw new Error(
+            "Unable to identify the logged-in user. Please log in again.",
+          );
+        }
+
+        const { data: household, error: householdInsertError } = await supabase
+          .from("households")
+          .insert({
+            household_code: newHousehold.household_code.trim(),
+            household_head: newHousehold.household_head.trim(),
+            local_area_id: Number(newHousehold.local_area_id),
+            created_by: Number(currentUser.id),
+          })
+          .select("id")
+          .single();
+
+        if (householdInsertError) throw householdInsertError;
+
+        createdHouseholdId = household.id;
+
+        const { data: resident, error: residentInsertError } = await supabase
+          .from("residents")
+          .insert({
+            household_id: household.id,
+            first_name: newHousehold.first_name.trim(),
+            middle_name: newHousehold.middle_name.trim() || null,
+            last_name: newHousehold.last_name.trim(),
+            sex: newHousehold.sex,
+            birth_date: newHousehold.birth_date,
+          })
+          .select("id")
+          .single();
+
+        if (residentInsertError) {
+          // Best-effort cleanup if resident creation fails after household creation.
+          await supabase.from("households").delete().eq("id", household.id);
+          throw residentInsertError;
+        }
+
+        residentId = resident.id;
+        createdResidentId = resident.id;
+      }
+
       const childData = {
-        resident_id: Number(form.resident_id),
+        resident_id: Number(residentId),
 
         date_of_registration: form.date_of_registration || null,
 
@@ -433,6 +603,14 @@ function ChildRegistration() {
 
       await fetchChildren();
     } catch (error) {
+      // Best-effort rollback for a newly created household/resident if the
+      // child health record could not be saved.
+      if (createdResidentId) {
+        await supabase.from("residents").delete().eq("id", createdResidentId);
+      }
+      if (createdHouseholdId) {
+        await supabase.from("households").delete().eq("id", createdHouseholdId);
+      }
       console.error("Error saving child record:", error);
       alert(error.message || "Failed to save child health record.");
     } finally {
@@ -555,6 +733,17 @@ function ChildRegistration() {
           <p className="text-gray-500 mt-1">
             Register and Manage child health records in your assigned areas.
           </p>
+        </div>
+
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={openNewChildModal}
+            className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold shadow-sm"
+          >
+            <Plus size={17} />
+            Register New Child / Household
+          </button>
         </div>
 
         {/* SEARCH */}
@@ -762,7 +951,9 @@ function ChildRegistration() {
                     <h3 className="text-lg font-semibold text-gray-800">
                       {editingRecord
                         ? "Edit Child Health Record"
-                        : "Child Registration"}
+                        : newChildMode
+                          ? "Register Child and Create Household"
+                          : "Child Registration"}
                     </h3>
 
                     <p className="text-sm text-gray-500">
@@ -813,6 +1004,148 @@ function ChildRegistration() {
                     </div>
 
                     <div className="p-5 space-y-5">
+                      {newChildMode && (
+                        <section className="rounded-2xl border border-teal-200 bg-teal-50/50 p-5 space-y-4">
+                          <div>
+                            <h4 className="font-semibold text-gray-800">
+                              Create Household and Child Resident
+                            </h4>
+                            <p className="text-sm text-gray-600 mt-1">
+                              Use this when the household has not yet been
+                              surveyed or added to the system. The household and
+                              child resident will be created before the health
+                              record is saved.
+                            </p>
+                          </div>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                Assigned Purok / Sitio *
+                              </label>
+                              <select
+                                name="local_area_id"
+                                value={newHousehold.local_area_id}
+                                onChange={handleNewHouseholdChange}
+                                required
+                                className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                              >
+                                <option value="">Select assigned area</option>
+                                {assignedAreas.map((area) => (
+                                  <option key={area.id} value={area.id}>
+                                    {area.name} ({area.type || "Area"})
+                                    {area.barangay_name
+                                      ? ` — ${area.barangay_name}`
+                                      : ""}
+                                  </option>
+                                ))}
+                              </select>
+                              {assignedAreas.length === 0 && (
+                                <p className="text-xs text-red-600 mt-1">
+                                  No active assigned areas found.
+                                </p>
+                              )}
+                            </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                Household Code *
+                              </label>
+                              <input
+                                name="household_code"
+                                value={newHousehold.household_code}
+                                onChange={handleNewHouseholdChange}
+                                required
+                                placeholder="Enter a unique household code"
+                                className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                              />
+                            </div>
+                            <div className="md:col-span-2">
+                              <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                Household Head *
+                              </label>
+                              <input
+                                name="household_head"
+                                value={newHousehold.household_head}
+                                onChange={handleNewHouseholdChange}
+                                required
+                                placeholder="Full name of household head"
+                                className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                              />
+                            </div>
+                          </div>
+                          <div className="border-t border-teal-100 pt-4">
+                            <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-3">
+                              Child Resident Details
+                            </p>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  First Name *
+                                </label>
+                                <input
+                                  name="first_name"
+                                  value={newHousehold.first_name}
+                                  onChange={handleNewHouseholdChange}
+                                  required
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  Middle Name
+                                </label>
+                                <input
+                                  name="middle_name"
+                                  value={newHousehold.middle_name}
+                                  onChange={handleNewHouseholdChange}
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  Last Name *
+                                </label>
+                                <input
+                                  name="last_name"
+                                  value={newHousehold.last_name}
+                                  onChange={handleNewHouseholdChange}
+                                  required
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  Date of Birth *
+                                </label>
+                                <input
+                                  type="date"
+                                  name="birth_date"
+                                  value={newHousehold.birth_date}
+                                  onChange={handleNewHouseholdChange}
+                                  required
+                                  max={new Date().toISOString().split("T")[0]}
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  Sex *
+                                </label>
+                                <select
+                                  name="sex"
+                                  value={newHousehold.sex}
+                                  onChange={handleNewHouseholdChange}
+                                  required
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                >
+                                  <option value="">Select sex</option>
+                                  <option value="Male">Male</option>
+                                  <option value="Female">Female</option>
+                                </select>
+                              </div>
+                            </div>
+                          </div>
+                        </section>
+                      )}
                       {/* Registration Details */}
 
                       <div>
@@ -893,14 +1226,15 @@ function ChildRegistration() {
                               <input
                                 type="text"
                                 value={form.child_name}
-                                readOnly
+                                readOnly={!newChildMode}
                                 className="w-full h-11 pl-10 pr-3.5 rounded-xl border border-teal-100 bg-teal-50/50 text-sm font-medium text-gray-800 outline-none"
                               />
                             </div>
 
                             <p className="text-[11px] text-gray-400 mt-1.5">
-                              Automatically retrieved from the household
-                              resident record.
+                              {newChildMode
+                                ? "Automatically filled from the new child resident details above."
+                                : "Automatically retrieved from the household resident record."}
                             </p>
                           </div>
 
@@ -913,7 +1247,7 @@ function ChildRegistration() {
                             <input
                               type="text"
                               value={form.sex}
-                              readOnly
+                              readOnly={!newChildMode}
                               className="w-full h-11 px-3.5 rounded-xl border border-gray-200 bg-gray-50 text-sm font-medium text-gray-700 outline-none"
                             />
                           </div>
@@ -937,7 +1271,7 @@ function ChildRegistration() {
                             <input
                               type="date"
                               value={form.date_of_birth}
-                              readOnly
+                              readOnly={!newChildMode}
                               className="w-full h-11 px-3.5 rounded-xl border border-gray-200 bg-gray-50 text-sm text-gray-600 outline-none"
                             />
                           </div>
