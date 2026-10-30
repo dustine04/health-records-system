@@ -21,6 +21,7 @@ import {
   ChevronRight,
   CalendarCheck,
   UserRound,
+  Bell,
 } from "lucide-react";
 
 import {
@@ -213,6 +214,7 @@ function MidwifeDashboard() {
   const [showAllAppointments, setShowAllAppointments] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [assignedDistrict, setAssignedDistrict] = useState(null);
+  const [showMissedNotifications, setShowMissedNotifications] = useState(false);
   /* =========================================================
      LOAD CURRENT SESSION
   ========================================================= */
@@ -850,6 +852,11 @@ function MidwifeDashboard() {
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
+  const openMissedNotifications = () => {
+    setShowMissedNotifications(false);
+    selectAppointmentFilter("missed");
+  };
+
   const clearFilters = () => {
     setSelectedFilter("all");
     setSearchTerm("");
@@ -953,7 +960,129 @@ function MidwifeDashboard() {
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {/* MISSED CHECK-UP NOTIFICATIONS */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setShowMissedNotifications((current) => !current)
+                  }
+                  aria-label={`Missed check-up notifications: ${statistics.missedCheckups.length}`}
+                  aria-expanded={showMissedNotifications}
+                  className="relative inline-flex h-11 w-11 items-center justify-center rounded-xl border border-white/30 bg-white/10 text-white transition hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white/70"
+                >
+                  <Bell size={19} />
+                  {statistics.missedCheckups.length > 0 && (
+                    <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-teal-700 bg-red-500 px-1 text-[10px] font-bold leading-none text-white">
+                      {statistics.missedCheckups.length > 99
+                        ? "99+"
+                        : statistics.missedCheckups.length}
+                    </span>
+                  )}
+                </button>
+
+                {showMissedNotifications && (
+                  <div
+                    role="dialog"
+                    aria-label="Missed check-up notifications"
+                    className="absolute right-0 z-50 mt-3 w-[min(22rem,calc(100vw-2.5rem))] overflow-hidden rounded-2xl border border-gray-200 bg-white text-left text-gray-800 shadow-xl"
+                  >
+                    <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+                      <div>
+                        <p className="font-bold text-gray-800">
+                          Missed check-ups
+                        </p>
+                        <p className="mt-0.5 text-xs text-gray-500">
+                          {statistics.missedCheckups.length} overdue{" "}
+                          {statistics.missedCheckups.length === 1
+                            ? "appointment"
+                            : "appointments"}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowMissedNotifications(false)}
+                        aria-label="Close notifications"
+                        className="rounded-lg p-1.5 text-gray-400 transition hover:bg-gray-100 hover:text-gray-700"
+                      >
+                        <X size={17} />
+                      </button>
+                    </div>
+
+                    {statistics.missedCheckups.length === 0 ? (
+                      <div className="px-4 py-8 text-center">
+                        <CheckCircle2
+                          className="mx-auto text-green-500"
+                          size={26}
+                        />
+                        <p className="mt-2 text-sm font-semibold text-gray-700">
+                          No missed check-ups
+                        </p>
+                        <p className="mt-1 text-xs text-gray-500">
+                          There are no overdue ANC appointments in your assigned
+                          area.
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="max-h-80 overflow-y-auto">
+                          {statistics.missedCheckups
+                            .slice(0, 8)
+                            .map((pregnancy) => {
+                              const barangay =
+                                pregnancy.resident?.households?.local_areas
+                                  ?.barangays;
+                              const days = pregnancy.checkupStatus.daysOverdue;
+
+                              return (
+                                <button
+                                  key={pregnancy.id}
+                                  type="button"
+                                  onClick={openMissedNotifications}
+                                  className="flex w-full items-start gap-3 border-b border-gray-100 px-4 py-3 text-left transition hover:bg-red-50"
+                                >
+                                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
+                                    <AlertTriangle size={17} />
+                                  </span>
+                                  <span className="min-w-0 flex-1">
+                                    <span className="block truncate text-sm font-semibold text-gray-800">
+                                      {getFullName(pregnancy.resident)}
+                                    </span>
+                                    <span className="mt-0.5 block text-xs text-gray-500">
+                                      {barangay?.name ||
+                                        "Barangay not available"}{" "}
+                                      · Due{" "}
+                                      {formatDate(pregnancy.next_visit_date)}
+                                    </span>
+                                    <span className="mt-1 block text-xs font-semibold text-red-600">
+                                      {days} day{days === 1 ? "" : "s"} overdue
+                                    </span>
+                                  </span>
+                                  <ChevronRight
+                                    size={16}
+                                    className="mt-2 shrink-0 text-gray-400"
+                                  />
+                                </button>
+                              );
+                            })}
+                        </div>
+                        <div className="bg-gray-50 p-3">
+                          <button
+                            type="button"
+                            onClick={openMissedNotifications}
+                            className="flex w-full items-center justify-center gap-2 rounded-lg bg-teal-700 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-800"
+                          >
+                            View all missed check-ups
+                            <ArrowRight size={15} />
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
               <button
                 type="button"
                 onClick={loadDashboard}

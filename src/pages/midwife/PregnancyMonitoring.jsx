@@ -30,6 +30,59 @@ import { supabase } from "../../lib/supabase";
 
 const today = () => new Date().toISOString().split("T")[0];
 
+/* =========================================================
+   LOCAL DRAFT STORAGE
+   Drafts are scoped to the signed-in user, pregnancy, and form/record.
+========================================================= */
+const DRAFT_PREFIX = "pregnancy_monitoring_draft";
+const DRAFT_SAVE_DELAY = 700;
+
+const makeDraftKey = (userId, pregnancyId, formType, recordId = "new") =>
+  [DRAFT_PREFIX, userId, pregnancyId, formType, recordId]
+    .map((part) => encodeURIComponent(String(part ?? "")))
+    .join(":");
+
+const readLocalDraft = (key) => {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && parsed.data && typeof parsed.data === "object"
+      ? parsed
+      : null;
+  } catch (error) {
+    console.error("Unable to read pregnancy-monitoring draft:", error);
+    return null;
+  }
+};
+
+const writeLocalDraft = (key, data, userId) => {
+  try {
+    localStorage.setItem(
+      key,
+      JSON.stringify({ data, userId, savedAt: new Date().toISOString() }),
+    );
+    return true;
+  } catch (error) {
+    console.error("Unable to save pregnancy-monitoring draft:", error);
+    return false;
+  }
+};
+
+const removeLocalDraft = (key) => {
+  try {
+    if (key) localStorage.removeItem(key);
+  } catch (error) {
+    console.error("Unable to remove pregnancy-monitoring draft:", error);
+  }
+};
+
+const formatDraftTime = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString();
+};
+
 const emptyAncForm = {
   visit_number: "",
   visit_date: today(),
@@ -463,6 +516,12 @@ const fullName = (person) => {
 
 export default function PregnancyMonitoring() {
   const [user, setUser] = useState(null);
+  const [nurses, setNurses] = useState([]);
+  const [accessLoading, setAccessLoading] = useState(false);
+  const [accessSavingId, setAccessSavingId] = useState(null);
+  const [nurseAccessError, setNurseAccessError] = useState("");
+  const [hasNurseAuthorization, setHasNurseAuthorization] = useState(false);
+  const [authorizationChecked, setAuthorizationChecked] = useState(false);
   const [pregnancies, setPregnancies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -495,6 +554,10 @@ export default function PregnancyMonitoring() {
     attended_by: "",
   });
 
+  const [activeDraftKey, setActiveDraftKey] = useState(null);
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftStatus, setDraftStatus] = useState("");
+
   useEffect(() => {
     const savedUser = localStorage.getItem("user");
 
@@ -508,30 +571,187 @@ export default function PregnancyMonitoring() {
   }, []);
 
   useEffect(() => {
-    if (user?.id) {
+    if (!user?.id) return;
+    const role = String(user.role || "").toLowerCase();
+    if (role === "midwife") {
+      loadNursesAndAccess();
       loadPregnancies();
+    } else if (role === "nurse") {
+      checkNurseAuthorization();
+    } else {
+      setLoading(false);
+      setAuthorizationChecked(true);
     }
   }, [user]);
 
-  const loadPregnancies = async () => {
+  const checkNurseAuthorization = async () => {
+    setLoading(true);
+    setAuthorizationChecked(false);
+    setHasNurseAuthorization(false);
+    setPregnancies([]);
+    try {
+      if (!user?.id || !user?.district_id) {
+        setAuthorizationChecked(true);
+        return;
+      }
+      const { data, error } = await supabase
+        .from("pregnancy_monitoring_access")
+        .select("id")
+        .eq("nurse_id", user.id)
+        .eq("district_id", user.district_id)
+        .eq("is_active", true)
+        .limit(1);
+      if (error) throw error;
+      const authorized = Boolean(data?.length);
+      setHasNurseAuthorization(authorized);
+      setAuthorizationChecked(true);
+      if (authorized) await loadPregnancies(true);
+    } catch (error) {
+      console.error(
+        "Unable to verify nurse pregnancy-monitoring access:",
+        error,
+      );
+      setNurseAccessError(
+        error.message || "Unable to verify your authorization.",
+      );
+      setHasNurseAuthorization(false);
+      setAuthorizationChecked(true);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadNursesAndAccess = async () => {
+    if (!user?.id || !user?.district_id) return;
+    try {
+      setAccessLoading(true);
+      setNurseAccessError("");
+      const [
+        { data: nurseRows, error: nurseError },
+        { data: accessRows, error: accessError },
+      ] = await Promise.all([
+        supabase
+          .from("users")
+          .select(
+            "id, first_name, middle_name, last_name, username, email, is_active, district_id",
+          )
+          .eq("role", "nurse")
+          .eq("district_id", user.district_id)
+          .order("last_name", { ascending: true }),
+        supabase
+          .from("pregnancy_monitoring_access")
+          .select("id, nurse_id, is_active, granted_at, granted_by")
+          .eq("midwife_id", user.id)
+          .eq("district_id", user.district_id),
+      ]);
+      if (nurseError) throw nurseError;
+      if (accessError) throw accessError;
+      const accessMap = new Map(
+        (accessRows || []).map((row) => [String(row.nurse_id), row]),
+      );
+      setNurses(
+        (nurseRows || []).map((nurse) => ({
+          ...nurse,
+          pregnancy_access: accessMap.get(String(nurse.id)) || null,
+        })),
+      );
+    } catch (error) {
+      console.error("Error loading Nurses and permissions:", error);
+      setNurseAccessError(
+        error.message ||
+          "Could not load Nurses. Check the authorization table.",
+      );
+    } finally {
+      setAccessLoading(false);
+    }
+  };
+
+  const setNurseAccess = async (nurse, shouldEnable) => {
+    if (!user?.id || !user?.district_id || !nurse?.id) return;
+    const verb = shouldEnable ? "grant access to" : "revoke access for";
+    if (
+      !window.confirm(
+        `Are you sure you want to ${verb} ${fullName(nurse)} for district-wide pregnancy monitoring?`,
+      )
+    )
+      return;
+
+    try {
+      setAccessSavingId(nurse.id);
+      setNurseAccessError("");
+      const existing = nurse.pregnancy_access;
+      let result;
+      if (existing?.id) {
+        result = await supabase
+          .from("pregnancy_monitoring_access")
+          .update({
+            is_active: shouldEnable,
+            granted_by: shouldEnable ? user.id : existing.granted_by || user.id,
+            granted_at: shouldEnable
+              ? new Date().toISOString()
+              : existing.granted_at,
+            revoked_at: shouldEnable ? null : new Date().toISOString(),
+          })
+          .eq("id", existing.id)
+          .eq("midwife_id", user.id)
+          .eq("nurse_id", nurse.id)
+          .eq("district_id", user.district_id);
+      } else {
+        result = await supabase.from("pregnancy_monitoring_access").insert({
+          midwife_id: user.id,
+          nurse_id: nurse.id,
+          district_id: user.district_id,
+          is_active: true,
+          granted_by: user.id,
+          granted_at: new Date().toISOString(),
+        });
+      }
+      if (result.error) throw result.error;
+      await loadNursesAndAccess();
+      alert(
+        shouldEnable
+          ? "Pregnancy-monitoring access granted."
+          : "Pregnancy-monitoring access revoked.",
+      );
+    } catch (error) {
+      console.error("Error changing Nurse access:", error);
+      setNurseAccessError(error.message || "Could not update Nurse access.");
+    } finally {
+      setAccessSavingId(null);
+    }
+  };
+
+  const loadPregnancies = async (authorizationAlreadyChecked = false) => {
     try {
       setLoading(true);
 
-      // Only a logged-in Midwife can access this page.
-      if (!user?.id || String(user.role || "").toLowerCase() !== "midwife") {
+      // Midwives and Nurses have full monitoring permissions within their district.
+      const role = String(user?.role || "").toLowerCase();
+      const isMidwife = role === "midwife";
+      const isNurse = role === "nurse";
+
+      if (!user?.id || (!isMidwife && !isNurse)) {
         setPregnancies([]);
-        console.error("Access denied: a valid Midwife session is required.");
+        console.error(
+          "Access denied: a valid Midwife or Nurse session is required.",
+        );
         return;
       }
 
-      // Require a location assignment to prevent citywide record exposure.
-      const barangayId = user.barangay_id;
+      if (isNurse && !authorizationAlreadyChecked && !hasNurseAuthorization) {
+        setPregnancies([]);
+        return;
+      }
+
+      // Nurses are always district-scoped. Midwives retain their existing
+      // barangay scope when assigned, otherwise they use their district.
+      const barangayId = isMidwife ? user.barangay_id : null;
       const districtId = user.district_id;
 
-      if (!barangayId && !districtId) {
+      if (!districtId && !barangayId) {
         setPregnancies([]);
         console.warn(
-          "This Midwife has no assigned barangay or district. Assign a location to display pregnancy records.",
+          `This ${isNurse ? "Nurse" : "Midwife"} has no assigned district${isNurse ? "" : " or barangay"}. Assign a location to display pregnancy records.`,
         );
         return;
       }
@@ -814,6 +1034,100 @@ export default function PregnancyMonitoring() {
   };
 
   /* =========================================================
+     DRAFT RESTORE / AUTO-SAVE
+  ========================================================= */
+
+  const prepareDraft = (key, initialData, formLabel) => {
+    const savedDraft = readLocalDraft(key);
+    let restoredData = initialData;
+    let restored = false;
+
+    if (savedDraft) {
+      const savedAt = formatDraftTime(savedDraft.savedAt);
+      const shouldRestore = window.confirm(
+        `An unfinished ${formLabel} draft was found${savedAt ? ` (last saved ${savedAt})` : ""}.\n\nWould you like to restore it?`,
+      );
+
+      if (shouldRestore) {
+        restoredData = { ...initialData, ...savedDraft.data };
+        restored = true;
+      } else {
+        removeLocalDraft(key);
+      }
+    }
+
+    setActiveDraftKey(key);
+    setDraftReady(true);
+    setDraftStatus(
+      restored ? "Draft restored" : "Draft will save automatically",
+    );
+    return restoredData;
+  };
+
+  const discardActiveDraft = () => {
+    if (!activeDraftKey) return;
+    if (
+      !window.confirm("Discard this unfinished draft? This cannot be undone.")
+    ) {
+      return;
+    }
+    removeLocalDraft(activeDraftKey);
+    setDraftStatus("Draft discarded");
+    setActiveDraftKey(null);
+    setDraftReady(false);
+  };
+
+  useEffect(() => {
+    if (!draftReady || !activeDraftKey || !user?.id) return undefined;
+
+    let formData = null;
+    let formIsOpen = false;
+
+    if (ancModal && activeDraftKey.includes(":anc:")) {
+      formData = ancForm;
+      formIsOpen = true;
+    } else if (referralModal && activeDraftKey.includes(":referral:")) {
+      formData = { status: referralStatus, notes: referralNotes };
+      formIsOpen = true;
+    } else if (outcomeModal && activeDraftKey.includes(":outcome:")) {
+      formData = outcomeForm;
+      formIsOpen = true;
+    }
+
+    if (!formIsOpen || !formData) return undefined;
+
+    setDraftStatus("Saving draft...");
+    const timer = window.setTimeout(() => {
+      const saved = writeLocalDraft(activeDraftKey, formData, user.id);
+      setDraftStatus(
+        saved
+          ? `Draft saved at ${new Date().toLocaleTimeString()}`
+          : "Draft could not be saved in this browser",
+      );
+    }, DRAFT_SAVE_DELAY);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    ancForm,
+    ancModal,
+    referralModal,
+    referralStatus,
+    referralNotes,
+    outcomeModal,
+    outcomeForm,
+    activeDraftKey,
+    draftReady,
+    user?.id,
+  ]);
+
+  const clearSavedDraft = () => {
+    removeLocalDraft(activeDraftKey);
+    setActiveDraftKey(null);
+    setDraftReady(false);
+    setDraftStatus("");
+  };
+
+  /* =========================================================
      ANC FORM
   ========================================================= */
 
@@ -837,7 +1151,7 @@ export default function PregnancyMonitoring() {
     );
 
     setEditingAnc(null);
-    setAncForm({
+    const initialForm = {
       ...emptyAncForm,
       visit_number: getNextVisitNumber(),
       visit_date: visitDate,
@@ -845,7 +1159,9 @@ export default function PregnancyMonitoring() {
         gestationalAge && gestationalAge.totalDays >= 0
           ? String(gestationalAge.weeks)
           : "",
-    });
+    };
+    const key = makeDraftKey(user?.id, selectedPregnancy?.id, "anc", "new");
+    setAncForm(prepareDraft(key, initialForm, "ANC visit"));
     setAncModal(true);
   };
 
@@ -889,7 +1205,8 @@ export default function PregnancyMonitoring() {
         ? String(gestationalAge.weeks)
         : "";
 
-    setAncForm(form);
+    const key = makeDraftKey(user?.id, selectedPregnancy?.id, "anc", visit.id);
+    setAncForm(prepareDraft(key, form, "ANC visit"));
     setAncModal(true);
   };
 
@@ -974,6 +1291,7 @@ export default function PregnancyMonitoring() {
 
       if (result.error) throw result.error;
 
+      clearSavedDraft();
       setAncModal(false);
       setEditingAnc(null);
 
@@ -1020,8 +1338,19 @@ export default function PregnancyMonitoring() {
 
   const openReferral = (referral) => {
     setSelectedReferral(referral);
-    setReferralStatus(referral.status || "pending");
-    setReferralNotes(referral.midwife_notes || "");
+    const initialData = {
+      status: referral.status || "pending",
+      notes: referral.midwife_notes || "",
+    };
+    const key = makeDraftKey(
+      user?.id,
+      selectedPregnancy?.id,
+      "referral",
+      referral.id,
+    );
+    const restored = prepareDraft(key, initialData, "referral review");
+    setReferralStatus(restored.status || "pending");
+    setReferralNotes(restored.notes || "");
     setReferralModal(true);
   };
 
@@ -1044,6 +1373,7 @@ export default function PregnancyMonitoring() {
 
       if (error) throw error;
 
+      clearSavedDraft();
       setReferralModal(false);
       await openPregnancy(selectedPregnancy);
 
@@ -1059,6 +1389,27 @@ export default function PregnancyMonitoring() {
   /* =========================================================
      SAVE PREGNANCY OUTCOME
   ========================================================= */
+
+  const openOutcomeModal = () => {
+    if (!selectedPregnancy) return;
+    const initialForm = {
+      status: selectedPregnancy.status || "active",
+      pregnancy_outcome: selectedPregnancy.pregnancy_outcome || "",
+      birth_status: selectedPregnancy.birth_status || "",
+      date_of_delivery: selectedPregnancy.date_of_delivery || "",
+      place_of_delivery: selectedPregnancy.place_of_delivery || "",
+      facility_name: selectedPregnancy.facility_name || "",
+      attended_by: selectedPregnancy.attended_by || "",
+    };
+    const key = makeDraftKey(
+      user?.id,
+      selectedPregnancy.id,
+      "outcome",
+      "current",
+    );
+    setOutcomeForm(prepareDraft(key, initialForm, "pregnancy outcome"));
+    setOutcomeModal(true);
+  };
 
   const saveOutcome = async (event) => {
     event.preventDefault();
@@ -1082,6 +1433,7 @@ export default function PregnancyMonitoring() {
 
       if (error) throw error;
 
+      clearSavedDraft();
       setOutcomeModal(false);
 
       const updatedPregnancy = {
@@ -1135,642 +1487,787 @@ export default function PregnancyMonitoring() {
           </h1>
           <p className="mt-1 text-sm text-gray-500">
             Review pregnancy records, ANC visits, referrals, and pregnancy
-            outcomes.
+            outcomes within your assigned service area. Nurses can provide full
+            monitoring coverage across their assigned district when a Midwife is
+            absent.
           </p>
         </div>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-          <StatCard
-            title="Active Pregnancies"
-            value={statistics.active}
-            icon={Baby}
-            iconClass="bg-green-100 text-green-600"
-          />
-          <StatCard
-            title="For Review"
-            value={statistics.forReview}
-            icon={Clock3}
-            iconClass="bg-yellow-100 text-yellow-600"
-          />
-          <StatCard
-            title="High Risk"
-            value={statistics.highRisk}
-            icon={AlertTriangle}
-            iconClass="bg-red-100 text-red-600"
-          />
-          <StatCard
-            title="Due Within 30 Days"
-            value={statistics.dueSoon}
-            icon={CalendarDays}
-            iconClass="bg-blue-100 text-blue-600"
-          />
-          <StatCard
-            title="Missed Check-ups"
-            value={statistics.missedCheckups}
-            icon={AlertTriangle}
-            iconClass="bg-red-100 text-red-600"
-          />
-          <StatCard
-            title="Due Today"
-            value={statistics.dueToday}
-            icon={Clock3}
-            iconClass="bg-orange-100 text-orange-600"
-          />
-        </div>
-
-        <div className="rounded-xl border bg-white p-4 shadow-sm">
-          <div className="relative max-w-xl">
-            <Search
-              size={18}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-            />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search pregnant woman, household, barangay..."
-              className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-4 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            />
-          </div>
-        </div>
-
-        <div className="overflow-hidden rounded-xl border bg-white shadow-sm">
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
-                <tr>
-                  <th className="px-5 py-4">Pregnant Woman</th>
-                  <th className="px-5 py-4">Area</th>
-                  <th className="px-5 py-4">EDC</th>
-                  <th className="px-5 py-4">ANC</th>
-                  <th className="px-5 py-4">Next Check-up</th>
-                  <th className="px-5 py-4">Status</th>
-                  <th className="px-5 py-4 text-right">Action</th>
-                </tr>
-              </thead>
-
-              <tbody className="divide-y">
-                {loading ? (
-                  <tr>
-                    <td
-                      colSpan="7"
-                      className="px-5 py-10 text-center text-gray-500"
-                    >
-                      Loading pregnancy records...
-                    </td>
-                  </tr>
-                ) : filteredPregnancies.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan="7"
-                      className="px-5 py-10 text-center text-gray-500"
-                    >
-                      No pregnancy records found.
-                    </td>
-                  </tr>
-                ) : (
-                  filteredPregnancies.map((pregnancy) => {
-                    const resident = pregnancy.resident;
-                    const household = resident?.households;
-                    const localArea = household?.local_areas;
-                    const barangay = localArea?.barangays;
-                    const checkupStatus = getCheckupStatus(
-                      pregnancy.next_visit_date,
-                      pregnancy.status,
-                    );
-
-                    return (
-                      <tr key={pregnancy.id} className="hover:bg-gray-50">
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-3">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-pink-100 text-pink-600">
-                              <UserRound size={18} />
-                            </div>
-                            <div>
-                              <p className="font-semibold text-gray-800">
-                                {fullName(resident)}
-                              </p>
-                              <p className="text-xs text-gray-500">
-                                Family Record No:{" "}
-                                {pregnancy.family_record_no || "—"}
-                              </p>
-                            </div>
-                          </div>
-                        </td>
-
-                        <td className="px-5 py-4">
-                          <div className="flex items-start gap-2">
-                            <MapPin
-                              size={15}
-                              className="mt-0.5 text-gray-400"
-                            />
-                            <div>
-                              <p className="font-medium text-gray-700">
-                                {localArea?.name || "—"}
-                              </p>
-                              <p className="text-xs text-gray-500">
-                                {barangay?.name || "—"}
-                              </p>
-                            </div>
-                          </div>
-                        </td>
-
-                        <td className="px-5 py-4">
-                          <p className="font-medium text-gray-700">
-                            {formatDate(pregnancy.edc)}
-                          </p>
-                          {pregnancy.lmp && (
-                            <p className="text-xs text-gray-500">
-                              LMP: {formatDate(pregnancy.lmp)}
+        {String(user?.role || "").toLowerCase() === "midwife" && (
+          <section className="overflow-hidden rounded-xl border bg-white shadow-sm">
+            <div className="flex flex-col gap-2 border-b p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="font-semibold text-gray-800">
+                  Nurse Pregnancy-Monitoring Authorization
+                </h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Grant or revoke district-wide access for Nurses assigned to
+                  your district. Nurses cannot monitor pregnancy records until
+                  you authorize them.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={loadNursesAndAccess}
+                disabled={accessLoading}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {accessLoading ? "Refreshing..." : "Refresh Nurses"}
+              </button>
+            </div>
+            {nurseAccessError && (
+              <p className="m-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                {nurseAccessError}
+              </p>
+            )}
+            {accessLoading ? (
+              <p className="p-5 text-sm text-gray-500">Loading Nurses...</p>
+            ) : nurses.length === 0 ? (
+              <p className="p-5 text-sm text-gray-500">
+                No Nurses are assigned to your district.
+              </p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
+                    <tr>
+                      <th className="px-5 py-3">Nurse</th>
+                      <th className="px-5 py-3">Account</th>
+                      <th className="px-5 py-3">Authorization</th>
+                      <th className="px-5 py-3 text-right">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y">
+                    {nurses.map((nurse) => {
+                      const active = Boolean(nurse.pregnancy_access?.is_active);
+                      const busy = accessSavingId === nurse.id;
+                      return (
+                        <tr key={nurse.id}>
+                          <td className="px-5 py-3">
+                            <p className="font-semibold text-gray-800">
+                              {fullName(nurse)}
                             </p>
-                          )}
-                        </td>
-
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-2">
-                            <Activity size={16} className="text-blue-500" />
-                            <span className="font-medium">
-                              {pregnancy.latest_anc_visit
-                                ? `${pregnancy.latest_anc_visit.visit_number || 0} visit${Number(pregnancy.latest_anc_visit.visit_number) === 1 ? "" : "s"}`
-                                : "No ANC"}
+                            <p className="text-xs text-gray-500">
+                              {nurse.email || nurse.username || "—"}
+                            </p>
+                          </td>
+                          <td className="px-5 py-3">
+                            <span
+                              className={`rounded-full px-2.5 py-1 text-xs font-semibold ${nurse.is_active === false ? "bg-gray-100 text-gray-500" : "bg-green-100 text-green-700"}`}
+                            >
+                              {nurse.is_active === false
+                                ? "Inactive"
+                                : "Active"}
                             </span>
-                          </div>
-                        </td>
+                          </td>
+                          <td className="px-5 py-3">
+                            <span
+                              className={`rounded-full px-2.5 py-1 text-xs font-semibold ${active ? "bg-green-100 text-green-700" : "bg-amber-100 text-amber-700"}`}
+                            >
+                              {active ? "Authorized" : "Not Authorized"}
+                            </span>
+                          </td>
+                          <td className="px-5 py-3 text-right">
+                            <button
+                              type="button"
+                              disabled={busy || nurse.is_active === false}
+                              onClick={() => setNurseAccess(nurse, !active)}
+                              className={`rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50 ${active ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"}`}
+                            >
+                              {busy
+                                ? "Saving..."
+                                : active
+                                  ? "Revoke Access"
+                                  : "Grant Access"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </section>
+        )}
 
-                        <td className="px-5 py-4">
-                          {pregnancy.next_visit_date ? (
-                            <div className="space-y-1">
-                              <p className="font-medium text-gray-700">
-                                {formatDate(pregnancy.next_visit_date)}
-                              </p>
-                              <span
-                                className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${checkupStatus.className}`}
-                              >
-                                {checkupStatus.label}
-                              </span>
-                              {checkupStatus.key === "missed" && (
-                                <p className="text-xs font-medium text-red-600">
-                                  {checkupStatus.daysOverdue} day
-                                  {checkupStatus.daysOverdue === 1
-                                    ? ""
-                                    : "s"}{" "}
-                                  overdue
-                                </p>
-                              )}
-                              {checkupStatus.key === "upcoming" && (
-                                <p className="text-xs text-yellow-700">
-                                  In {checkupStatus.daysUntil} day
-                                  {checkupStatus.daysUntil === 1 ? "" : "s"}
-                                </p>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-gray-400">No schedule</span>
-                          )}
-                        </td>
+        {String(user?.role || "").toLowerCase() === "nurse" &&
+          authorizationChecked &&
+          !hasNurseAuthorization && (
+            <section className="rounded-xl border border-amber-200 bg-amber-50 p-6">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={22} className="text-amber-700" />
+                <div className="flex-1">
+                  <h2 className="font-semibold text-amber-900">
+                    Pregnancy-Monitoring Access Not Yet Authorized
+                  </h2>
+                  <p className="mt-1 text-sm text-amber-800">
+                    Your Midwife has not granted permission to monitor pregnancy
+                    records in this district. Contact your assigned Midwife.
+                    This page remains unavailable until access is granted.
+                  </p>
+                  {nurseAccessError && (
+                    <p className="mt-3 text-sm text-red-700">
+                      {nurseAccessError}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={checkNurseAuthorization}
+                    className="mt-4 rounded-lg border border-amber-300 bg-white px-4 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100"
+                  >
+                    Check Authorization Again
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
 
-                        <td className="px-5 py-4">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusStyles[pregnancy.status || "active"] || statusStyles.active}`}
-                          >
-                            {statusLabel(pregnancy.status || "active")}
-                          </span>
-                        </td>
+        {(String(user?.role || "").toLowerCase() !== "nurse" ||
+          hasNurseAuthorization) && (
+          <>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              <StatCard
+                title="Active Pregnancies"
+                value={statistics.active}
+                icon={Baby}
+                iconClass="bg-green-100 text-green-600"
+              />
+              <StatCard
+                title="For Review"
+                value={statistics.forReview}
+                icon={Clock3}
+                iconClass="bg-yellow-100 text-yellow-600"
+              />
+              <StatCard
+                title="High Risk"
+                value={statistics.highRisk}
+                icon={AlertTriangle}
+                iconClass="bg-red-100 text-red-600"
+              />
+              <StatCard
+                title="Due Within 30 Days"
+                value={statistics.dueSoon}
+                icon={CalendarDays}
+                iconClass="bg-blue-100 text-blue-600"
+              />
+              <StatCard
+                title="Missed Check-ups"
+                value={statistics.missedCheckups}
+                icon={AlertTriangle}
+                iconClass="bg-red-100 text-red-600"
+              />
+              <StatCard
+                title="Due Today"
+                value={statistics.dueToday}
+                icon={Clock3}
+                iconClass="bg-orange-100 text-orange-600"
+              />
+            </div>
 
-                        <td className="px-5 py-4 text-right">
-                          <button
-                            onClick={() => openPregnancy(pregnancy)}
-                            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
-                          >
-                            <Eye size={15} /> View
-                          </button>
+            <div className="rounded-xl border bg-white p-4 shadow-sm">
+              <div className="relative max-w-xl">
+                <Search
+                  size={18}
+                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+                />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search pregnant woman, household, barangay..."
+                  className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-4 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                />
+              </div>
+            </div>
+
+            <div className="overflow-hidden rounded-xl border bg-white shadow-sm">
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
+                    <tr>
+                      <th className="px-5 py-4">Pregnant Woman</th>
+                      <th className="px-5 py-4">Area</th>
+                      <th className="px-5 py-4">EDC</th>
+                      <th className="px-5 py-4">ANC</th>
+                      <th className="px-5 py-4">Next Check-up</th>
+                      <th className="px-5 py-4">Status</th>
+                      <th className="px-5 py-4 text-right">Action</th>
+                    </tr>
+                  </thead>
+
+                  <tbody className="divide-y">
+                    {loading ? (
+                      <tr>
+                        <td
+                          colSpan="7"
+                          className="px-5 py-10 text-center text-gray-500"
+                        >
+                          Loading pregnancy records...
                         </td>
                       </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+                    ) : filteredPregnancies.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan="7"
+                          className="px-5 py-10 text-center text-gray-500"
+                        >
+                          No pregnancy records found.
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredPregnancies.map((pregnancy) => {
+                        const resident = pregnancy.resident;
+                        const household = resident?.households;
+                        const localArea = household?.local_areas;
+                        const barangay = localArea?.barangays;
+                        const checkupStatus = getCheckupStatus(
+                          pregnancy.next_visit_date,
+                          pregnancy.status,
+                        );
+
+                        return (
+                          <tr key={pregnancy.id} className="hover:bg-gray-50">
+                            <td className="px-5 py-4">
+                              <div className="flex items-center gap-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-pink-100 text-pink-600">
+                                  <UserRound size={18} />
+                                </div>
+                                <div>
+                                  <p className="font-semibold text-gray-800">
+                                    {fullName(resident)}
+                                  </p>
+                                  <p className="text-xs text-gray-500">
+                                    Family Record No:{" "}
+                                    {pregnancy.family_record_no || "—"}
+                                  </p>
+                                </div>
+                              </div>
+                            </td>
+
+                            <td className="px-5 py-4">
+                              <div className="flex items-start gap-2">
+                                <MapPin
+                                  size={15}
+                                  className="mt-0.5 text-gray-400"
+                                />
+                                <div>
+                                  <p className="font-medium text-gray-700">
+                                    {localArea?.name || "—"}
+                                  </p>
+                                  <p className="text-xs text-gray-500">
+                                    {barangay?.name || "—"}
+                                  </p>
+                                </div>
+                              </div>
+                            </td>
+
+                            <td className="px-5 py-4">
+                              <p className="font-medium text-gray-700">
+                                {formatDate(pregnancy.edc)}
+                              </p>
+                              {pregnancy.lmp && (
+                                <p className="text-xs text-gray-500">
+                                  LMP: {formatDate(pregnancy.lmp)}
+                                </p>
+                              )}
+                            </td>
+
+                            <td className="px-5 py-4">
+                              <div className="flex items-center gap-2">
+                                <Activity size={16} className="text-blue-500" />
+                                <span className="font-medium">
+                                  {pregnancy.latest_anc_visit
+                                    ? `${pregnancy.latest_anc_visit.visit_number || 0} visit${Number(pregnancy.latest_anc_visit.visit_number) === 1 ? "" : "s"}`
+                                    : "No ANC"}
+                                </span>
+                              </div>
+                            </td>
+
+                            <td className="px-5 py-4">
+                              {pregnancy.next_visit_date ? (
+                                <div className="space-y-1">
+                                  <p className="font-medium text-gray-700">
+                                    {formatDate(pregnancy.next_visit_date)}
+                                  </p>
+                                  <span
+                                    className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${checkupStatus.className}`}
+                                  >
+                                    {checkupStatus.label}
+                                  </span>
+                                  {checkupStatus.key === "missed" && (
+                                    <p className="text-xs font-medium text-red-600">
+                                      {checkupStatus.daysOverdue} day
+                                      {checkupStatus.daysOverdue === 1
+                                        ? ""
+                                        : "s"}{" "}
+                                      overdue
+                                    </p>
+                                  )}
+                                  {checkupStatus.key === "upcoming" && (
+                                    <p className="text-xs text-yellow-700">
+                                      In {checkupStatus.daysUntil} day
+                                      {checkupStatus.daysUntil === 1 ? "" : "s"}
+                                    </p>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-gray-400">
+                                  No schedule
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="px-5 py-4">
+                              <span
+                                className={`inline-flex rounded-full px-2.5 py-1 text-xs font-semibold ${statusStyles[pregnancy.status || "active"] || statusStyles.active}`}
+                              >
+                                {statusLabel(pregnancy.status || "active")}
+                              </span>
+                            </td>
+
+                            <td className="px-5 py-4 text-right">
+                              <button
+                                onClick={() => openPregnancy(pregnancy)}
+                                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+                              >
+                                <Eye size={15} /> View
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       {/* PREGNANCY DETAILS */}
-      {selectedPregnancy && (
-        <Modal
-          title="Pregnancy Monitoring"
-          onClose={() => setSelectedPregnancy(null)}
-          large
-        >
-          {loadingDetails ? (
-            <div className="py-12 text-center text-gray-500">
-              Loading pregnancy details...
-            </div>
-          ) : (
-            <div className="space-y-6">
-              <section className="rounded-xl border bg-gray-50 p-5">
-                <div className="mb-4 flex items-center gap-2">
-                  <UserRound size={19} className="text-pink-600" />
-                  <h3 className="font-semibold text-gray-800">
-                    Pregnancy Information
-                  </h3>
-                </div>
-
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-                  <InfoItem
-                    label="Pregnant Woman"
-                    value={fullName(selectedPregnancy.resident)}
-                  />
-                  <InfoItem
-                    label="Family Record No."
-                    value={selectedPregnancy.family_record_no || "—"}
-                  />
-                  <InfoItem
-                    label="Registration Date"
-                    value={formatDate(selectedPregnancy.date_of_registration)}
-                  />
-                  <InfoItem
-                    label="Gravida"
-                    value={selectedPregnancy.gravida ?? "—"}
-                  />
-                  <InfoItem
-                    label="Para"
-                    value={selectedPregnancy.para ?? "—"}
-                  />
-                  <InfoItem
-                    label="LMP"
-                    value={formatDate(selectedPregnancy.lmp)}
-                  />
-                  <InfoItem
-                    label="EDC"
-                    value={formatDate(selectedPregnancy.edc)}
-                  />
-                  <InfoItem
-                    label="Blood Type"
-                    value={selectedPregnancy.blood_type || "—"}
-                  />
-                  <InfoItem
-                    label="PhilHealth No."
-                    value={selectedPregnancy.philhealth_no || "—"}
-                  />
-                  <InfoItem
-                    label="Household"
-                    value={
-                      selectedPregnancy.resident?.households?.household_code ||
-                      "—"
-                    }
-                  />
-                  <InfoItem
-                    label="Barangay"
-                    value={
-                      selectedPregnancy.resident?.households?.local_areas
-                        ?.barangays?.name || "—"
-                    }
-                  />
-                  <InfoItem
-                    label="Local Area"
-                    value={
-                      selectedPregnancy.resident?.households?.local_areas
-                        ?.name || "—"
-                    }
-                  />
-                </div>
-              </section>
-
-              {(() => {
-                const checkupStatus = getCheckupStatus(
-                  selectedPregnancy.next_visit_date,
-                  selectedPregnancy.status,
-                );
-
-                if (checkupStatus.key !== "missed") return null;
-
-                return (
-                  <section className="rounded-xl border border-red-200 bg-red-50 p-5">
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
-                        <AlertTriangle size={20} />
-                      </div>
-                      <div>
-                        <h3 className="font-semibold text-red-800">
-                          Missed ANC Check-up
-                        </h3>
-                        <p className="mt-1 text-sm text-red-700">
-                          This pregnant woman missed her scheduled ANC
-                          follow-up.
-                        </p>
-                        <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-                          <InfoItem
-                            label="Scheduled Date"
-                            value={formatDate(
-                              selectedPregnancy.next_visit_date,
-                            )}
-                          />
-                          <InfoItem
-                            label="Days Overdue"
-                            value={`${checkupStatus.daysOverdue} day${checkupStatus.daysOverdue === 1 ? "" : "s"}`}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </section>
-                );
-              })()}
-
-              <section className="rounded-xl border bg-white p-5">
-                <div className="mb-4 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <Activity size={19} className="text-blue-600" />
+      {selectedPregnancy &&
+        (String(user?.role || "").toLowerCase() !== "nurse" ||
+          hasNurseAuthorization) && (
+          <Modal
+            title="Pregnancy Monitoring"
+            onClose={() => setSelectedPregnancy(null)}
+            large
+          >
+            {loadingDetails ? (
+              <div className="py-12 text-center text-gray-500">
+                Loading pregnancy details...
+              </div>
+            ) : (
+              <div className="space-y-6">
+                <section className="rounded-xl border bg-gray-50 p-5">
+                  <div className="mb-4 flex items-center gap-2">
+                    <UserRound size={19} className="text-pink-600" />
                     <h3 className="font-semibold text-gray-800">
-                      Pregnancy Status
+                      Pregnancy Information
                     </h3>
                   </div>
-                  <button
-                    onClick={() => setOutcomeModal(true)}
-                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
-                  >
-                    <Edit size={14} /> Update Outcome
-                  </button>
-                </div>
 
-                <div className="flex flex-wrap gap-2">
-                  {statusOptions.map(([value, label]) => (
-                    <button
-                      key={value}
-                      onClick={() => updateStatus(value)}
-                      className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
-                        selectedPregnancy.status === value
-                          ? statusStyles[value]
-                          : "border border-gray-300 bg-white text-gray-600 hover:bg-gray-50"
-                      }`}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-              </section>
-
-              {/* BHW HOME VISITS */}
-              <section className="rounded-xl border bg-white">
-                <div className="flex items-center justify-between border-b p-5">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <MapPin size={19} className="text-green-600" />
-                      <h3 className="font-semibold text-gray-800">
-                        BHW Home Visits
-                      </h3>
-                    </div>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Community monitoring recorded by the BHW.
-                    </p>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                    <InfoItem
+                      label="Pregnant Woman"
+                      value={fullName(selectedPregnancy.resident)}
+                    />
+                    <InfoItem
+                      label="Family Record No."
+                      value={selectedPregnancy.family_record_no || "—"}
+                    />
+                    <InfoItem
+                      label="Registration Date"
+                      value={formatDate(selectedPregnancy.date_of_registration)}
+                    />
+                    <InfoItem
+                      label="Gravida"
+                      value={selectedPregnancy.gravida ?? "—"}
+                    />
+                    <InfoItem
+                      label="Para"
+                      value={selectedPregnancy.para ?? "—"}
+                    />
+                    <InfoItem
+                      label="LMP"
+                      value={formatDate(selectedPregnancy.lmp)}
+                    />
+                    <InfoItem
+                      label="EDC"
+                      value={formatDate(selectedPregnancy.edc)}
+                    />
+                    <InfoItem
+                      label="Blood Type"
+                      value={selectedPregnancy.blood_type || "—"}
+                    />
+                    <InfoItem
+                      label="PhilHealth No."
+                      value={selectedPregnancy.philhealth_no || "—"}
+                    />
+                    <InfoItem
+                      label="Household"
+                      value={
+                        selectedPregnancy.resident?.households
+                          ?.household_code || "—"
+                      }
+                    />
+                    <InfoItem
+                      label="Barangay"
+                      value={
+                        selectedPregnancy.resident?.households?.local_areas
+                          ?.barangays?.name || "—"
+                      }
+                    />
+                    <InfoItem
+                      label="Local Area"
+                      value={
+                        selectedPregnancy.resident?.households?.local_areas
+                          ?.name || "—"
+                      }
+                    />
                   </div>
-                  <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700">
-                    {homeVisits.length} visits
-                  </span>
-                </div>
+                </section>
 
-                <div className="overflow-x-auto">
-                  {homeVisits.length === 0 ? (
-                    <p className="p-5 text-sm text-gray-500">
-                      No home visits recorded yet.
-                    </p>
-                  ) : (
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
-                        <tr>
-                          <th className="px-5 py-3">Visit</th>
-                          <th className="px-5 py-3">Date</th>
-                          <th className="px-5 py-3">Trimester</th>
-                          <th className="px-5 py-3">Findings</th>
-                          <th className="px-5 py-3">Danger Signs</th>
-                          <th className="px-5 py-3">Action Taken</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y">
-                        {homeVisits.map((visit) => (
-                          <tr key={visit.id}>
-                            <td className="px-5 py-3 font-semibold">
-                              #{visit.visit_number}
-                            </td>
-                            <td className="px-5 py-3">
-                              {formatDate(visit.visit_date)}
-                            </td>
-                            <td className="px-5 py-3">
-                              {visit.trimester || "—"}
-                            </td>
-                            <td className="max-w-xs px-5 py-3">
-                              {visit.findings || "—"}
-                            </td>
-                            <td className="max-w-xs px-5 py-3">
-                              {visit.danger_signs || "None"}
-                            </td>
-                            <td className="max-w-xs px-5 py-3">
-                              {visit.action_taken || "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </section>
+                {(() => {
+                  const checkupStatus = getCheckupStatus(
+                    selectedPregnancy.next_visit_date,
+                    selectedPregnancy.status,
+                  );
 
-              {/* ANC VISITS */}
-              <section className="rounded-xl border bg-white">
-                <div className="flex items-center justify-between border-b p-5">
-                  <div>
+                  if (checkupStatus.key !== "missed") return null;
+
+                  return (
+                    <section className="rounded-xl border border-red-200 bg-red-50 p-5">
+                      <div className="flex items-start gap-3">
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
+                          <AlertTriangle size={20} />
+                        </div>
+                        <div>
+                          <h3 className="font-semibold text-red-800">
+                            Missed ANC Check-up
+                          </h3>
+                          <p className="mt-1 text-sm text-red-700">
+                            This pregnant woman missed her scheduled ANC
+                            follow-up.
+                          </p>
+                          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                            <InfoItem
+                              label="Scheduled Date"
+                              value={formatDate(
+                                selectedPregnancy.next_visit_date,
+                              )}
+                            />
+                            <InfoItem
+                              label="Days Overdue"
+                              value={`${checkupStatus.daysOverdue} day${checkupStatus.daysOverdue === 1 ? "" : "s"}`}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </section>
+                  );
+                })()}
+
+                <section className="rounded-xl border bg-white p-5">
+                  <div className="mb-4 flex items-center justify-between">
                     <div className="flex items-center gap-2">
-                      <Stethoscope size={19} className="text-blue-600" />
+                      <Activity size={19} className="text-blue-600" />
                       <h3 className="font-semibold text-gray-800">
-                        Antenatal Care Visits
+                        Pregnancy Status
                       </h3>
                     </div>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Clinical ANC assessment recorded by the Midwife.
-                    </p>
-                    {selectedPregnancy.next_visit_date && (
-                      <div className="mt-3">
-                        {(() => {
-                          const status = getCheckupStatus(
-                            selectedPregnancy.next_visit_date,
-                            selectedPregnancy.status,
-                          );
+                    <button
+                      onClick={openOutcomeModal}
+                      className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+                    >
+                      <Edit size={14} /> Update Outcome
+                    </button>
+                  </div>
 
-                          return (
-                            <div
-                              className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold ${status.className}`}
-                            >
-                              <CalendarDays size={14} />
-                              Next scheduled check-up:{" "}
-                              {formatDate(selectedPregnancy.next_visit_date)}
-                              {status.key === "missed" &&
-                                ` — ${status.daysOverdue} day${status.daysOverdue === 1 ? "" : "s"} overdue`}
-                            </div>
-                          );
-                        })()}
+                  <div className="flex flex-wrap gap-2">
+                    {statusOptions.map(([value, label]) => (
+                      <button
+                        key={value}
+                        onClick={() => updateStatus(value)}
+                        className={`rounded-full px-3 py-1.5 text-xs font-semibold ${
+                          selectedPregnancy.status === value
+                            ? statusStyles[value]
+                            : "border border-gray-300 bg-white text-gray-600 hover:bg-gray-50"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                {/* BHW HOME VISITS */}
+                <section className="rounded-xl border bg-white">
+                  <div className="flex items-center justify-between border-b p-5">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <MapPin size={19} className="text-green-600" />
+                        <h3 className="font-semibold text-gray-800">
+                          BHW Home Visits
+                        </h3>
                       </div>
+                      <p className="mt-1 text-xs text-gray-500">
+                        Community monitoring recorded by the BHW.
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-green-100 px-3 py-1 text-xs font-semibold text-green-700">
+                      {homeVisits.length} visits
+                    </span>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    {homeVisits.length === 0 ? (
+                      <p className="p-5 text-sm text-gray-500">
+                        No home visits recorded yet.
+                      </p>
+                    ) : (
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
+                          <tr>
+                            <th className="px-5 py-3">Visit</th>
+                            <th className="px-5 py-3">Date</th>
+                            <th className="px-5 py-3">Trimester</th>
+                            <th className="px-5 py-3">Findings</th>
+                            <th className="px-5 py-3">Danger Signs</th>
+                            <th className="px-5 py-3">Action Taken</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {homeVisits.map((visit) => (
+                            <tr key={visit.id}>
+                              <td className="px-5 py-3 font-semibold">
+                                #{visit.visit_number}
+                              </td>
+                              <td className="px-5 py-3">
+                                {formatDate(visit.visit_date)}
+                              </td>
+                              <td className="px-5 py-3">
+                                {visit.trimester || "—"}
+                              </td>
+                              <td className="max-w-xs px-5 py-3">
+                                {visit.findings || "—"}
+                              </td>
+                              <td className="max-w-xs px-5 py-3">
+                                {visit.danger_signs || "None"}
+                              </td>
+                              <td className="max-w-xs px-5 py-3">
+                                {visit.action_taken || "—"}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
                     )}
                   </div>
+                </section>
 
-                  <button
-                    onClick={openAddAnc}
-                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
-                  >
-                    <Plus size={15} /> Add ANC Visit
-                  </button>
-                </div>
-
-                <div className="overflow-x-auto">
-                  {ancVisits.length === 0 ? (
-                    <p className="p-5 text-sm text-gray-500">
-                      No ANC visits recorded yet.
-                    </p>
-                  ) : (
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
-                        <tr>
-                          <th className="px-5 py-3">Visit</th>
-                          <th className="px-5 py-3">Date</th>
-                          <th className="px-5 py-3">Gestational Age</th>
-                          <th className="px-5 py-3">BP</th>
-                          <th className="px-5 py-3">Weight</th>
-                          <th className="px-5 py-3">Assessment</th>
-                          <th className="px-5 py-3 text-right">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y">
-                        {ancVisits.map((visit) => (
-                          <tr key={visit.id}>
-                            <td className="px-5 py-3 font-semibold">
-                              ANC #{visit.visit_number}
-                            </td>
-                            <td className="px-5 py-3">
-                              {formatDate(visit.visit_date)}
-                            </td>
-                            <td className="px-5 py-3">
-                              {visit.gestational_age_weeks
-                                ? `${visit.gestational_age_weeks} weeks`
-                                : "—"}
-                            </td>
-                            <td className="px-5 py-3">
-                              {visit.systolic_bp || visit.diastolic_bp
-                                ? `${visit.systolic_bp || "—"}/${visit.diastolic_bp || "—"}`
-                                : "—"}
-                            </td>
-                            <td className="px-5 py-3">
-                              {visit.weight_kg ? `${visit.weight_kg} kg` : "—"}
-                            </td>
-                            <td className="max-w-sm px-5 py-3">
-                              <p className="whitespace-pre-line">
-                                {visit.overall_assessment || "—"}
-                              </p>
-                            </td>
-                            <td className="px-5 py-3">
-                              <div className="flex justify-end gap-2">
-                                <button
-                                  onClick={() => openEditAnc(visit)}
-                                  className="rounded-lg border border-gray-300 p-2 text-gray-600 hover:bg-gray-50"
-                                  title="Edit"
-                                >
-                                  <Edit size={15} />
-                                </button>
-                                <button
-                                  onClick={() => deleteAnc(visit)}
-                                  className="rounded-lg border border-red-200 p-2 text-red-600 hover:bg-red-50"
-                                  title="Delete"
-                                >
-                                  <Trash2 size={15} />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
-                </div>
-              </section>
-
-              {/* REFERRALS */}
-              <section className="rounded-xl border bg-white">
-                <div className="flex items-center justify-between border-b p-5">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <AlertTriangle size={19} className="text-red-600" />
-                      <h3 className="font-semibold text-gray-800">
-                        Pregnancy Referrals
-                      </h3>
-                    </div>
-                    <p className="mt-1 text-xs text-gray-500">
-                      Referrals and notifications submitted for this pregnancy.
-                    </p>
-                  </div>
-                  <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700">
-                    {referrals.length} referrals
-                  </span>
-                </div>
-
-                <div className="divide-y">
-                  {referrals.length === 0 ? (
-                    <p className="p-5 text-sm text-gray-500">
-                      No referrals recorded.
-                    </p>
-                  ) : (
-                    referrals.map((referral) => (
-                      <div
-                        key={referral.id}
-                        className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between"
-                      >
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-semibold text-gray-800">
-                              {referral.reason}
-                            </span>
-                            <span
-                              className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
-                                referral.urgency === "emergency"
-                                  ? "bg-red-100 text-red-700"
-                                  : referral.urgency === "urgent"
-                                    ? "bg-orange-100 text-orange-700"
-                                    : "bg-blue-100 text-blue-700"
-                              }`}
-                            >
-                              {referral.urgency}
-                            </span>
-                            <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-600">
-                              {referral.status}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-xs text-gray-500">
-                            Referred: {formatDate(referral.referral_date)}
-                          </p>
-                          {referral.notes && (
-                            <p className="mt-2 text-sm text-gray-600">
-                              {referral.notes}
-                            </p>
-                          )}
-                          {referral.midwife_notes && (
-                            <p className="mt-2 text-sm text-blue-700">
-                              <strong>Midwife Notes:</strong>{" "}
-                              {referral.midwife_notes}
-                            </p>
-                          )}
-                        </div>
-                        <button
-                          onClick={() => openReferral(referral)}
-                          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
-                        >
-                          <ClipboardList size={15} /> Review
-                        </button>
+                {/* ANC VISITS */}
+                <section className="rounded-xl border bg-white">
+                  <div className="flex items-center justify-between border-b p-5">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Stethoscope size={19} className="text-blue-600" />
+                        <h3 className="font-semibold text-gray-800">
+                          Antenatal Care Visits
+                        </h3>
                       </div>
-                    ))
-                  )}
-                </div>
-              </section>
-            </div>
-          )}
-        </Modal>
-      )}
+                      <p className="mt-1 text-xs text-gray-500">
+                        Clinical ANC assessment recorded by authorized health
+                        personnel.
+                      </p>
+                      {selectedPregnancy.next_visit_date && (
+                        <div className="mt-3">
+                          {(() => {
+                            const status = getCheckupStatus(
+                              selectedPregnancy.next_visit_date,
+                              selectedPregnancy.status,
+                            );
+
+                            return (
+                              <div
+                                className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold ${status.className}`}
+                              >
+                                <CalendarDays size={14} />
+                                Next scheduled check-up:{" "}
+                                {formatDate(selectedPregnancy.next_visit_date)}
+                                {status.key === "missed" &&
+                                  ` — ${status.daysOverdue} day${status.daysOverdue === 1 ? "" : "s"} overdue`}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={openAddAnc}
+                      className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
+                    >
+                      <Plus size={15} /> Add ANC Visit
+                    </button>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    {ancVisits.length === 0 ? (
+                      <p className="p-5 text-sm text-gray-500">
+                        No ANC visits recorded yet.
+                      </p>
+                    ) : (
+                      <table className="min-w-full text-sm">
+                        <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
+                          <tr>
+                            <th className="px-5 py-3">Visit</th>
+                            <th className="px-5 py-3">Date</th>
+                            <th className="px-5 py-3">Gestational Age</th>
+                            <th className="px-5 py-3">BP</th>
+                            <th className="px-5 py-3">Weight</th>
+                            <th className="px-5 py-3">Assessment</th>
+                            <th className="px-5 py-3 text-right">Action</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y">
+                          {ancVisits.map((visit) => (
+                            <tr key={visit.id}>
+                              <td className="px-5 py-3 font-semibold">
+                                ANC #{visit.visit_number}
+                              </td>
+                              <td className="px-5 py-3">
+                                {formatDate(visit.visit_date)}
+                              </td>
+                              <td className="px-5 py-3">
+                                {visit.gestational_age_weeks
+                                  ? `${visit.gestational_age_weeks} weeks`
+                                  : "—"}
+                              </td>
+                              <td className="px-5 py-3">
+                                {visit.systolic_bp || visit.diastolic_bp
+                                  ? `${visit.systolic_bp || "—"}/${visit.diastolic_bp || "—"}`
+                                  : "—"}
+                              </td>
+                              <td className="px-5 py-3">
+                                {visit.weight_kg
+                                  ? `${visit.weight_kg} kg`
+                                  : "—"}
+                              </td>
+                              <td className="max-w-sm px-5 py-3">
+                                <p className="whitespace-pre-line">
+                                  {visit.overall_assessment || "—"}
+                                </p>
+                              </td>
+                              <td className="px-5 py-3">
+                                <div className="flex justify-end gap-2">
+                                  <button
+                                    onClick={() => openEditAnc(visit)}
+                                    className="rounded-lg border border-gray-300 p-2 text-gray-600 hover:bg-gray-50"
+                                    title="Edit"
+                                  >
+                                    <Edit size={15} />
+                                  </button>
+                                  <button
+                                    onClick={() => deleteAnc(visit)}
+                                    className="rounded-lg border border-red-200 p-2 text-red-600 hover:bg-red-50"
+                                    title="Delete"
+                                  >
+                                    <Trash2 size={15} />
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                </section>
+
+                {/* REFERRALS */}
+                <section className="rounded-xl border bg-white">
+                  <div className="flex items-center justify-between border-b p-5">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <AlertTriangle size={19} className="text-red-600" />
+                        <h3 className="font-semibold text-gray-800">
+                          Pregnancy Referrals
+                        </h3>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">
+                        Referrals and notifications submitted for this
+                        pregnancy.
+                      </p>
+                    </div>
+                    <span className="rounded-full bg-red-100 px-3 py-1 text-xs font-semibold text-red-700">
+                      {referrals.length} referrals
+                    </span>
+                  </div>
+
+                  <div className="divide-y">
+                    {referrals.length === 0 ? (
+                      <p className="p-5 text-sm text-gray-500">
+                        No referrals recorded.
+                      </p>
+                    ) : (
+                      referrals.map((referral) => (
+                        <div
+                          key={referral.id}
+                          className="flex flex-col gap-4 p-5 md:flex-row md:items-center md:justify-between"
+                        >
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-semibold text-gray-800">
+                                {referral.reason}
+                              </span>
+                              <span
+                                className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                                  referral.urgency === "emergency"
+                                    ? "bg-red-100 text-red-700"
+                                    : referral.urgency === "urgent"
+                                      ? "bg-orange-100 text-orange-700"
+                                      : "bg-blue-100 text-blue-700"
+                                }`}
+                              >
+                                {referral.urgency}
+                              </span>
+                              <span className="rounded-full bg-gray-100 px-2.5 py-1 text-xs text-gray-600">
+                                {referral.status}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs text-gray-500">
+                              Referred: {formatDate(referral.referral_date)}
+                            </p>
+                            {referral.notes && (
+                              <p className="mt-2 text-sm text-gray-600">
+                                {referral.notes}
+                              </p>
+                            )}
+                            {referral.midwife_notes && (
+                              <p className="mt-2 text-sm text-blue-700">
+                                <strong>Clinical Review Notes:</strong>{" "}
+                                {referral.midwife_notes}
+                              </p>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => openReferral(referral)}
+                            className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg border border-blue-300 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-50"
+                          >
+                            <ClipboardList size={15} /> Review
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </section>
+              </div>
+            )}
+          </Modal>
+        )}
 
       {/* ANC MODAL */}
       {ancModal && (
@@ -1784,6 +2281,7 @@ export default function PregnancyMonitoring() {
           large
         >
           <form onSubmit={saveAnc} className="space-y-6">
+            <DraftStatus status={draftStatus} onDiscard={discardActiveDraft} />
             <FormSection title="ANC Visit Information" icon={CalendarDays}>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <FormInput
@@ -2114,6 +2612,7 @@ export default function PregnancyMonitoring() {
           onClose={() => setReferralModal(false)}
         >
           <form onSubmit={saveReferralReview} className="space-y-5">
+            <DraftStatus status={draftStatus} onDiscard={discardActiveDraft} />
             <div className="rounded-lg bg-gray-50 p-4">
               <p className="text-xs text-gray-500">Referral Reason</p>
               <p className="mt-1 font-semibold text-gray-800">
@@ -2154,7 +2653,7 @@ export default function PregnancyMonitoring() {
 
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">
-                Midwife Notes
+                Clinical Review Notes
               </label>
               <textarea
                 rows={5}
@@ -2189,6 +2688,7 @@ export default function PregnancyMonitoring() {
       {outcomeModal && (
         <Modal title="Pregnancy Outcome" onClose={() => setOutcomeModal(false)}>
           <form onSubmit={saveOutcome} className="space-y-5">
+            <DraftStatus status={draftStatus} onDiscard={discardActiveDraft} />
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">
                 Pregnancy Status
@@ -2395,6 +2895,24 @@ function CheckboxField({ label, checked, onChange }) {
       />
       <span className="text-sm text-gray-700">{label}</span>
     </label>
+  );
+}
+
+function DraftStatus({ status, onDiscard }) {
+  if (!status) return null;
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+      <span className="inline-flex items-center gap-2">
+        <Save size={14} /> {status}
+      </span>
+      <button
+        type="button"
+        onClick={onDiscard}
+        className="font-semibold underline underline-offset-2 hover:text-blue-950"
+      >
+        Discard draft
+      </button>
+    </div>
   );
 }
 

@@ -516,7 +516,14 @@ export default function MidwifeNurseFhsisReport() {
       );
 
       setDistrict(districtResult.data);
-      setNurses(nursesResult.data || []);
+
+      const activeNurses = nursesResult.data || [];
+
+      setNurses(activeNurses);
+
+      // Automatically select the district's only active nurse.
+      setNurseId(activeNurses.length === 1 ? String(activeNurses[0].id) : "");
+
       setExistingReports(priorReportsResult.data || []);
 
       // --------------------------------------------------
@@ -763,17 +770,6 @@ export default function MidwifeNurseFhsisReport() {
           ).values(),
         ),
       );
-
-      // Keep the selected nurse if that nurse remains active
-      // and assigned to the current midwife's district.
-      setNurseId((current) =>
-        current &&
-        (nursesResult.data || []).some(
-          (nurse) => String(nurse.id) === String(current),
-        )
-          ? current
-          : "",
-      );
     } catch (err) {
       console.error("Failed to load Midwife FHSIS data:", err);
       setError(err?.message || "Unable to load district source reports.");
@@ -924,8 +920,20 @@ export default function MidwifeNurseFhsisReport() {
     setError("");
     setNotice("");
 
+    if (nurses.length === 0) {
+      setError("No active nurse is assigned to your district.");
+      return;
+    }
+
+    if (nurses.length > 1) {
+      setError(
+        "Multiple active nurses were found in your district. Please correct the nurse assignments before submitting.",
+      );
+      return;
+    }
+
     if (!selectedNurse) {
-      setError("Please select an active nurse from your district.");
+      setError("The assigned nurse could not be identified. Please refresh.");
       return;
     }
 
@@ -1432,22 +1440,45 @@ export default function MidwifeNurseFhsisReport() {
               <label className="mb-1.5 block text-sm font-medium text-slate-700">
                 Receiving nurse
               </label>
-              <select
-                value={nurseId}
-                onChange={(event) => setNurseId(event.target.value)}
-                disabled={loading || submitting || nurses.length === 0}
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm"
-              >
-                <option value="">Select nurse</option>
-                {nurses.map((nurse) => (
-                  <option key={nurse.id} value={nurse.id}>
-                    {displayName(nurse)}
-                  </option>
-                ))}
-              </select>
-              {!loading && nurses.length === 0 && (
+
+              <div className="flex min-h-[42px] items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-emerald-700">
+                  <Users size={18} />
+                </div>
+
+                <div className="min-w-0 flex-1">
+                  {loading ? (
+                    <p className="text-sm text-slate-500">
+                      Loading assigned nurse...
+                    </p>
+                  ) : selectedNurse ? (
+                    <>
+                      <p className="truncate text-sm font-semibold text-slate-800">
+                        {displayName(selectedNurse)}
+                      </p>
+                      <p className="text-xs text-emerald-700">Active Nurse</p>
+                    </>
+                  ) : (
+                    <p className="text-sm text-amber-700">
+                      {nurses.length === 0
+                        ? "No active nurse assigned to this district."
+                        : "Multiple active nurses found. Please check the district assignment."}
+                    </p>
+                  )}
+                </div>
+
+                {selectedNurse && (
+                  <CheckCircle2
+                    size={19}
+                    className="shrink-0 text-emerald-600"
+                  />
+                )}
+              </div>
+
+              {!loading && nurses.length > 1 && (
                 <p className="mt-1 text-xs text-amber-700">
-                  No active nurse is assigned to this district.
+                  More than one active nurse is assigned to this district.
+                  Please correct the district assignment before submitting.
                 </p>
               )}
             </div>
@@ -1492,9 +1523,9 @@ export default function MidwifeNurseFhsisReport() {
                   color: "text-blue-600",
                 },
                 {
-                  label: "Receiving nurses",
-                  value: nurses.length,
-                  description: "Active nurses in your district",
+                  label: "Assigned nurse",
+                  value: selectedNurse ? 1 : 0,
+                  description: "Automatically selected district nurse",
                   icon: Users,
                   color: "text-violet-600",
                 },

@@ -160,10 +160,16 @@ const MENUS = {
       icon: LayoutDashboard,
     },
     {
+      name: "Pregnancy Monitoring",
+      path: "/dashboard/nurse/pregnancy-monitoring",
+      icon: HeartPulse,
+    },
+    {
       name: "Reports",
       path: "/dashboard/nurse/fhsis-reports",
       icon: BarChart3,
     },
+
     {
       name: "District Coverage",
       path: "/dashboard/nurse/district-coverage",

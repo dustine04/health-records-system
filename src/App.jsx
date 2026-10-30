@@ -15,6 +15,7 @@ import Workers from "./pages/midwife/Workers";
 import District from "./pages/admin/District";
 import Barangay from "./pages/admin/Barangay";
 import NurseFhsisReports from "./pages/nurse/NurseFhsisReports";
+import NursePregnancyMonitoring from "./pages/nurse/NursePregnancyMonitoring";
 import NurseDistrictCoverage from "./pages/nurse/NurseDistrictCoverage";
 import ProtectedRoute from "./components/ProtectedRoute";
 
@@ -112,6 +113,15 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["nurse"]}>
               <NurseDashboard />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/nurse/pregnancy-monitoring"
+          element={
+            <ProtectedRoute allowedRoles={["nurse"]}>
+              <NursePregnancyMonitoring />
             </ProtectedRoute>
           }
         />

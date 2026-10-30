@@ -17,10 +17,22 @@ import {
   Scale,
   CalendarDays,
   FileText,
+  RefreshCw,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
-import { supabase } from "../../lib/supabase";
+import {
+  cachedMonitoringChildren,
+  refreshMonitoringChildren,
+  cachedMonitoringRecords,
+  refreshMonitoringRecords,
+  saveMonitoringLocal,
+  deleteMonitoringLocal,
+  syncMonitoring,
+  pendingMonitoringCount,
+} from "../../lib/monitoringOffline";
 
 const emptyForms = {
   newborn: {
@@ -207,6 +219,44 @@ export default function ChildMonitoring() {
 
   const [form, setForm] = useState(emptyForms.monitoring);
   const [saving, setSaving] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState("");
+  async function updatePending() {
+    if (user?.id) setPending(await pendingMonitoringCount(user.id));
+  }
+  async function runSync() {
+    if (!user?.id || !navigator.onLine) return;
+    setSyncing(true);
+    setSyncError("");
+    try {
+      const result = await syncMonitoring(user.id);
+      if (result.error) setSyncError(result.error);
+      if (!result.error) {
+        await fetchChildren();
+        if (selectedChild) await fetchChildRecords(selectedChild);
+      }
+    } catch (e) {
+      setSyncError(e.message);
+    } finally {
+      await updatePending();
+      setSyncing(false);
+    }
+  }
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => {
+      window.removeEventListener("online", up);
+      window.removeEventListener("offline", down);
+    };
+  }, []);
+  useEffect(() => {
+    if (online && user?.id) runSync();
+  }, [online, user?.id]);
 
   useEffect(() => {
     const storedUser = localStorage.getItem("user");
@@ -224,288 +274,42 @@ export default function ChildMonitoring() {
   }, [user]);
 
   async function fetchChildren() {
+    if (!user?.id) return;
     try {
       setLoading(true);
-
-      // ---------------------------------------------------------
-      // 1. Get BNS assigned local areas
-      // ---------------------------------------------------------
-      const { data: assignments, error: assignmentError } = await supabase
-        .from("worker_area_assignments")
-        .select(
-          `
-            local_area_id,
-            local_areas (
-              id,
-              name,
-              type,
-              barangays (
-                id,
-                name
-              )
-            )
-          `,
-        )
-        .eq("worker_id", user.id)
-        .eq("is_active", true);
-
-      if (assignmentError) throw assignmentError;
-
-      const areaIds = (assignments || [])
-        .map((item) => item.local_area_id)
-        .filter(Boolean);
-
-      if (areaIds.length === 0) {
-        setChildren([]);
-        return;
-      }
-
-      // ---------------------------------------------------------
-      // 2. Get households in assigned areas
-      // ---------------------------------------------------------
-      const { data: households, error: householdError } = await supabase
-        .from("households")
-        .select(
-          `
-            id,
-            household_code,
-            household_head,
-            local_area_id
-          `,
-        )
-        .in("local_area_id", areaIds);
-
-      if (householdError) throw householdError;
-
-      const householdIds = (households || []).map((h) => h.id);
-
-      if (householdIds.length === 0) {
-        setChildren([]);
-        return;
-      }
-
-      // ---------------------------------------------------------
-      // 3. Get residents from those households
-      // ---------------------------------------------------------
-      const { data: residents, error: residentError } = await supabase
-        .from("residents")
-        .select(
-          `
-            id,
-            household_id,
-            first_name,
-            middle_name,
-            last_name,
-            sex,
-            birth_date,
-            households (
-              id,
-              household_code,
-              household_head,
-              local_area_id,
-              local_areas (
-                id,
-                name,
-                type,
-                barangays (
-                  id,
-                  name
-                )
-              )
-            )
-          `,
-        )
-        .in("household_id", householdIds);
-
-      if (residentError) throw residentError;
-
-      // ---------------------------------------------------------
-      // 4. Only children below 5 years old
-      // ---------------------------------------------------------
-      const childResidents = (residents || []).filter((resident) => {
-        if (!resident.birth_date) return false;
-
-        const birth = new Date(resident.birth_date);
-        const today = new Date();
-
-        let age = today.getFullYear() - birth.getFullYear();
-
-        const monthDifference = today.getMonth() - birth.getMonth();
-
-        if (
-          monthDifference < 0 ||
-          (monthDifference === 0 && today.getDate() < birth.getDate())
-        ) {
-          age--;
+      setChildren(await cachedMonitoringChildren(user.id));
+      if (navigator.onLine) {
+        try {
+          setChildren(await refreshMonitoringChildren(user.id));
+        } catch (error) {
+          console.warn("Using cached child list:", error);
         }
-
-        return age < 5;
-      });
-
-      if (childResidents.length === 0) {
-        setChildren([]);
-        return;
       }
-
-      const residentIds = childResidents.map((child) => child.id);
-
-      // ---------------------------------------------------------
-      // 5. Get child registration records
-      // ---------------------------------------------------------
-      const { data: registrations, error: registrationError } = await supabase
-        .from("child_health_records")
-        .select("*")
-        .in("resident_id", residentIds);
-
-      if (registrationError) throw registrationError;
-
-      const registrationMap = {};
-
-      (registrations || []).forEach((record) => {
-        registrationMap[record.resident_id] = record;
-      });
-
-      // ---------------------------------------------------------
-      // 6. Merge child + registration
-      // ---------------------------------------------------------
-      const mergedChildren = childResidents.map((child) => ({
-        ...child,
-        health_record: registrationMap[child.id] || null,
-      }));
-
-      // Monitoring only works for registered children.
-      // We still show all children so BNS can see registration status.
-      setChildren(mergedChildren);
+      await updatePending();
     } catch (error) {
-      console.error("Error fetching children:", error);
-      alert(error.message || "Failed to load children.");
+      console.error("Child cache error:", error);
+      setSyncError(error.message);
     } finally {
       setLoading(false);
     }
   }
 
   async function fetchChildRecords(child) {
-    if (!child?.health_record?.id) {
-      return;
-    }
-
+    if (!child?.health_record?.id || !user?.id) return;
     try {
       setLoadingRecords(true);
-
-      const childHealthRecordId = child.health_record.id;
-      // ---------------------------------------------------------
-      // Newborn Tracking
-      // ---------------------------------------------------------
-      const newbornPromise = supabase
-        .from("child_newborn_tracking")
-        .select("*")
-        .eq("child_health_record_id", childHealthRecordId)
-        .maybeSingle();
-      // ---------------------------------------------------------
-      // Growth Monitoring
-      // child_monitoring.child_health_record_id references
-      // child_health_records.id
-      // ---------------------------------------------------------
-      const monitoringPromise = supabase
-        .from("child_monitoring")
-        .select("*")
-        .eq("child_health_record_id", childHealthRecordId)
-        .order("monitoring_date", {
-          ascending: false,
-        });
-
-      // ---------------------------------------------------------
-      // Immunization
-      // ---------------------------------------------------------
-      const immunizationPromise = supabase
-        .from("child_immunization")
-        .select("*")
-        .eq("child_health_record_id", childHealthRecordId)
-        .order("vaccination_date", {
-          ascending: false,
-        });
-
-      // ---------------------------------------------------------
-      // Feeding
-      // ---------------------------------------------------------
-      const feedingPromise = supabase
-        .from("child_feeding")
-        .select("*")
-        .eq("child_health_record_id", childHealthRecordId)
-        .order("record_date", {
-          ascending: false,
-        });
-
-      // ---------------------------------------------------------
-      // Micronutrients
-      // ---------------------------------------------------------
-      const micronutrientPromise = supabase
-        .from("child_micronutrients")
-        .select("*")
-        .eq("child_health_record_id", childHealthRecordId)
-        .order("supplementation_date", {
-          ascending: false,
-        });
-
-      // ---------------------------------------------------------
-      // Deworming
-      // ---------------------------------------------------------
-      const dewormingPromise = supabase
-        .from("child_deworming")
-        .select("*")
-        .eq("child_health_record_id", childHealthRecordId)
-        .order("deworming_date", {
-          ascending: false,
-        });
-
-      // ---------------------------------------------------------
-      // SOAP / Follow-up
-      // ---------------------------------------------------------
-      const followupPromise = supabase
-        .from("child_followups")
-        .select("*")
-        .eq("child_health_record_id", childHealthRecordId)
-        .order("followup_date", {
-          ascending: false,
-        });
-
-      const [
-        newbornResult,
-        monitoringResult,
-        immunizationResult,
-        feedingResult,
-        micronutrientResult,
-        dewormingResult,
-        followupResult,
-      ] = await Promise.all([
-        newbornPromise,
-        monitoringPromise,
-        immunizationPromise,
-        feedingPromise,
-        micronutrientPromise,
-        dewormingPromise,
-        followupPromise,
-      ]);
-      if (newbornResult.error) throw newbornResult.error;
-      if (monitoringResult.error) throw monitoringResult.error;
-      if (immunizationResult.error) throw immunizationResult.error;
-      if (feedingResult.error) throw feedingResult.error;
-      if (micronutrientResult.error) throw micronutrientResult.error;
-      if (dewormingResult.error) throw dewormingResult.error;
-      if (followupResult.error) throw followupResult.error;
-
-      setRecords({
-        newborn: newbornResult.data ? [newbornResult.data] : [],
-        monitoring: monitoringResult.data || [],
-        immunization: immunizationResult.data || [],
-        feeding: feedingResult.data || [],
-        micronutrients: micronutrientResult.data || [],
-        deworming: dewormingResult.data || [],
-        followup: followupResult.data || [],
-      });
+      const id = child.health_record.id;
+      setRecords(await cachedMonitoringRecords(user.id, id));
+      if (navigator.onLine) {
+        try {
+          setRecords(await refreshMonitoringRecords(user.id, id));
+        } catch (error) {
+          console.warn("Using cached monitoring records:", error);
+        }
+      }
     } catch (error) {
-      console.error("Error loading child records:", error);
-      alert(error.message || "Failed to load child records.");
+      console.error("Monitoring cache error:", error);
+      setSyncError(error.message);
     } finally {
       setLoadingRecords(false);
     }
@@ -535,10 +339,19 @@ export default function ChildMonitoring() {
 
   function openAddForm(section) {
     setActiveSection(section);
-    setEditingRecord(null);
-    setForm({
-      ...emptyForms[section],
-    });
+    setEditingRecord(
+      section === "newborn" ? records.newborn?.[0] || null : null,
+    );
+    setForm(
+      section === "newborn" && records.newborn?.[0]
+        ? Object.fromEntries(
+            Object.keys(emptyForms.newborn).map((field) => [
+              field,
+              records.newborn[0][field] ?? "",
+            ]),
+          )
+        : { ...emptyForms[section] },
+    );
     setShowForm(true);
   }
 
@@ -551,10 +364,7 @@ export default function ChildMonitoring() {
     };
 
     Object.keys(newForm).forEach((field) => {
-      newForm[field] =
-        record[field] !== null && record[field] !== undefined
-          ? record[field]
-          : "";
+      newForm[field] = record[field] ?? "";
     });
 
     setForm(newForm);
@@ -761,43 +571,18 @@ export default function ChildMonitoring() {
         };
       }
 
-      let result;
-
-      if (activeSection === "newborn") {
-        if (editingRecord) {
-          result = await supabase
-            .from(table)
-            .update(data)
-            .eq("id", editingRecord.id);
-        } else {
-          result = await supabase.from(table).upsert(data, {
-            onConflict: "child_health_record_id",
-          });
-        }
-      } else {
-        if (editingRecord) {
-          result = await supabase
-            .from(table)
-            .update(data)
-            .eq("id", editingRecord.id);
-        } else {
-          result = await supabase.from(table).insert(data);
-        }
-      }
-
-      if (result.error) {
-        throw result.error;
-      }
-
-      alert(
-        editingRecord
-          ? "Record updated successfully."
-          : "Record added successfully.",
+      await saveMonitoringLocal(
+        user.id,
+        childHealthRecordId,
+        activeSection,
+        editingRecord?.id,
+        data,
       );
-
       closeForm();
-
-      await fetchChildRecords(selectedChild);
+      setRecords(await cachedMonitoringRecords(user.id, childHealthRecordId));
+      await updatePending();
+      if (navigator.onLine) await runSync();
+      else setSyncError("");
     } catch (error) {
       console.error("Error saving record:", error);
       alert(error.message || "Failed to save record.");
@@ -807,25 +592,22 @@ export default function ChildMonitoring() {
   }
 
   async function handleDelete(section, record) {
-    const confirmed = window.confirm(
-      "Are you sure you want to delete this record?",
-    );
-
-    if (!confirmed) return;
-
+    if (!window.confirm("Are you sure you want to delete this record?")) return;
     try {
-      const table = sectionConfig[section].table;
-
-      const { error } = await supabase.from(table).delete().eq("id", record.id);
-
-      if (error) throw error;
-
-      alert("Record deleted successfully.");
-
-      await fetchChildRecords(selectedChild);
+      await deleteMonitoringLocal(
+        user.id,
+        selectedChild.health_record.id,
+        section,
+        record.id,
+      );
+      setRecords(
+        await cachedMonitoringRecords(user.id, selectedChild.health_record.id),
+      );
+      await updatePending();
+      if (navigator.onLine) await runSync();
     } catch (error) {
-      console.error("Error deleting record:", error);
-      alert(error.message || "Failed to delete record.");
+      console.error(error);
+      alert(error.message || "Could not queue deletion.");
     }
   }
 
@@ -896,6 +678,30 @@ export default function ChildMonitoring() {
           </div>
         </div>
 
+        <div className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border bg-white p-3 text-sm">
+          <span className={online ? "text-green-700" : "text-amber-700"}>
+            {online ? (
+              <Wifi className="mr-1 inline" size={16} />
+            ) : (
+              <WifiOff className="mr-1 inline" size={16} />
+            )}
+            {online ? "Online" : "Offline"}
+          </span>
+          <span className="text-gray-600">
+            Pending changes: <strong>{pending}</strong>
+          </span>
+          <button
+            onClick={runSync}
+            disabled={!online || syncing}
+            className="ml-auto inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-white disabled:opacity-50"
+          >
+            <RefreshCw size={15} className={syncing ? "animate-spin" : ""} />
+            {syncing ? "Syncing..." : "Sync Now"}
+          </button>
+          {syncError && (
+            <p className="w-full text-xs text-red-600">{syncError}</p>
+          )}
+        </div>
         {/* =====================================================
             CHILDREN TABLE
         ====================================================== */}

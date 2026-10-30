@@ -10,10 +10,22 @@ import {
   X,
   Save,
   Activity,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  CloudUpload,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
-import { supabase } from "../../lib/supabase";
+import {
+  getCachedChildren,
+  queueChildMutation,
+  queueRecordChange,
+  queueRecordDeletion,
+  refreshChildSnapshot,
+  syncChildMutations,
+  childOfflineDB,
+} from "../../lib/childOffline";
 
 function ChildRegistration() {
   const storedUser = localStorage.getItem("user");
@@ -71,170 +83,82 @@ function ChildRegistration() {
     referral_result: "",
   });
 
-  // =====================================================
-  // GET CHILDREN
-  // =====================================================
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState("");
+  const [cachedAt, setCachedAt] = useState(null);
 
-  useEffect(() => {
-    if (user) {
-      fetchChildren();
-    }
-  }, []);
+  const showLocal = async () => {
+    const local = await getCachedChildren(user.id);
+    setChildren(local.children);
+    setAssignedAreas(local.areas);
+    setPending(local.pending);
+    setCachedAt(local.cachedAt);
+  };
 
   const fetchChildren = async () => {
+    setLoading(true);
     try {
-      setLoading(true);
-
-      // Get areas assigned to this BNS
-      const { data: assignments, error: assignmentError } = await supabase
-        .from("worker_area_assignments")
-        .select(
-          `
-            local_area_id,
-            local_areas (
-              id,
-              name,
-              type,
-              barangays (
-                id,
-                name
-              )
-            )
-          `,
-        )
-        .eq("worker_id", user.id)
-        .eq("is_active", true);
-
-      if (assignmentError) throw assignmentError;
-
-      const availableAreas = (assignments || [])
-        .filter((item) => item.local_areas?.id)
-        .map((item) => ({
-          id: item.local_areas.id,
-          name: item.local_areas.name,
-          type: item.local_areas.type,
-          barangay_name: item.local_areas.barangays?.name || "",
-        }))
-        .filter(
-          (area, index, all) =>
-            all.findIndex((a) => String(a.id) === String(area.id)) === index,
-        );
-      setAssignedAreas(availableAreas);
-
-      const areaIds = (assignments || [])
-        .map((item) => item.local_area_id)
-        .filter(Boolean);
-
-      if (areaIds.length === 0) {
-        setChildren([]);
-        return;
-      }
-
-      // Get households in assigned areas
-      const { data: households, error: householdError } = await supabase
-        .from("households")
-        .select("id, household_code, household_head, local_area_id")
-        .in("local_area_id", areaIds);
-
-      if (householdError) throw householdError;
-
-      const householdIds = (households || []).map((h) => h.id);
-
-      if (householdIds.length === 0) {
-        setChildren([]);
-        return;
-      }
-
-      // Get residents
-      const { data: residents, error: residentError } = await supabase
-        .from("residents")
-        .select(
-          `
-            id,
-            household_id,
-            first_name,
-            middle_name,
-            last_name,
-            sex,
-            birth_date,
-            households (
-              id,
-              household_code,
-              household_head,
-              local_area_id,
-              local_areas (
-                id,
-                name,
-                type,
-                barangays (
-                  id,
-                  name
-                )
-              )
-            )
-          `,
-        )
-        .in("household_id", householdIds);
-
-      if (residentError) throw residentError;
-
-      // Only show children below 5 years old
-      const today = new Date();
-
-      const childResidents = (residents || []).filter((resident) => {
-        if (!resident.birth_date) return false;
-
-        const birthDate = new Date(resident.birth_date);
-
-        let age = today.getFullYear() - birthDate.getFullYear();
-
-        const monthDifference = today.getMonth() - birthDate.getMonth();
-
-        if (
-          monthDifference < 0 ||
-          (monthDifference === 0 && today.getDate() < birthDate.getDate())
-        ) {
-          age--;
+      await showLocal();
+      if (navigator.onLine) {
+        try {
+          await refreshChildSnapshot(user.id);
+          await showLocal();
+          setSyncError("");
+        } catch (error) {
+          setSyncError(`Could not refresh server data: ${error.message}`);
         }
-
-        return age < 5;
-      });
-
-      // Get existing child health records
-      const residentIds = childResidents.map((child) => child.id);
-
-      let healthRecords = [];
-
-      if (residentIds.length > 0) {
-        const { data, error } = await supabase
-          .from("child_health_records")
-          .select("*")
-          .in("resident_id", residentIds);
-
-        if (error) throw error;
-
-        healthRecords = data || [];
       }
-
-      const merged = childResidents.map((child) => {
-        const record = healthRecords.find(
-          (item) => item.resident_id === child.id,
-        );
-
-        return {
-          ...child,
-          health_record: record || null,
-        };
-      });
-
-      setChildren(merged);
     } catch (error) {
-      console.error("Error loading children:", error);
-      alert(error.message || "Failed to load children.");
+      console.error(error);
+      setSyncError(`Could not read local data: ${error.message}`);
     } finally {
       setLoading(false);
     }
   };
+
+  const synchronize = async () => {
+    if (!navigator.onLine || syncing) return;
+    setSyncing(true);
+    try {
+      const result = await syncChildMutations(user.id);
+      if (result?.error) setSyncError(result.error);
+      else setSyncError("");
+      // Refresh only after successful uploads. If it fails, keep the local queue.
+      await refreshChildSnapshot(user.id);
+      await showLocal();
+    } catch (error) {
+      setSyncError(error.message);
+      await showLocal();
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!user?.id) return;
+    let active = true;
+    const onOnline = () => {
+      if (active) {
+        setOnline(true);
+        synchronize();
+      }
+    };
+    const onOffline = () => {
+      if (active) setOnline(false);
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    fetchChildren().then(() => {
+      if (active && navigator.onLine) synchronize();
+    });
+    return () => {
+      active = false;
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [user?.id]);
 
   // =====================================================
   // FORM
@@ -480,139 +404,72 @@ function ChildRegistration() {
       }
     }
 
-    let createdHouseholdId = null;
-    let createdResidentId = null;
-
     try {
       setSaving(true);
-
-      let residentId = form.resident_id ? Number(form.resident_id) : null;
-
+      const childData = {
+        date_of_registration: form.date_of_registration || null,
+        document_record_no: form.document_record_no.trim() || null,
+        family_serial_no: form.family_serial_no.trim() || null,
+        child_name: form.child_name.trim() || null,
+        date_of_birth: form.date_of_birth || null,
+        sex: form.sex || null,
+        mother_name: form.mother_name.trim() || null,
+        mother_tt_status: form.mother_tt_status.trim() || null,
+        weight_kg: form.weight_kg === "" ? null : Number(form.weight_kg),
+        height_cm: form.height_cm === "" ? null : Number(form.height_cm),
+        muac_cm: form.muac_cm === "" ? null : Number(form.muac_cm),
+        date_nbs_done: form.date_nbs_done || null,
+        nbs_result: form.nbs_result.trim() || null,
+        tt_date_given: form.tt_date_given || null,
+        tt_date_assessed: form.tt_date_assessed || null,
+        complete_address: form.complete_address.trim() || null,
+        referred_health_facility: form.referred_health_facility.trim() || null,
+        referral_result: form.referral_result.trim() || null,
+        recorded_by: user.id,
+        updated_at: new Date().toISOString(),
+      };
       if (newChildMode) {
-        const currentUser = JSON.parse(localStorage.getItem("user") || "null");
-
-        if (!currentUser?.id) {
-          throw new Error(
-            "Unable to identify the logged-in user. Please log in again.",
-          );
-        }
-
-        const { data: household, error: householdInsertError } = await supabase
-          .from("households")
-          .insert({
+        await queueChildMutation(user.id, {
+          kind: "create-child",
+          household: {
             household_code: newHousehold.household_code.trim(),
             household_head: newHousehold.household_head.trim(),
             local_area_id: Number(newHousehold.local_area_id),
-            created_by: Number(currentUser.id),
-          })
-          .select("id")
-          .single();
-
-        if (householdInsertError) throw householdInsertError;
-
-        createdHouseholdId = household.id;
-
-        const { data: resident, error: residentInsertError } = await supabase
-          .from("residents")
-          .insert({
-            household_id: household.id,
+            created_by: Number(user.id),
+          },
+          resident: {
             first_name: newHousehold.first_name.trim(),
             middle_name: newHousehold.middle_name.trim() || null,
             last_name: newHousehold.last_name.trim(),
             sex: newHousehold.sex,
             birth_date: newHousehold.birth_date,
-          })
-          .select("id")
-          .single();
-
-        if (residentInsertError) {
-          // Best-effort cleanup if resident creation fails after household creation.
-          await supabase.from("households").delete().eq("id", household.id);
-          throw residentInsertError;
-        }
-
-        residentId = resident.id;
-        createdResidentId = resident.id;
-      }
-
-      const childData = {
-        resident_id: Number(residentId),
-
-        date_of_registration: form.date_of_registration || null,
-
-        document_record_no: form.document_record_no.trim() || null,
-
-        family_serial_no: form.family_serial_no.trim() || null,
-
-        child_name: form.child_name.trim() || null,
-
-        date_of_birth: form.date_of_birth || null,
-
-        sex: form.sex || null,
-
-        mother_name: form.mother_name.trim() || null,
-
-        mother_tt_status: form.mother_tt_status.trim() || null,
-
-        weight_kg: form.weight_kg ? Number(form.weight_kg) : null,
-
-        height_cm: form.height_cm ? Number(form.height_cm) : null,
-
-        muac_cm: form.muac_cm ? Number(form.muac_cm) : null,
-
-        date_nbs_done: form.date_nbs_done || null,
-
-        nbs_result: form.nbs_result.trim() || null,
-
-        tt_date_given: form.tt_date_given || null,
-
-        tt_date_assessed: form.tt_date_assessed || null,
-
-        complete_address: form.complete_address.trim() || null,
-
-        referred_health_facility: form.referred_health_facility.trim() || null,
-
-        referral_result: form.referral_result.trim() || null,
-
-        recorded_by: user.id,
-
-        updated_at: new Date().toISOString(),
-      };
-
-      if (editingRecord) {
-        const { error } = await supabase
-          .from("child_health_records")
-          .update(childData)
-          .eq("id", editingRecord.id);
-
-        if (error) throw error;
-
-        alert("Child health record updated successfully.");
+          },
+          record: childData,
+        });
+      } else if (String(form.resident_id).startsWith("local:")) {
+        const uuid = String(form.resident_id).slice(6);
+        const mutation = await childOfflineDB.mutations.get(uuid);
+        if (!mutation || mutation.userId !== String(user.id))
+          throw new Error("Local registration not found");
+        await childOfflineDB.mutations.update(uuid, { record: childData });
       } else {
-        const { error } = await supabase
-          .from("child_health_records")
-          .insert(childData);
-
-        if (error) throw error;
-
-        alert("Child health record created successfully.");
+        await queueRecordChange(
+          user.id,
+          Number(form.resident_id),
+          editingRecord?.id || null,
+          childData,
+        );
       }
-
       setShowModal(false);
       resetForm();
-
-      await fetchChildren();
+      await showLocal();
+      if (navigator.onLine) await synchronize();
+      alert(
+        "Saved on this device. Check the synchronization status for server upload.",
+      );
     } catch (error) {
-      // Best-effort rollback for a newly created household/resident if the
-      // child health record could not be saved.
-      if (createdResidentId) {
-        await supabase.from("residents").delete().eq("id", createdResidentId);
-      }
-      if (createdHouseholdId) {
-        await supabase.from("households").delete().eq("id", createdHouseholdId);
-      }
-      console.error("Error saving child record:", error);
-      alert(error.message || "Failed to save child health record.");
+      console.error(error);
+      alert(error.message || "Could not save child health record locally.");
     } finally {
       setSaving(false);
     }
@@ -624,29 +481,23 @@ function ChildRegistration() {
 
   const handleDelete = async (child) => {
     if (!child.health_record) return;
-
-    const confirmed = window.confirm(
-      `Delete the child health record of ${
-        child.child_name || `${child.first_name} ${child.last_name}`
-      }?`,
-    );
-
-    if (!confirmed) return;
-
+    if (
+      !window.confirm(
+        `Delete the child health record of ${child.first_name} ${child.last_name}?`,
+      )
+    )
+      return;
     try {
-      const { error } = await supabase
-        .from("child_health_records")
-        .delete()
-        .eq("id", child.health_record.id);
-
-      if (error) throw error;
-
-      await fetchChildren();
-
-      alert("Child health record deleted.");
+      if (String(child.id).startsWith("local:")) {
+        // This registration has never reached Supabase. Cancel its whole creation.
+        await childOfflineDB.mutations.delete(String(child.id).slice(6));
+      } else {
+        await queueRecordDeletion(user.id, child.id, child.health_record.id);
+      }
+      await showLocal();
+      if (navigator.onLine) await synchronize();
     } catch (error) {
-      console.error(error);
-      alert(error.message || "Failed to delete child health record.");
+      alert(error.message || "Could not queue deletion.");
     }
   };
 
@@ -734,6 +585,48 @@ function ChildRegistration() {
             Register and Manage child health records in your assigned areas.
           </p>
         </div>
+
+        <div className="rounded-xl border bg-white p-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3 text-sm">
+            {online ? (
+              <Wifi size={19} className="text-green-600" />
+            ) : (
+              <WifiOff size={19} className="text-amber-600" />
+            )}
+            <div>
+              <p className="font-semibold text-gray-800">
+                {online ? "Online" : "Offline — local records available"}
+              </p>
+              <p className="text-gray-500">
+                {pending} pending change(s) · Last downloaded:{" "}
+                {cachedAt ? new Date(cachedAt).toLocaleString() : "Never"}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={synchronize}
+            disabled={!online || syncing}
+            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-white text-sm disabled:opacity-50"
+          >
+            <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+            {syncing ? "Synchronizing..." : "Sync now"}
+          </button>
+        </div>
+        {syncError && (
+          <p
+            role="alert"
+            className="rounded-lg bg-amber-50 p-3 text-sm text-amber-800"
+          >
+            Sync notice: {syncError}. Unsynced changes stay on this device.
+          </p>
+        )}
+        {!cachedAt && !online && (
+          <p className="text-sm text-red-700">
+            This account has not downloaded its assigned areas on this device.
+            Connect to the internet once before using offline registration.
+          </p>
+        )}
 
         <div className="flex justify-end">
           <button

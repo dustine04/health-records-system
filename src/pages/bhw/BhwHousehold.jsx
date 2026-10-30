@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Home,
   Plus,
@@ -13,7 +13,15 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
-import { supabase } from "../../lib/supabase";
+import {
+  getHouseholdCache,
+  refreshHouseholdCache,
+  saveHouseholdLocal,
+  deleteHouseholdLocal,
+  saveResidentLocal,
+  deleteResidentLocal,
+  syncHouseholds,
+} from "../../lib/bhwHouseholdOffline";
 
 function BhwHousehold() {
   const storedUser = localStorage.getItem("user");
@@ -61,112 +69,111 @@ function BhwHousehold() {
     is_household_head: false,
   });
 
-  // =====================================================
-  // GET ASSIGNED AREAS
-  // =====================================================
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState("");
+  const userId = user?.id;
 
-  useEffect(() => {
-    if (user) {
-      fetchLocalAreas();
-    }
-  }, []);
+  const applyCache = useCallback(
+    async (remote = false) => {
+      if (!userId) return null;
+      const cache = remote
+        ? await refreshHouseholdCache(userId)
+        : await getHouseholdCache(userId);
+      setLocalAreas(cache.areas);
+      setHouseholds(cache.households);
+      setPending(cache.pending);
+      setSelectedHousehold((old) =>
+        old
+          ? cache.households.find((h) => String(h.id) === String(old.id)) ||
+            null
+          : null,
+      );
+      return cache;
+    },
+    [userId],
+  );
 
-  useEffect(() => {
-    if (localAreas.length > 0) {
-      fetchHouseholds();
-    } else {
-      setHouseholds([]);
-      setLoading(false);
-    }
-  }, [localAreas]);
-
-  const fetchLocalAreas = async () => {
+  const fetchHouseholds = useCallback(async () => {
+    setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from("worker_area_assignments")
-        .select(
-          `
-          local_area_id,
-          local_areas (
-            id,
-            name,
-            type,
-            barangay_id,
-            barangays (
-              id,
-              name
-            )
-          )
-        `,
-        )
-        .eq("worker_id", user.id)
-        .eq("is_active", true);
-
-      if (error) throw error;
-
-      const areas = (data || [])
-        .map((item) => item.local_areas)
-        .filter(Boolean);
-
-      setLocalAreas(areas);
-    } catch (error) {
-      console.error("Error loading assigned areas:", error);
-      alert("Failed to load your assigned areas.");
-    }
-  };
-
-  // =====================================================
-  // GET HOUSEHOLDS
-  // =====================================================
-
-  const fetchHouseholds = async () => {
-    try {
-      setLoading(true);
-
-      const areaIds = localAreas.map((area) => area.id);
-
-      if (areaIds.length === 0) {
-        setHouseholds([]);
-        return;
+      await applyCache(false);
+      if (navigator.onLine) {
+        try {
+          await applyCache(true);
+          setSyncError("");
+        } catch (error) {
+          setSyncError(
+            `Refresh failed: ${error.message}. Cached data is shown.`,
+          );
+        }
       }
-
-      const { data, error } = await supabase
-        .from("households")
-        .select(
-          `
-          *,
-          local_areas (
-            id,
-            name,
-            type,
-            barangays (
-              id,
-              name
-            )
-          ),
-          residents (
-            id
-          )
-        `,
-        )
-        .in("local_area_id", areaIds)
-        .order("created_at", {
-          ascending: false,
-        });
-
-      if (error) throw error;
-
-      const householdsWithCount = (data || []).map((household) => ({
-        ...household,
-        resident_count: household.residents?.length || 0,
-      }));
-
-      setHouseholds(householdsWithCount);
     } catch (error) {
-      console.error("Error loading households:", error);
-      alert("Failed to load households.");
+      setSyncError(error.message);
     } finally {
       setLoading(false);
+    }
+  }, [applyCache]);
+
+  const doSync = useCallback(async () => {
+    if (!userId || !navigator.onLine) return;
+    setSyncing(true);
+    try {
+      const result = await syncHouseholds(userId);
+      if (result.error) setSyncError(result.error);
+      else if (!result.busy) {
+        setSyncError("");
+        try {
+          await applyCache(true);
+        } catch (error) {
+          setSyncError(`Uploaded, but refresh failed: ${error.message}`);
+        }
+      }
+      await applyCache(false);
+    } catch (error) {
+      setSyncError(error.message);
+    } finally {
+      setSyncing(false);
+    }
+  }, [userId, applyCache]);
+
+  useEffect(() => {
+    if (!userId) return;
+    void (async () => {
+      await fetchHouseholds();
+      if (navigator.onLine) await doSync();
+    })();
+    const onOnline = () => {
+      setOnline(true);
+      void doSync();
+    };
+    const onOffline = () => setOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [userId, fetchHouseholds, doSync]);
+
+  const updateLocal = async (householdId = selectedHousehold?.id) => {
+    const cache = await applyCache(false);
+    if (householdId != null) {
+      setResidents(cache.residents[String(householdId)] || []);
+    }
+    if (navigator.onLine) void doSync();
+  };
+
+  const fetchResidents = async (householdId) => {
+    setResidentsLoading(true);
+    try {
+      const cache = await getHouseholdCache(userId);
+      setResidents(cache.residents[String(householdId)] || []);
+    } catch (error) {
+      setSyncError(error.message);
+    } finally {
+      setResidentsLoading(false);
     }
   };
 
@@ -215,73 +222,37 @@ function BhwHousehold() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-
-    if (!form.household_head.trim()) {
-      alert("Please enter the household head.");
-      return;
-    }
-
-    if (!form.local_area_id) {
-      alert("Please select a Purok/Sitio.");
-      return;
-    }
-
+    if (!form.household_head.trim())
+      return alert("Please enter the household head.");
+    if (!localAreas.some((a) => String(a.id) === String(form.local_area_id)))
+      return alert("Please select an assigned Purok/Sitio.");
     try {
-      const householdData = {
+      await saveHouseholdLocal(userId, editingHousehold?.id || null, {
         household_code: form.household_code.trim(),
         household_head: form.household_head.trim(),
         contact_number: form.contact_number.trim() || null,
         address: form.address.trim() || null,
         local_area_id: Number(form.local_area_id),
-      };
-
-      if (editingHousehold) {
-        const { error } = await supabase
-          .from("households")
-          .update({
-            ...householdData,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", editingHousehold.id);
-
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from("households").insert({
-          ...householdData,
-          created_by: user.id,
-        });
-
-        if (error) throw error;
-      }
-
+      });
       setShowModal(false);
-      await fetchHouseholds();
+      await updateLocal();
     } catch (error) {
-      console.error("Error saving household:", error);
-      alert(error.message || "Failed to save household.");
+      alert(error.message || "Unable to save locally.");
     }
   };
 
-  // =====================================================
-  // DELETE HOUSEHOLD
-  // =====================================================
-
   const handleDelete = async (id) => {
-    const confirmed = window.confirm(
-      "Are you sure you want to delete this household?",
-    );
-
-    if (!confirmed) return;
-
+    if (
+      !window.confirm(
+        "Delete this household? Deletion may fail during sync if other records reference it.",
+      )
+    )
+      return;
     try {
-      const { error } = await supabase.from("households").delete().eq("id", id);
-
-      if (error) throw error;
-
-      await fetchHouseholds();
+      await deleteHouseholdLocal(userId, id);
+      await updateLocal();
     } catch (error) {
-      console.error("Error deleting household:", error);
-      alert(error.message || "Failed to delete household.");
+      alert(error.message);
     }
   };
 
@@ -294,32 +265,6 @@ function BhwHousehold() {
     setShowDetailsModal(true);
 
     await fetchResidents(household.id);
-  };
-
-  const fetchResidents = async (householdId) => {
-    try {
-      setResidentsLoading(true);
-
-      const { data, error } = await supabase
-        .from("residents")
-        .select("*")
-        .eq("household_id", householdId)
-        .order("is_household_head", {
-          ascending: false,
-        })
-        .order("last_name", {
-          ascending: true,
-        });
-
-      if (error) throw error;
-
-      setResidents(data || []);
-    } catch (error) {
-      console.error("Error loading residents:", error);
-      alert("Failed to load household members.");
-    } finally {
-      setResidentsLoading(false);
-    }
   };
 
   const closeDetailsModal = () => {
@@ -393,166 +338,51 @@ function BhwHousehold() {
 
   const handleResidentSubmit = async (e) => {
     e.preventDefault();
-
     if (!selectedHousehold) return;
-
-    if (!residentForm.first_name.trim()) {
-      alert("Please enter the first name.");
-      return;
-    }
-
-    if (!residentForm.last_name.trim()) {
-      alert("Please enter the last name.");
-      return;
-    }
-
-    if (!residentForm.birth_date) {
-      alert("Please enter the birth date.");
-      return;
-    }
-
+    if (
+      !residentForm.first_name.trim() ||
+      !residentForm.last_name.trim() ||
+      !residentForm.birth_date
+    )
+      return alert("Please enter first name, last name, and birth date.");
+    setSavingResident(true);
     try {
-      setSavingResident(true);
-
-      // Remove household head from other residents first
-      if (residentForm.is_household_head) {
-        const { error } = await supabase
-          .from("residents")
-          .update({
-            is_household_head: false,
-          })
-          .eq("household_id", selectedHousehold.id);
-
-        if (error) throw error;
-      }
-
-      const residentData = {
-        household_id: Number(selectedHousehold.id),
-        first_name: residentForm.first_name.trim(),
-        middle_name: residentForm.middle_name.trim() || null,
-        last_name: residentForm.last_name.trim(),
-        sex: residentForm.sex,
-        birth_date: residentForm.birth_date,
-        civil_status: residentForm.civil_status || null,
-        relationship_to_head: residentForm.relationship_to_head.trim() || null,
-        contact_number: residentForm.contact_number.trim() || null,
-        is_household_head: residentForm.is_household_head,
-      };
-
-      if (editingResident) {
-        const { error } = await supabase
-          .from("residents")
-          .update(residentData)
-          .eq("id", editingResident.id);
-
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from("residents").insert(residentData);
-
-        if (error) throw error;
-      }
-
-      // Update household head name
-      if (residentForm.is_household_head) {
-        const fullName = [
-          residentForm.first_name.trim(),
-          residentForm.middle_name.trim(),
-          residentForm.last_name.trim(),
-        ]
-          .filter(Boolean)
-          .join(" ");
-
-        const { error } = await supabase
-          .from("households")
-          .update({
-            household_head: fullName,
-          })
-          .eq("id", selectedHousehold.id);
-
-        if (error) console.error(error);
-      }
-
-      await fetchResidents(selectedHousehold.id);
-      await fetchHouseholds();
-
-      // Update selected household information
-      const updatedHousehold = households.find(
-        (h) => h.id === selectedHousehold.id,
+      const householdId = selectedHousehold.id;
+      await saveResidentLocal(
+        userId,
+        householdId,
+        editingResident?.id || null,
+        {
+          first_name: residentForm.first_name.trim(),
+          middle_name: residentForm.middle_name.trim() || null,
+          last_name: residentForm.last_name.trim(),
+          sex: residentForm.sex,
+          birth_date: residentForm.birth_date,
+          civil_status: residentForm.civil_status || null,
+          relationship_to_head:
+            residentForm.relationship_to_head.trim() || null,
+          contact_number: residentForm.contact_number.trim() || null,
+          is_household_head: Boolean(residentForm.is_household_head),
+        },
       );
-
-      if (updatedHousehold) {
-        setSelectedHousehold({
-          ...updatedHousehold,
-          household_head: residentForm.is_household_head
-            ? [
-                residentForm.first_name.trim(),
-                residentForm.middle_name.trim(),
-                residentForm.last_name.trim(),
-              ]
-                .filter(Boolean)
-                .join(" ")
-            : updatedHousehold.household_head,
-        });
-      }
-
-      closeResidentModal();
-
-      alert(
-        editingResident
-          ? "Resident updated successfully."
-          : "Resident added successfully.",
-      );
+      setShowResidentModal(false);
+      resetResidentForm();
+      await updateLocal(householdId);
     } catch (error) {
-      console.error("Error saving resident:", error);
-      alert(error.message || "Failed to save resident.");
+      alert(error.message || "Unable to save resident locally.");
     } finally {
       setSavingResident(false);
     }
   };
 
-  // =====================================================
-  // DELETE RESIDENT
-  // =====================================================
-
   const handleDeleteResident = async (resident) => {
-    const fullName = `${resident.first_name} ${resident.last_name}`;
-
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${fullName}?`,
-    );
-
-    if (!confirmed) return;
-
+    if (!window.confirm(`Delete ${resident.first_name} ${resident.last_name}?`))
+      return;
     try {
-      const { error } = await supabase
-        .from("residents")
-        .delete()
-        .eq("id", resident.id);
-
-      if (error) throw error;
-
-      // Clear household head if necessary
-      if (resident.is_household_head) {
-        await supabase
-          .from("households")
-          .update({
-            household_head: "",
-          })
-          .eq("id", selectedHousehold.id);
-
-        setSelectedHousehold((prev) => ({
-          ...prev,
-          household_head: "",
-        }));
-      }
-
-      await fetchResidents(selectedHousehold.id);
-      await fetchHouseholds();
-
-      alert("Resident deleted successfully.");
+      await deleteResidentLocal(userId, selectedHousehold.id, resident.id);
+      await updateLocal(selectedHousehold.id);
     } catch (error) {
-      console.error("Error deleting resident:", error);
-      alert(error.message || "Failed to delete resident.");
+      alert(error.message);
     }
   };
 
@@ -577,6 +407,41 @@ function BhwHousehold() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-4 text-sm">
+          <span
+            className={
+              online
+                ? "font-semibold text-green-700"
+                : "font-semibold text-amber-700"
+            }
+          >
+            {online ? "Online" : "Offline — changes are saved on this device"}
+          </span>
+          <span>
+            {pending} pending change{pending === 1 ? "" : "s"}
+          </span>
+          <button
+            type="button"
+            onClick={doSync}
+            disabled={!online || syncing}
+            className="rounded-lg bg-teal-600 px-3 py-2 text-white disabled:opacity-50"
+          >
+            {syncing ? "Syncing..." : "Sync Now"}
+          </button>
+          <button
+            type="button"
+            onClick={fetchHouseholds}
+            disabled={!online || syncing}
+            className="rounded-lg border px-3 py-2 disabled:opacity-50"
+          >
+            Refresh
+          </button>
+          {syncError && (
+            <span role="alert" className="text-red-600">
+              {syncError}
+            </span>
+          )}
+        </div>
         {/* =====================================================
             HEADER
         ===================================================== */}

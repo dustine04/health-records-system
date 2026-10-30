@@ -12,10 +12,20 @@ import {
   MapPin,
   CalendarDays,
   HeartPulse,
+  RefreshCw,
+  Wifi,
+  WifiOff,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
-import { supabase } from "../../lib/supabase";
+import {
+  getPregnancyCache,
+  refreshPregnancyCache,
+  queuePregnancySave,
+  queuePregnancyDelete,
+  syncPregnancyQueue,
+  pendingPregnancyCount,
+} from "../../lib/bhwPregnancyOffline";
 
 function BhwPregnantWomen() {
   const storedUser = localStorage.getItem("user");
@@ -26,6 +36,10 @@ function BhwPregnantWomen() {
   const [localAreas, setLocalAreas] = useState([]);
 
   const [loading, setLoading] = useState(true);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [offlineError, setOfflineError] = useState("");
   const [search, setSearch] = useState("");
 
   // Registration modal
@@ -61,191 +75,87 @@ function BhwPregnantWomen() {
 
   const [form, setForm] = useState(emptyForm);
 
-  // =====================================================
-  // INITIAL LOAD
-  // =====================================================
-
-  useEffect(() => {
-    if (user) {
-      fetchLocalAreas();
-    }
-  }, []);
-
-  useEffect(() => {
-    if (localAreas.length > 0) {
-      fetchPregnantWomen();
-    } else if (user) {
-      setPregnantWomen([]);
-      setEligibleResidents([]);
-      setLoading(false);
-    }
-  }, [localAreas]);
-
-  // =====================================================
-  // GET ASSIGNED AREAS
-  // =====================================================
-
-  const fetchLocalAreas = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("worker_area_assignments")
-        .select(
-          `
-          local_area_id,
-          local_areas (
-            id,
-            name,
-            type,
-            barangay_id,
-            barangays (
-              id,
-              name
-            )
-          )
-        `,
-        )
-        .eq("worker_id", user.id)
-        .eq("is_active", true);
-
-      if (error) throw error;
-
-      const areas = (data || [])
-        .map((item) => item.local_areas)
-        .filter(Boolean);
-
-      setLocalAreas(areas);
-    } catch (error) {
-      console.error("Error loading assigned areas:", error);
-      alert("Failed to load your assigned areas.");
-    }
+  const applyCache = (cache) => {
+    setLocalAreas(cache.areas);
+    setEligibleResidents(cache.residents);
+    setPregnantWomen(cache.records);
+    setPending(cache.pending);
   };
 
-  // =====================================================
-  // GET RESIDENTS + PREGNANCY RECORDS
-  // =====================================================
-
-  const fetchPregnantWomen = async () => {
+  const loadData = async () => {
+    if (!user) return;
+    setLoading(true);
     try {
-      setLoading(true);
-
-      const areaIds = localAreas.map((area) => area.id);
-
-      if (areaIds.length === 0) {
-        setPregnantWomen([]);
-        setEligibleResidents([]);
-        return;
+      applyCache(await getPregnancyCache(user.id));
+      if (navigator.onLine) {
+        try {
+          applyCache(await refreshPregnancyCache(user.id));
+          setOfflineError("");
+        } catch (err) {
+          setOfflineError(`Using cached data: ${err.message}`);
+        }
       }
-
-      // -------------------------------------------------
-      // HOUSEHOLDS IN ASSIGNED AREAS
-      // -------------------------------------------------
-
-      const { data: households, error: householdError } = await supabase
-        .from("households")
-        .select("id")
-        .in("local_area_id", areaIds);
-
-      if (householdError) throw householdError;
-
-      const householdIds = (households || []).map((item) => item.id);
-
-      if (householdIds.length === 0) {
-        setPregnantWomen([]);
-        setEligibleResidents([]);
-        return;
-      }
-
-      // -------------------------------------------------
-      // FEMALE RESIDENTS
-      // -------------------------------------------------
-
-      const { data: residents, error: residentError } = await supabase
-        .from("residents")
-        .select(
-          `
-          id,
-          household_id,
-          first_name,
-          middle_name,
-          last_name,
-          sex,
-          birth_date,
-          civil_status,
-          contact_number,
-          households (
-            id,
-            household_code,
-            household_head,
-            address,
-            local_area_id,
-            local_areas (
-              id,
-              name,
-              type,
-              barangays (
-                id,
-                name
-              )
-            )
-          )
-        `,
-        )
-        .in("household_id", householdIds)
-        .eq("sex", "Female")
-        .order("last_name", {
-          ascending: true,
-        });
-
-      if (residentError) throw residentError;
-
-      const femaleResidents = residents || [];
-
-      setEligibleResidents(femaleResidents);
-
-      // -------------------------------------------------
-      // GET PREGNANCY RECORDS
-      // -------------------------------------------------
-
-      const residentIds = femaleResidents.map((resident) => resident.id);
-
-      if (residentIds.length === 0) {
-        setPregnantWomen([]);
-        return;
-      }
-
-      const { data: pregnancyRecords, error: pregnancyError } = await supabase
-        .from("pregnant_women")
-        .select("*")
-        .in("resident_id", residentIds)
-        .order("created_at", {
-          ascending: false,
-        });
-
-      if (pregnancyError) throw pregnancyError;
-
-      // -------------------------------------------------
-      // MERGE RESIDENT + PREGNANCY RECORD
-      // -------------------------------------------------
-
-      const records = (pregnancyRecords || []).map((record) => {
-        const resident = femaleResidents.find(
-          (item) => item.id === record.resident_id,
-        );
-
-        return {
-          ...record,
-          resident,
-        };
-      });
-
-      setPregnantWomen(records);
-    } catch (error) {
-      console.error("Error loading pregnant women:", error);
-      alert(error.message || "Failed to load pregnant women.");
+    } catch (err) {
+      setOfflineError(err.message);
     } finally {
       setLoading(false);
     }
   };
+
+  const syncNow = async () => {
+    if (!user || !navigator.onLine || syncing) return;
+    setSyncing(true);
+    setOfflineError("");
+    try {
+      await syncPregnancyQueue(user.id);
+      applyCache(await refreshPregnancyCache(user.id));
+    } catch (err) {
+      setOfflineError(`Synchronization stopped: ${err.message}`);
+      applyCache(await getPregnancyCache(user.id));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!user) return;
+    loadData();
+    const onOnline = () => {
+      setOnline(true);
+      syncNow();
+    };
+    const onOffline = () => setOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [user?.id]);
+
+  // Completed pregnancy episodes remain in history, but do not block a new one.
+  // Cache records include pending offline registrations and deletions.
+  const ONGOING_STATUSES = ["active", "for_review", "high_risk", "referred"];
+  const isOngoing = (record) =>
+    ONGOING_STATUSES.includes(record.status || "active");
+  const availableWomen = useMemo(() => {
+    if (editingRecord) {
+      // Preserve the selected resident when editing an existing record.
+      return eligibleResidents.filter(
+        (resident) => String(resident.id) === String(editingRecord.resident_id),
+      );
+    }
+
+    const registeredIds = new Set(
+      pregnantWomen
+        .filter(isOngoing)
+        .map((record) => String(record.resident_id)),
+    );
+    return eligibleResidents.filter(
+      (resident) => !registeredIds.has(String(resident.id)),
+    );
+  }, [eligibleResidents, pregnantWomen, editingRecord]);
+
   // =====================================================
   // AUTOMATIC EDC CALCULATION
   // EDC = 9 calendar months after LMP
@@ -389,6 +299,22 @@ function BhwPregnantWomen() {
       return;
     }
 
+    // Guard against duplicate registrations even if the dropdown is stale.
+    // Includes offline pending registrations already reflected in the cache.
+    if (
+      !editingRecord &&
+      pregnantWomen.some(
+        (record) =>
+          String(record.resident_id) === String(form.resident_id) &&
+          isOngoing(record),
+      )
+    ) {
+      alert(
+        "This woman already has an ongoing pregnancy. Complete that episode before registering another.",
+      );
+      return;
+    }
+
     if (!form.date_of_registration) {
       alert("Please enter the registration date.");
       return;
@@ -396,7 +322,6 @@ function BhwPregnantWomen() {
 
     try {
       setSaving(true);
-
       const pregnancyData = {
         resident_id: Number(form.resident_id),
 
@@ -429,36 +354,17 @@ function BhwPregnantWomen() {
 
         facility_name: form.facility_name.trim() || null,
 
-        created_by: user.id,
+        ...(!editingRecord ? { status: "active", created_by: user.id } : {}),
 
         updated_at: new Date().toISOString(),
       };
 
-      if (editingRecord) {
-        const { error } = await supabase
-          .from("pregnant_women")
-          .update(pregnancyData)
-          .eq("id", editingRecord.id);
-
-        if (error) throw error;
-      } else {
-        const { error } = await supabase
-          .from("pregnant_women")
-          .insert(pregnancyData);
-
-        if (error) throw error;
-      }
-
+      await queuePregnancySave(user.id, editingRecord, pregnancyData);
       setShowModal(false);
       setEditingRecord(null);
-
-      await fetchPregnantWomen();
-
-      alert(
-        editingRecord
-          ? "Pregnancy record updated successfully."
-          : "Pregnancy registered successfully.",
-      );
+      applyCache(await getPregnancyCache(user.id));
+      if (navigator.onLine) await syncNow();
+      alert("Saved locally. Pending changes will synchronize when online.");
     } catch (error) {
       console.error("Error saving pregnancy:", error);
       alert(error.message || "Failed to save pregnancy record.");
@@ -481,19 +387,11 @@ function BhwPregnantWomen() {
     if (!confirmed) return;
 
     try {
-      const { error } = await supabase
-        .from("pregnant_women")
-        .delete()
-        .eq("id", record.id);
-
-      if (error) throw error;
-
-      await fetchPregnantWomen();
-
-      alert("Pregnancy record deleted successfully.");
+      await queuePregnancyDelete(user.id, record);
+      applyCache(await getPregnancyCache(user.id));
+      if (navigator.onLine) await syncNow();
     } catch (error) {
-      console.error("Error deleting pregnancy:", error);
-      alert(error.message || "Failed to delete pregnancy record.");
+      alert(error.message || "Failed to queue deletion.");
     }
   };
 
@@ -611,6 +509,30 @@ function BhwPregnantWomen() {
             <Plus size={18} />
             Register Pregnancy
           </button>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-3 text-sm">
+          <span
+            className={`inline-flex items-center gap-2 font-medium ${online ? "text-green-700" : "text-amber-700"}`}
+          >
+            {online ? <Wifi size={17} /> : <WifiOff size={17} />}
+            {online ? "Online" : "Offline"}
+          </span>
+          <span className="text-gray-600">
+            Pending changes: <strong>{pending}</strong>
+          </span>
+          <button
+            type="button"
+            onClick={syncNow}
+            disabled={!online || syncing}
+            className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-3 py-2 font-medium text-white disabled:opacity-50"
+          >
+            <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+            {syncing ? "Syncing..." : "Sync Now"}
+          </button>
+          {offlineError && (
+            <p className="w-full text-amber-700">{offlineError}</p>
+          )}
         </div>
 
         {/* =====================================================
@@ -924,8 +846,13 @@ function BhwPregnantWomen() {
                         "
                       >
                         <option value="">Select woman</option>
+                        {!editingRecord && availableWomen.length === 0 && (
+                          <option value="" disabled>
+                            No women available without an ongoing pregnancy
+                          </option>
+                        )}
 
-                        {eligibleResidents.map((resident) => (
+                        {availableWomen.map((resident) => (
                           <option key={resident.id} value={resident.id}>
                             {getFullName(resident)}
                             {" — "}

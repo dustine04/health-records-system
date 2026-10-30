@@ -6,7 +6,6 @@ import {
   HeartPulse,
   Loader2,
   MapPin,
-  Map as MapIcon,
   Check,
   X,
   ShieldCheck,
@@ -15,314 +14,390 @@ import {
   RefreshCw,
   UserCheck,
   UserX,
+  Wifi,
+  WifiOff,
+  Map as MapIcon,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
 
+import {
+  getWorkersSnapshot,
+  saveWorkersSnapshot,
+  getWorkerAreaSnapshot,
+  saveWorkerAreaSnapshot,
+  pendingWorkerActions,
+  queueWorkerAction,
+  syncWorkerActions,
+} from "../../lib/midwifeWorkersOffline";
+
+function getCurrentUser() {
+  try {
+    return JSON.parse(localStorage.getItem("user") || "null");
+  } catch {
+    return null;
+  }
+}
+
+function StatusBadge({ active }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${
+        active ? "bg-green-100 text-green-700" : "bg-red-100 text-red-700"
+      }`}
+    >
+      {active ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
+      {active ? "Active" : "Inactive"}
+    </span>
+  );
+}
+
 function Workers() {
+  const currentUser = getCurrentUser();
+
   const [workers, setWorkers] = useState([]);
   const [barangays, setBarangays] = useState([]);
+
   const [loading, setLoading] = useState(true);
-  const [loadingBarangays, setLoadingBarangays] = useState(true);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [syncing, setSyncing] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [notice, setNotice] = useState("");
+
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
 
   const [selectedWorker, setSelectedWorker] = useState(null);
+  const [areaModalOpen, setAreaModalOpen] = useState(false);
   const [localAreas, setLocalAreas] = useState([]);
   const [selectedAreas, setSelectedAreas] = useState([]);
   const [loadingAreas, setLoadingAreas] = useState(false);
   const [savingAreas, setSavingAreas] = useState(false);
-  const [areaModalOpen, setAreaModalOpen] = useState(false);
 
   const [updatingWorkerId, setUpdatingWorkerId] = useState(null);
 
-  const getCurrentUser = () => {
-    try {
-      return JSON.parse(localStorage.getItem("user") || "null");
-    } catch (error) {
-      console.error("Unable to read logged-in user:", error);
-      return null;
-    }
-  };
+  const validUser =
+    currentUser?.id &&
+    currentUser?.role === "midwife" &&
+    currentUser?.district_id;
 
-  const currentUser = getCurrentUser();
+  const updatePending = useCallback(async () => {
+    const user = getCurrentUser();
+    if (!user?.id || !user.district_id) return;
+
+    try {
+      const actions = await pendingWorkerActions(user);
+      setPendingCount(actions.length);
+    } catch (error) {
+      console.error("Pending action count:", error);
+    }
+  }, []);
 
   const fetchWorkers = useCallback(async () => {
     const user = getCurrentUser();
 
-    if (!user?.id || user.role !== "midwife") {
+    if (!user?.id || user.role !== "midwife" || !user.district_id) {
       setWorkers([]);
       setBarangays([]);
       setLoading(false);
-      setLoadingBarangays(false);
-      alert("Please sign in again using your midwife account.");
-      return;
-    }
-
-    if (!user.district_id) {
-      setWorkers([]);
-      setBarangays([]);
-      setLoading(false);
-      setLoadingBarangays(false);
-      alert("Your midwife account does not have a district assigned.");
+      setNotice("A Midwife account with an assigned district is required.");
       return;
     }
 
     setLoading(true);
-    setLoadingBarangays(true);
+
+    let cached = null;
 
     try {
+      cached = await getWorkersSnapshot(user);
+
+      if (cached) {
+        setWorkers(cached.workers || []);
+        setBarangays(cached.barangays || []);
+        setNotice(
+          `Showing cached directory from ${new Date(
+            cached.cachedAt,
+          ).toLocaleString()}.`,
+        );
+      }
+
+      if (!navigator.onLine) {
+        if (!cached) {
+          setNotice(
+            "No offline directory is available. Connect to the internet to load workers.",
+          );
+        }
+        return;
+      }
+
       const { data: districtBarangays, error: barangayError } = await supabase
         .from("barangays")
         .select("id, name, district_id")
         .eq("district_id", user.district_id)
-        .order("name", { ascending: true });
+        .order("name");
 
       if (barangayError) throw barangayError;
 
-      const validBarangays = districtBarangays || [];
-      setBarangays(validBarangays);
+      const allowedBarangays = districtBarangays || [];
+      const barangayIds = allowedBarangays.map((b) => b.id);
 
-      const barangayIds = validBarangays.map((barangay) => barangay.id);
+      let workerData = [];
 
-      if (barangayIds.length === 0) {
-        setWorkers([]);
-        return;
+      if (barangayIds.length > 0) {
+        const { data, error } = await supabase
+          .from("users")
+          .select(
+            `
+            id,
+            first_name,
+            middle_name,
+            last_name,
+            email,
+            username,
+            role,
+            district_id,
+            barangay_id,
+            is_active,
+            created_at,
+            barangays (
+              id,
+              name,
+              district_id
+            )
+          `,
+          )
+          .in("role", ["bns", "bhw"])
+          .in("barangay_id", barangayIds)
+          .order("created_at", { ascending: false });
+
+        if (error) throw error;
+
+        workerData = data || [];
       }
 
-      // Show registered BNS/BHW accounts whose barangays are in this
-      // midwife's district, including accounts that are still inactive.
-      const { data, error } = await supabase
-        .from("users")
-        .select(
-          `
-          id,
-          first_name,
-          middle_name,
-          last_name,
-          email,
-          username,
-          role,
-          district_id,
-          barangay_id,
-          is_active,
-          created_at,
-          barangays (
-            id,
-            name,
-            district_id
-          )
-        `,
-        )
-        .in("role", ["bns", "bhw"])
-        .in("barangay_id", barangayIds)
-        .order("created_at", { ascending: false });
+      setWorkers(workerData);
+      setBarangays(allowedBarangays);
 
-      if (error) throw error;
+      await saveWorkersSnapshot(user, {
+        workers: workerData,
+        barangays: allowedBarangays,
+      });
 
-      setWorkers(data || []);
+      setNotice("");
     } catch (error) {
-      console.error("Error loading district workers:", error);
-      alert(error.message || "Failed to load workers for your district.");
-      setWorkers([]);
+      console.error("Worker directory:", error);
+
+      setNotice(
+        cached
+          ? `Unable to refresh. Showing cached records. ${error.message}`
+          : `Unable to load workers: ${error.message}`,
+      );
+
+      if (!cached) {
+        setWorkers([]);
+        setBarangays([]);
+      }
     } finally {
       setLoading(false);
-      setLoadingBarangays(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchWorkers();
-  }, [fetchWorkers]);
-
-  // Activate or deactivate a BNS/BHW only if the account's current
-  // barangay still belongs to this midwife's district.
-  const toggleWorkerStatus = async (worker) => {
+  const syncNow = useCallback(async () => {
     const user = getCurrentUser();
 
     if (!user?.id || user.role !== "midwife" || !user.district_id) {
-      alert("Please sign in again using your midwife account.");
       return;
     }
 
-    if (!["bns", "bhw"].includes(worker.role)) {
-      alert("You can only manage BNS and BHW accounts.");
+    if (!navigator.onLine) {
+      setNotice("Offline. Your changes remain queued.");
       return;
     }
 
-    if (updatingWorkerId !== null) return;
+    setSyncing(true);
 
-    const activating = worker.is_active === false;
-    const action = activating ? "activate" : "deactivate";
+    try {
+      const count = await syncWorkerActions(user);
 
-    const confirmed = window.confirm(
-      `Are you sure you want to ${action} the account of ${worker.first_name} ${worker.last_name}?`,
+      await updatePending();
+      await fetchWorkers();
+
+      setNotice(
+        count > 0
+          ? `${count} change(s) synchronized successfully.`
+          : "Synchronization complete. No pending changes.",
+      );
+    } catch (error) {
+      await updatePending();
+
+      setNotice(
+        `Synchronization stopped: ${error.message}. Pending changes remain on this device.`,
+      );
+    } finally {
+      setSyncing(false);
+    }
+  }, [fetchWorkers, updatePending]);
+
+  useEffect(() => {
+    fetchWorkers();
+    updatePending();
+  }, [fetchWorkers, updatePending]);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setOnline(true);
+      syncNow();
+    };
+
+    const handleOffline = () => {
+      setOnline(false);
+      setNotice("Offline mode. Changes will be queued.");
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [syncNow]);
+
+  const toggleWorkerStatus = async (worker) => {
+    const user = getCurrentUser();
+
+    if (!validUser || updatingWorkerId !== null) return;
+
+    const allowed = barangays.some(
+      (b) => String(b.id) === String(worker.barangay_id),
     );
 
-    if (!confirmed) return;
+    if (!allowed || !["bns", "bhw"].includes(worker.role)) {
+      alert("You can only manage BNS/BHW workers in your district.");
+      return;
+    }
+
+    const currentlyActive = worker.is_active !== false;
+    const newStatus = !currentlyActive;
+
+    const action = newStatus ? "activate" : "deactivate";
+
+    if (
+      !window.confirm(
+        `Queue request to ${action} ${worker.first_name} ${worker.last_name}?`,
+      )
+    ) {
+      return;
+    }
 
     setUpdatingWorkerId(worker.id);
 
     try {
-      // Recheck the worker's current database record before changing status.
-      const { data: latestWorker, error: latestError } = await supabase
-        .from("users")
-        .select(
-          `
-          id,
-          role,
-          barangay_id,
-          is_active,
-          barangays (
-            id,
-            district_id
-          )
-        `,
-        )
-        .eq("id", worker.id)
-        .maybeSingle();
+      const queued = await pendingWorkerActions(user);
 
-      if (latestError) throw latestError;
-
-      if (!latestWorker) {
-        throw new Error("This worker account could not be found.");
-      }
-
-      if (!["bns", "bhw"].includes(latestWorker.role)) {
-        throw new Error("Only BNS and BHW accounts can be managed here.");
-      }
-
-      if (
-        !latestWorker.barangays ||
-        String(latestWorker.barangays.district_id) !== String(user.district_id)
-      ) {
+      if (queued.some((item) => String(item.workerId) === String(worker.id))) {
         throw new Error(
-          "You cannot change the status of a worker outside your district.",
+          "This worker already has a pending change. Synchronize it before making another change.",
         );
       }
 
-      // Avoid changing a status that another administrator already changed.
-      if (latestWorker.is_active !== worker.is_active) {
-        await fetchWorkers();
-        throw new Error(
-          "This worker's status has changed. The directory has been refreshed; please try again.",
-        );
-      }
+      await queueWorkerAction(user, {
+        type: "status",
+        workerId: worker.id,
+        active: newStatus,
+        expectedActive: currentlyActive,
+      });
 
-      const newStatus = activating;
+      await updatePending();
 
-      const { data: updatedWorker, error: updateError } = await supabase
-        .from("users")
-        .update({ is_active: newStatus })
-        .eq("id", worker.id)
-        .eq("is_active", worker.is_active)
-        .select("id, is_active")
-        .maybeSingle();
-
-      if (updateError) throw updateError;
-
-      if (!updatedWorker) {
-        throw new Error(
-          "The account status was not changed. Check your permissions and refresh the directory.",
-        );
-      }
-
-      // Deactivating an account also disables its active area assignments.
-      // If reactivated later, the midwife can assign areas again.
-      if (!newStatus) {
-        const { error: assignmentError } = await supabase
-          .from("worker_area_assignments")
-          .update({ is_active: false })
-          .eq("worker_id", worker.id)
-          .eq("is_active", true);
-
-        if (assignmentError) {
-          console.error(
-            "Account deactivated, but area assignments could not be disabled:",
-            assignmentError,
-          );
-
-          alert(
-            "The account was deactivated, but its area assignments could not be disabled. Please check your database permissions and assignment records.",
-          );
-        } else {
-          alert("Worker account deactivated successfully.");
-        }
+      if (navigator.onLine) {
+        await syncNow();
       } else {
-        alert(
-          "Worker account activated successfully. You can now assign Purok/Sitio areas to this worker.",
+        setNotice(
+          `${action} request saved offline. The account remains unchanged until synchronization succeeds.`,
         );
       }
-
-      await fetchWorkers();
     } catch (error) {
-      console.error("Error changing worker account status:", error);
-      alert(error.message || `Failed to ${action} worker account.`);
+      alert(error.message || "Unable to queue account change.");
     } finally {
       setUpdatingWorkerId(null);
     }
   };
 
-  const fetchWorkerAssignments = async (workerId) => {
-    const { data, error } = await supabase
-      .from("worker_area_assignments")
-      .select("id, local_area_id, is_active")
-      .eq("worker_id", workerId)
-      .eq("is_active", true);
-
-    if (error) throw error;
-
-    return (data || []).map((item) => Number(item.local_area_id));
-  };
-
   const openAssignmentModal = async (worker) => {
+    const user = getCurrentUser();
+
+    if (!validUser) return;
+
     if (worker.is_active === false) {
-      alert("Activate this worker's account before assigning areas.");
+      alert("Activate this worker before assigning areas.");
       return;
     }
 
-    const allowedBarangay = barangays.some(
-      (barangay) => String(barangay.id) === String(worker.barangay_id),
-    );
-
-    if (!allowedBarangay) {
-      alert(
-        "You can only assign areas to workers whose barangay belongs to your district.",
-      );
+    if (!barangays.some((b) => String(b.id) === String(worker.barangay_id))) {
+      alert("This worker is outside your district.");
       return;
     }
 
     setSelectedWorker(worker);
-    setSelectedAreas([]);
-    setLocalAreas([]);
     setAreaModalOpen(true);
+    setLocalAreas([]);
+    setSelectedAreas([]);
     setLoadingAreas(true);
 
     try {
-      const [areasResult, assignedIds] = await Promise.all([
+      const cached = await getWorkerAreaSnapshot(user, worker.id);
+
+      if (cached) {
+        setLocalAreas(cached.areas || []);
+        setSelectedAreas(cached.assignedIds || []);
+      }
+
+      if (!navigator.onLine) {
+        if (!cached) {
+          setNotice(
+            "Open this worker's assignments online at least once before editing offline.",
+          );
+        }
+        return;
+      }
+
+      const [areasResult, assignmentsResult] = await Promise.all([
         supabase
           .from("local_areas")
           .select("id, name, type, barangay_id")
           .eq("barangay_id", worker.barangay_id)
-          .order("type", { ascending: true })
-          .order("name", { ascending: true }),
-        fetchWorkerAssignments(worker.id),
+          .order("name"),
+
+        supabase
+          .from("worker_area_assignments")
+          .select("id, local_area_id, is_active")
+          .eq("worker_id", worker.id)
+          .eq("is_active", true),
       ]);
 
       if (areasResult.error) throw areasResult.error;
+      if (assignmentsResult.error) throw assignmentsResult.error;
 
-      setLocalAreas(areasResult.data || []);
+      const areas = areasResult.data || [];
 
-      const availableIds = new Set(
-        (areasResult.data || []).map((area) => Number(area.id)),
-      );
+      const allowedIds = new Set(areas.map((area) => String(area.id)));
 
-      setSelectedAreas(assignedIds.filter((id) => availableIds.has(id)));
+      const assignedIds = (assignmentsResult.data || [])
+        .map((row) => Number(row.local_area_id))
+        .filter((id) => allowedIds.has(String(id)));
+
+      setLocalAreas(areas);
+      setSelectedAreas(assignedIds);
+
+      await saveWorkerAreaSnapshot(user, worker.id, {
+        areas,
+        assignedIds,
+      });
     } catch (error) {
-      console.error("Error opening worker area assignments:", error);
-      alert(error.message || "Failed to load this worker's area assignments.");
+      setNotice(`Unable to refresh assignments: ${error.message}`);
     } finally {
       setLoadingAreas(false);
     }
@@ -338,201 +413,91 @@ function Workers() {
   };
 
   const toggleArea = (areaId) => {
-    const normalizedId = Number(areaId);
+    const id = Number(areaId);
 
-    setSelectedAreas((current) =>
-      current.includes(normalizedId)
-        ? current.filter((id) => id !== normalizedId)
-        : [...current, normalizedId],
+    setSelectedAreas((previous) =>
+      previous.includes(id)
+        ? previous.filter((item) => item !== id)
+        : [...previous, id],
     );
   };
 
   const saveAreaAssignments = async (event) => {
     event.preventDefault();
 
-    if (!selectedWorker) return;
-
     const user = getCurrentUser();
 
-    if (!user?.id || user.role !== "midwife" || !user.district_id) {
-      alert("Please sign in again using your midwife account.");
-      return;
-    }
-
-    const workerStillInDistrict = barangays.some(
-      (barangay) => String(barangay.id) === String(selectedWorker.barangay_id),
-    );
-
-    if (!workerStillInDistrict) {
-      alert("This worker's barangay is not within your assigned district.");
-      return;
-    }
-
-    // Recheck the account before saving assignments.
-    const { data: latestWorker, error: workerCheckError } = await supabase
-      .from("users")
-      .select("id, role, is_active, barangay_id, barangays(id, district_id)")
-      .eq("id", selectedWorker.id)
-      .maybeSingle();
-
-    if (workerCheckError) {
-      alert(workerCheckError.message);
-      return;
-    }
+    if (!validUser || !selectedWorker) return;
 
     if (
-      !latestWorker ||
-      !["bns", "bhw"].includes(latestWorker.role) ||
-      latestWorker.is_active !== true ||
-      String(latestWorker.barangays?.district_id) !== String(user.district_id)
+      !barangays.some(
+        (b) => String(b.id) === String(selectedWorker.barangay_id),
+      )
     ) {
-      alert(
-        "This worker is inactive or no longer belongs to your district. Refresh the directory and try again.",
-      );
-      closeAssignmentModal();
-      await fetchWorkers();
+      alert("Worker is outside your district.");
       return;
     }
 
-    const allowedAreaIds = new Set(localAreas.map((area) => Number(area.id)));
+    const allowedIds = new Set(localAreas.map((area) => String(area.id)));
 
-    if (selectedAreas.some((id) => !allowedAreaIds.has(Number(id)))) {
-      alert(
-        "One or more selected areas do not belong to this worker's barangay. Please refresh and try again.",
-      );
+    if (selectedAreas.some((id) => !allowedIds.has(String(id)))) {
+      alert("Invalid Purok/Sitio selection.");
       return;
     }
 
     setSavingAreas(true);
 
     try {
-      const { data: existingAssignments, error: existingError } = await supabase
-        .from("worker_area_assignments")
-        .select("id, local_area_id")
-        .eq("worker_id", selectedWorker.id);
+      const queued = await pendingWorkerActions(user);
 
-      if (existingError) throw existingError;
-
-      const { error: deactivateError } = await supabase
-        .from("worker_area_assignments")
-        .update({ is_active: false })
-        .eq("worker_id", selectedWorker.id);
-
-      if (deactivateError) throw deactivateError;
-
-      const existingByArea = new Map(
-        (existingAssignments || []).map((assignment) => [
-          Number(assignment.local_area_id),
-          assignment.id,
-        ]),
-      );
-
-      for (const areaId of selectedAreas) {
-        const existingId = existingByArea.get(Number(areaId));
-
-        if (existingId) {
-          const { error } = await supabase
-            .from("worker_area_assignments")
-            .update({
-              is_active: true,
-              assigned_by: user.id,
-              assigned_at: new Date().toISOString(),
-            })
-            .eq("id", existingId);
-
-          if (error) throw error;
-        } else {
-          const { error } = await supabase
-            .from("worker_area_assignments")
-            .insert({
-              worker_id: selectedWorker.id,
-              local_area_id: areaId,
-              assigned_by: user.id,
-              is_active: true,
-            });
-
-          if (error) throw error;
-        }
+      if (
+        queued.some(
+          (item) => String(item.workerId) === String(selectedWorker.id),
+        )
+      ) {
+        throw new Error(
+          "This worker already has a pending change. Synchronize it before assigning areas again.",
+        );
       }
 
-      alert("Worker area assignments saved successfully.");
-      closeAssignmentModal();
+      await queueWorkerAction(user, {
+        type: "areas",
+        workerId: selectedWorker.id,
+        areaIds: selectedAreas.map(Number),
+      });
+
+      await updatePending();
+
+      setAreaModalOpen(false);
+      setSelectedWorker(null);
+
+      if (navigator.onLine) {
+        await syncNow();
+      } else {
+        setNotice(
+          "Area assignments saved offline. They will take effect after successful synchronization.",
+        );
+      }
     } catch (error) {
-      console.error("Error saving worker area assignments:", error);
-      alert(error.message || "Failed to save area assignments.");
+      alert(error.message || "Unable to queue assignments.");
     } finally {
       setSavingAreas(false);
     }
   };
 
-  const getRoleInfo = (role) => {
-    if (role === "bns") {
-      return {
-        label: "BNS",
-        fullLabel: "Barangay Nutrition Scholar",
-        className: "bg-green-50 text-green-700",
-        icon: HeartPulse,
-      };
-    }
-
-    return {
-      label: "BHW",
-      fullLabel: "Barangay Health Worker",
-      className: "bg-orange-50 text-orange-700",
-      icon: Baby,
-    };
-  };
-
-  const StatusBadge = ({ active }) => (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${
-        active ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"
-      }`}
-    >
-      {active ? <ShieldCheck size={14} /> : <ShieldAlert size={14} />}
-      {active ? "Active" : "Inactive"}
-    </span>
-  );
-
-  const WorkerStatusButton = ({ worker }) => {
-    const active = worker.is_active !== false;
-    const updating = String(updatingWorkerId) === String(worker.id);
-
-    return (
-      <button
-        type="button"
-        onClick={() => toggleWorkerStatus(worker)}
-        disabled={updating || updatingWorkerId !== null}
-        className={`inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
-          active
-            ? "border border-red-200 bg-white text-red-700 hover:bg-red-50"
-            : "bg-green-600 text-white hover:bg-green-700"
-        }`}
-        title={active ? "Deactivate worker account" : "Activate worker account"}
-      >
-        {updating ? (
-          <Loader2 size={15} className="animate-spin" />
-        ) : active ? (
-          <UserX size={15} />
-        ) : (
-          <UserCheck size={15} />
-        )}
-        {updating ? "Updating..." : active ? "Deactivate" : "Activate"}
-      </button>
-    );
-  };
-
   const filteredWorkers = workers.filter((worker) => {
-    const fullName =
-      `${worker.first_name || ""} ${worker.middle_name || ""} ${worker.last_name || ""}`.toLowerCase();
+    const name = [worker.first_name, worker.middle_name, worker.last_name]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
 
-    const searchValue = search.toLowerCase();
+    const query = search.toLowerCase().trim();
 
     const matchesSearch =
-      fullName.includes(searchValue) ||
-      (worker.email || "").toLowerCase().includes(searchValue) ||
-      (worker.username || "").toLowerCase().includes(searchValue) ||
-      (worker.barangays?.name || "").toLowerCase().includes(searchValue);
+      name.includes(query) ||
+      (worker.username || "").toLowerCase().includes(query) ||
+      (worker.email || "").toLowerCase().includes(query) ||
+      (worker.barangays?.name || "").toLowerCase().includes(query);
 
     const matchesRole = roleFilter === "all" || worker.role === roleFilter;
 
@@ -556,209 +521,202 @@ function Workers() {
 
   const bhwCount = workers.filter((worker) => worker.role === "bhw").length;
 
+  const roleInfo = (role) =>
+    role === "bns"
+      ? {
+          label: "BNS",
+          Icon: HeartPulse,
+          color: "bg-green-50 text-green-700",
+        }
+      : {
+          label: "BHW",
+          Icon: Baby,
+          color: "bg-orange-50 text-orange-700",
+        };
+
+  if (!validUser) {
+    return (
+      <DashboardLayout>
+        <div className="rounded-xl bg-white p-8 text-red-600">
+          Please sign in with a Midwife account assigned to a district.
+        </div>
+      </DashboardLayout>
+    );
+  }
+
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        {/* HEADER */}
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <h2 className="text-2xl font-bold text-gray-800 sm:text-3xl">
+            <h2 className="text-2xl font-bold text-gray-800">
               BNS &amp; BHW Directory
             </h2>
 
             <p className="mt-1 text-gray-500">
-              Review registrations, activate workers in your district, and
-              assign their Purok/Sitio areas.
+              Manage workers and Purok/Sitio assignments in your district.
             </p>
 
             <p className="mt-1 text-sm text-blue-700">
-              District:{" "}
-              {currentUser?.district_id
-                ? `District ID ${currentUser.district_id}`
-                : "Not assigned"}
+              District ID: {currentUser.district_id}
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={fetchWorkers}
-            disabled={loading || updatingWorkerId !== null}
-            className="inline-flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50 disabled:opacity-50"
-          >
-            <RefreshCw size={17} className={loading ? "animate-spin" : ""} />
-            Refresh List
-          </button>
-        </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`flex items-center gap-2 rounded-lg px-3 py-2 text-sm ${
+                online
+                  ? "bg-green-50 text-green-700"
+                  : "bg-amber-50 text-amber-700"
+              }`}
+            >
+              {online ? <Wifi size={16} /> : <WifiOff size={16} />}
+              {online ? "Online" : "Offline"}
+            </span>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {[
-            {
-              label: "Total Workers",
-              value: workers.length,
-              icon: UserRound,
-              color: "blue",
-            },
-            {
-              label: "BNS",
-              value: bnsCount,
-              icon: HeartPulse,
-              color: "green",
-            },
-            {
-              label: "BHW",
-              value: bhwCount,
-              icon: Baby,
-              color: "orange",
-            },
-            {
-              label: "Inactive Workers",
-              value: inactiveCount,
-              icon: ShieldAlert,
-              color: "red",
-            },
-          ].map((item) => {
-            const Icon = item.icon;
+            <span className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {pendingCount} pending
+            </span>
 
-            const colorClasses = {
-              blue: "bg-blue-50 text-blue-600",
-              green: "bg-green-50 text-green-600",
-              orange: "bg-orange-50 text-orange-600",
-              red: "bg-red-50 text-red-600",
-            };
+            <button
+              type="button"
+              onClick={syncNow}
+              disabled={!online || syncing}
+              className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {syncing ? "Syncing..." : "Sync Now"}
+            </button>
 
-            return (
-              <div
-                key={item.label}
-                className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm"
-              >
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`flex h-11 w-11 items-center justify-center rounded-lg ${colorClasses[item.color]}`}
-                  >
-                    <Icon size={21} />
-                  </div>
-
-                  <div>
-                    <p className="text-sm text-gray-500">{item.label}</p>
-                    <p className="text-2xl font-bold text-gray-800">
-                      {item.value}
-                    </p>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
-          <div className="border-b border-gray-200 p-4 sm:p-5">
-            <div className="flex flex-col gap-3 md:flex-row">
-              <div className="relative flex-1">
-                <Search
-                  size={18}
-                  className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-                />
-
-                <input
-                  type="text"
-                  placeholder="Search by name, username, email, or barangay..."
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-4 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-
-              <select
-                value={roleFilter}
-                onChange={(event) => setRoleFilter(event.target.value)}
-                className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="all">All Roles</option>
-                <option value="bns">BNS</option>
-                <option value="bhw">BHW</option>
-              </select>
-
-              <select
-                value={statusFilter}
-                onChange={(event) => setStatusFilter(event.target.value)}
-                className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="all">All Statuses</option>
-                <option value="active">Active Only</option>
-                <option value="inactive">Inactive Only</option>
-              </select>
-            </div>
+            <button
+              type="button"
+              onClick={fetchWorkers}
+              disabled={loading || syncing}
+              className="flex items-center gap-2 rounded-lg border bg-white px-4 py-2.5 text-sm font-medium disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+              Refresh
+            </button>
           </div>
+        </div>
 
-          {/* Desktop table */}
-          <div className="hidden overflow-x-auto md:block">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-gray-200 bg-gray-50">
-                  {["Worker", "Barangay", "Role", "Status", "Actions"].map(
-                    (heading) => (
-                      <th
-                        key={heading}
-                        className="px-5 py-4 text-left text-xs font-semibold uppercase text-gray-500"
-                      >
-                        {heading}
-                      </th>
-                    ),
-                  )}
-                </tr>
-              </thead>
+        {/* NOTICE */}
+        {notice && (
+          <div className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+            {notice}
+          </div>
+        )}
 
-              <tbody className="divide-y divide-gray-100">
-                {loading || loadingBarangays ? (
+        {/* STATISTICS */}
+        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+          {[
+            { label: "Total Workers", value: workers.length },
+            { label: "BNS", value: bnsCount },
+            { label: "BHW", value: bhwCount },
+            { label: "Inactive", value: inactiveCount },
+          ].map((item) => (
+            <div
+              key={item.label}
+              className="rounded-xl border bg-white p-5 shadow-sm"
+            >
+              <p className="text-sm text-gray-500">{item.label}</p>
+              <p className="mt-2 text-3xl font-bold text-gray-800">
+                {item.value}
+              </p>
+            </div>
+          ))}
+        </div>
+
+        {/* FILTERS */}
+        <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-3 md:flex-row">
+            <div className="relative flex-1">
+              <Search
+                size={18}
+                className="absolute left-3 top-3 text-gray-400"
+              />
+
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search worker, username, email, barangay..."
+                className="w-full rounded-lg border px-4 py-2.5 pl-10 outline-none focus:border-blue-500"
+              />
+            </div>
+
+            <select
+              value={roleFilter}
+              onChange={(e) => setRoleFilter(e.target.value)}
+              className="rounded-lg border bg-white px-4 py-2.5"
+            >
+              <option value="all">All Roles</option>
+              <option value="bns">BNS</option>
+              <option value="bhw">BHW</option>
+            </select>
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="rounded-lg border bg-white px-4 py-2.5"
+            >
+              <option value="all">All Statuses</option>
+              <option value="active">Active</option>
+              <option value="inactive">Inactive</option>
+            </select>
+          </div>
+        </div>
+
+        {/* WORKER DIRECTORY */}
+        <div className="overflow-hidden rounded-xl border bg-white shadow-sm">
+          {loading && workers.length === 0 ? (
+            <div className="flex items-center justify-center gap-3 p-12 text-gray-500">
+              <Loader2 className="animate-spin" />
+              Loading workers...
+            </div>
+          ) : filteredWorkers.length === 0 ? (
+            <div className="p-12 text-center text-gray-500">
+              No BNS/BHW workers found.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-gray-50 text-left text-gray-600">
                   <tr>
-                    <td colSpan={5} className="py-12 text-center">
-                      <Loader2
-                        className="mx-auto animate-spin text-blue-600"
-                        size={28}
-                      />
-                      <p className="mt-3 text-sm text-gray-500">
-                        Loading district workers...
-                      </p>
-                    </td>
+                    <th className="px-5 py-4">Worker</th>
+                    <th className="px-5 py-4">Barangay</th>
+                    <th className="px-5 py-4">Role</th>
+                    <th className="px-5 py-4">Status</th>
+                    <th className="px-5 py-4">Actions</th>
                   </tr>
-                ) : filteredWorkers.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="py-12 text-center">
-                      <UserRound size={25} className="mx-auto text-gray-400" />
-                      <p className="mt-3 text-sm text-gray-500">
-                        No registered BNS/BHW workers found in your district.
-                      </p>
-                    </td>
-                  </tr>
-                ) : (
-                  filteredWorkers.map((worker) => {
-                    const role = getRoleInfo(worker.role);
-                    const RoleIcon = role.icon;
+                </thead>
+
+                <tbody className="divide-y">
+                  {filteredWorkers.map((worker) => {
                     const active = worker.is_active !== false;
+                    const role = roleInfo(worker.role);
+                    const RoleIcon = role.Icon;
 
                     return (
-                      <tr
-                        key={worker.id}
-                        className={`transition hover:bg-gray-50 ${
-                          !active ? "bg-gray-50/70" : ""
-                        }`}
-                      >
+                      <tr key={worker.id} className="hover:bg-gray-50">
                         <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-blue-50">
-                              <UserRound size={19} className="text-blue-600" />
+                            <div className="rounded-full bg-blue-50 p-2 text-blue-600">
+                              <UserRound size={20} />
                             </div>
 
                             <div>
-                              <p className="font-medium text-gray-800">
-                                {worker.first_name}{" "}
-                                {worker.middle_name
-                                  ? `${worker.middle_name} `
-                                  : ""}
-                                {worker.last_name}
+                              <p className="font-semibold text-gray-800">
+                                {[
+                                  worker.first_name,
+                                  worker.middle_name,
+                                  worker.last_name,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")}
                               </p>
 
-                              <p className="text-xs text-gray-400">
-                                @{worker.username || "No username"}
+                              <p className="text-xs text-gray-500">
+                                @{worker.username}
                               </p>
 
                               <p className="text-xs text-gray-400">
@@ -768,19 +726,16 @@ function Workers() {
                           </div>
                         </td>
 
-                        <td className="px-5 py-4">
-                          <div className="flex items-center gap-2">
-                            <MapPin size={15} className="text-gray-400" />
-                            <span className="text-sm text-gray-600">
-                              {worker.barangays?.name || "Not assigned"}
-                            </span>
-                          </div>
+                        <td className="px-5 py-4 text-gray-600">
+                          <span className="flex items-center gap-2">
+                            <MapPin size={15} />
+                            {worker.barangays?.name || "Not assigned"}
+                          </span>
                         </td>
 
                         <td className="px-5 py-4">
                           <span
-                            title={role.fullLabel}
-                            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${role.className}`}
+                            className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${role.color}`}
                           >
                             <RoleIcon size={14} />
                             {role.label}
@@ -792,16 +747,31 @@ function Workers() {
                         </td>
 
                         <td className="px-5 py-4">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <WorkerStatusButton worker={worker} />
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => toggleWorkerStatus(worker)}
+                              disabled={updatingWorkerId !== null || syncing}
+                              className={`inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:opacity-50 ${
+                                active
+                                  ? "bg-red-600 hover:bg-red-700"
+                                  : "bg-green-600 hover:bg-green-700"
+                              }`}
+                            >
+                              {active ? (
+                                <UserX size={15} />
+                              ) : (
+                                <UserCheck size={15} />
+                              )}
+                              {active ? "Deactivate" : "Activate"}
+                            </button>
 
                             {active && (
                               <button
                                 type="button"
                                 onClick={() => openAssignmentModal(worker)}
-                                disabled={updatingWorkerId !== null}
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 transition hover:bg-blue-100 disabled:opacity-50"
-                                title="Assign Purok/Sitio areas"
+                                disabled={syncing}
+                                className="inline-flex items-center gap-2 rounded-lg bg-blue-50 px-3 py-2 text-xs font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50"
                               >
                                 <MapIcon size={15} />
                                 Assign Areas
@@ -811,113 +781,29 @@ function Workers() {
                         </td>
                       </tr>
                     );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Mobile cards */}
-          <div className="divide-y divide-gray-100 md:hidden">
-            {loading || loadingBarangays ? (
-              <div className="py-12 text-center">
-                <Loader2
-                  className="mx-auto animate-spin text-blue-600"
-                  size={28}
-                />
-                <p className="mt-3 text-sm text-gray-500">
-                  Loading district workers...
-                </p>
-              </div>
-            ) : filteredWorkers.length === 0 ? (
-              <div className="py-12 text-center text-sm text-gray-500">
-                No registered BNS/BHW workers found in your district.
-              </div>
-            ) : (
-              filteredWorkers.map((worker) => {
-                const role = getRoleInfo(worker.role);
-                const RoleIcon = role.icon;
-                const active = worker.is_active !== false;
-
-                return (
-                  <div
-                    key={worker.id}
-                    className={`p-4 ${!active ? "bg-gray-50" : ""}`}
-                  >
-                    <div className="flex items-start gap-3">
-                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-blue-50">
-                        <UserRound size={19} className="text-blue-600" />
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <p className="font-medium text-gray-800">
-                          {worker.first_name}{" "}
-                          {worker.middle_name ? `${worker.middle_name} ` : ""}
-                          {worker.last_name}
-                        </p>
-
-                        <p className="mt-1 text-sm text-gray-500">
-                          {worker.barangays?.name || "Not assigned"}
-                        </p>
-
-                        <p className="mt-1 text-xs text-gray-400">
-                          @{worker.username || "No username"}
-                        </p>
-
-                        <p className="text-xs text-gray-400">
-                          {worker.email || "No email"}
-                        </p>
-
-                        <div className="mt-2 flex flex-wrap items-center gap-2">
-                          <span
-                            title={role.fullLabel}
-                            className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${role.className}`}
-                          >
-                            <RoleIcon size={14} />
-                            {role.label}
-                          </span>
-
-                          <StatusBadge active={active} />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-                      <div className="flex-1">
-                        <WorkerStatusButton worker={worker} />
-                      </div>
-
-                      {active && (
-                        <button
-                          type="button"
-                          onClick={() => openAssignmentModal(worker)}
-                          disabled={updatingWorkerId !== null}
-                          className="inline-flex flex-1 items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                        >
-                          <MapIcon size={16} />
-                          Assign Purok/Sitio Areas
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
-        {/* Purok/Sitio assignment modal */}
+        {/* AREA ASSIGNMENT MODAL */}
         {areaModalOpen && selectedWorker && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
             <div className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-white shadow-xl">
-              <div className="flex items-center justify-between border-b border-gray-200 px-6 py-5">
+              <div className="flex items-center justify-between border-b p-5">
                 <div>
-                  <h3 className="text-lg font-semibold text-gray-800">
-                    Assign Purok / Sitio Areas
+                  <h3 className="text-lg font-bold text-gray-800">
+                    Assign Purok / Sitio
                   </h3>
-                  <p className="mt-1 text-sm text-gray-500">
-                    {selectedWorker.first_name} {selectedWorker.last_name} ·{" "}
-                    {selectedWorker.barangays?.name || "Barangay"}
+
+                  <p className="text-sm text-gray-500">
+                    {selectedWorker.first_name} {selectedWorker.last_name}
+                  </p>
+
+                  <p className="text-xs text-gray-400">
+                    {selectedWorker.barangays?.name}
                   </p>
                 </div>
 
@@ -925,120 +811,88 @@ function Workers() {
                   type="button"
                   onClick={closeAssignmentModal}
                   disabled={savingAreas}
-                  className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 disabled:opacity-50"
-                  aria-label="Close assignment dialog"
+                  className="rounded-lg p-2 hover:bg-gray-100"
                 >
                   <X size={20} />
                 </button>
               </div>
 
-              <form onSubmit={saveAreaAssignments} className="space-y-5 p-6">
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-700">
-                        Available areas
-                      </p>
-                      <p className="mt-0.5 text-xs text-gray-400">
-                        Only areas in this worker's registered barangay are
-                        shown.
-                      </p>
-                    </div>
+              <form onSubmit={saveAreaAssignments} className="space-y-5 p-5">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm font-semibold text-gray-700">
+                    Available Areas
+                  </p>
 
-                    <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-medium text-blue-600">
-                      {selectedAreas.length} selected
-                    </span>
-                  </div>
-
-                  {loadingAreas ? (
-                    <div className="flex items-center justify-center rounded-lg border border-gray-200 p-8">
-                      <Loader2
-                        size={20}
-                        className="animate-spin text-blue-600"
-                      />
-                      <span className="ml-2 text-sm text-gray-500">
-                        Loading areas...
-                      </span>
-                    </div>
-                  ) : localAreas.length === 0 ? (
-                    <div className="rounded-lg border border-dashed border-gray-300 p-6 text-center">
-                      <MapIcon size={24} className="mx-auto text-gray-400" />
-                      <p className="mt-2 text-sm text-gray-600">
-                        No Purok/Sitio areas found.
-                      </p>
-                      <p className="mt-1 text-xs text-gray-400">
-                        Add local areas from the Barangays page first.
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="max-h-64 overflow-y-auto rounded-lg border border-gray-200">
-                      {localAreas.map((area) => {
-                        const isSelected = selectedAreas.includes(
-                          Number(area.id),
-                        );
-
-                        return (
-                          <button
-                            key={area.id}
-                            type="button"
-                            onClick={() => toggleArea(area.id)}
-                            className={`flex w-full items-center justify-between border-b border-gray-100 px-4 py-3 text-left transition last:border-b-0 ${
-                              isSelected
-                                ? "bg-blue-50"
-                                : "bg-white hover:bg-gray-50"
-                            }`}
-                          >
-                            <div className="flex items-center gap-3">
-                              <div
-                                className={`flex h-9 w-9 items-center justify-center rounded-lg ${
-                                  isSelected
-                                    ? "bg-blue-100 text-blue-600"
-                                    : "bg-gray-100 text-gray-500"
-                                }`}
-                              >
-                                <MapPin size={16} />
-                              </div>
-
-                              <div>
-                                <p className="text-sm font-medium text-gray-800">
-                                  {area.name}
-                                </p>
-                                <p className="text-xs capitalize text-gray-400">
-                                  {area.type || "Local area"}
-                                </p>
-                              </div>
-                            </div>
-
-                            <div
-                              className={`flex h-5 w-5 items-center justify-center rounded border ${
-                                isSelected
-                                  ? "border-blue-600 bg-blue-600 text-white"
-                                  : "border-gray-300 bg-white"
-                              }`}
-                            >
-                              {isSelected && <Check size={13} />}
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
+                  <span className="rounded-full bg-blue-50 px-3 py-1 text-xs text-blue-700">
+                    {selectedAreas.length} selected
+                  </span>
                 </div>
 
-                <div className="flex justify-end gap-3 pt-2">
+                {loadingAreas ? (
+                  <div className="flex justify-center p-8">
+                    <Loader2 className="animate-spin text-blue-600" />
+                  </div>
+                ) : localAreas.length === 0 ? (
+                  <p className="rounded-lg border border-dashed p-8 text-center text-sm text-gray-500">
+                    No cached or available Purok/Sitio areas.
+                  </p>
+                ) : (
+                  <div className="max-h-72 overflow-y-auto rounded-lg border">
+                    {localAreas.map((area) => {
+                      const selected = selectedAreas.includes(Number(area.id));
+
+                      return (
+                        <button
+                          key={area.id}
+                          type="button"
+                          onClick={() => toggleArea(area.id)}
+                          className={`flex w-full items-center justify-between border-b px-4 py-3 text-left last:border-0 ${
+                            selected ? "bg-blue-50" : "hover:bg-gray-50"
+                          }`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <MapPin size={17} className="text-blue-500" />
+
+                            <div>
+                              <p className="text-sm font-medium">{area.name}</p>
+
+                              <p className="text-xs text-gray-400">
+                                {area.type || "Local area"}
+                              </p>
+                            </div>
+                          </div>
+
+                          <span
+                            className={`flex h-5 w-5 items-center justify-center rounded border ${
+                              selected
+                                ? "border-blue-600 bg-blue-600 text-white"
+                                : "border-gray-300"
+                            }`}
+                          >
+                            {selected && <Check size={13} />}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
+                <div className="flex justify-end gap-3 border-t pt-4">
                   <button
                     type="button"
                     onClick={closeAssignmentModal}
                     disabled={savingAreas}
-                    className="rounded-lg bg-gray-100 px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-200 disabled:opacity-50"
+                    className="rounded-lg bg-gray-100 px-4 py-2.5 text-sm font-medium"
                   >
                     Cancel
                   </button>
 
                   <button
                     type="submit"
-                    disabled={savingAreas || loadingAreas}
-                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:opacity-50"
+                    disabled={
+                      savingAreas || loadingAreas || localAreas.length === 0
+                    }
+                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
                   >
                     {savingAreas ? (
                       <Loader2 size={16} className="animate-spin" />

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Home,
   Plus,
@@ -10,392 +10,238 @@ import {
   Eye,
   UserPlus,
 } from "lucide-react";
-
 import DashboardLayout from "../../components/DashboardLayout";
-import { supabase } from "../../lib/supabase";
+import {
+  getHouseholdCache,
+  refreshHouseholdCache,
+  pendingHouseholdCount,
+  saveHouseholdLocal,
+  deleteHouseholdLocal,
+  saveResidentLocal,
+  deleteResidentLocal,
+  syncHouseholds,
+} from "../../lib/householdOffline";
 
+const emptyResident = () => ({
+  first_name: "",
+  middle_name: "",
+  last_name: "",
+  sex: "Male",
+  birth_date: "",
+  civil_status: "",
+  relationship_to_head: "",
+  contact_number: "",
+  is_household_head: false,
+});
+const emptyHousehold = () => ({
+  household_code: "",
+  household_head: "",
+  contact_number: "",
+  address: "",
+  local_area_id: "",
+});
 function BnsHousehold() {
   const storedUser = localStorage.getItem("user");
   const user = storedUser ? JSON.parse(storedUser) : null;
-
+  const userId = user?.id;
   const [households, setHouseholds] = useState([]);
   const [localAreas, setLocalAreas] = useState([]);
-
   const [loading, setLoading] = useState(true);
-
-  // Household Add/Edit Modal
   const [showHouseholdModal, setShowHouseholdModal] = useState(false);
   const [editingHousehold, setEditingHousehold] = useState(null);
-
-  // Household Details Modal
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [selectedHousehold, setSelectedHousehold] = useState(null);
-
-  // Residents
   const [residents, setResidents] = useState([]);
   const [residentsLoading, setResidentsLoading] = useState(false);
-
-  // Resident Add/Edit Modal
   const [showResidentModal, setShowResidentModal] = useState(false);
   const [editingResident, setEditingResident] = useState(null);
   const [residentSaving, setResidentSaving] = useState(false);
-
   const [search, setSearch] = useState("");
+  const [form, setForm] = useState(emptyHousehold());
+  const [residentForm, setResidentForm] = useState(emptyResident());
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState("");
 
-  const [form, setForm] = useState({
-    household_code: "",
-    household_head: "",
-    contact_number: "",
-    address: "",
-    local_area_id: "",
-  });
+  const applyCache = useCallback(
+    async (remote = false) => {
+      if (!userId) return;
+      const cache = remote
+        ? await refreshHouseholdCache(userId)
+        : await getHouseholdCache(userId);
+      setHouseholds(cache.households);
+      setLocalAreas(cache.areas);
+      setPending(cache.pending);
+      setSelectedHousehold((current) =>
+        current
+          ? cache.households.find((h) => String(h.id) === String(current.id)) ||
+            null
+          : null,
+      );
+      return cache;
+    },
+    [userId],
+  );
 
-  const [residentForm, setResidentForm] = useState({
-    first_name: "",
-    middle_name: "",
-    last_name: "",
-    sex: "Male",
-    birth_date: "",
-    civil_status: "",
-    relationship_to_head: "",
-    contact_number: "",
-    is_household_head: false,
-  });
-
-  // =========================================================
-  // LOAD ASSIGNED PUROK/SITIO
-  // =========================================================
-
-  useEffect(() => {
-    if (user?.id) {
-      fetchLocalAreas();
-    }
-  }, [user?.id]);
-
-  useEffect(() => {
-    if (localAreas.length > 0) {
-      fetchHouseholds();
-    } else if (!loading) {
-      setHouseholds([]);
-    }
-  }, [localAreas]);
-
-  const fetchLocalAreas = async () => {
-    try {
-      const { data, error } = await supabase
-        .from("worker_area_assignments")
-        .select(
-          `
-          local_area_id,
-          local_areas (
-            id,
-            name,
-            type,
-            barangay_id,
-            barangays (
-              id,
-              name
-            )
-          )
-        `,
-        )
-        .eq("worker_id", user.id)
-        .eq("is_active", true);
-
-      if (error) throw error;
-
-      const areas = (data || [])
-        .map((item) => item.local_areas)
-        .filter(Boolean);
-
-      setLocalAreas(areas);
-    } catch (error) {
-      console.error("Error loading assigned areas:", error);
-      alert("Failed to load your assigned areas.");
-      setLoading(false);
-    }
-  };
-
-  // =========================================================
-  // LOAD HOUSEHOLDS
-  // =========================================================
-
-  const fetchHouseholds = async () => {
-    try {
+  const loadData = useCallback(
+    async (remote = false) => {
       setLoading(true);
-
-      const areaIds = localAreas.map((area) => area.id);
-
-      if (areaIds.length === 0) {
-        setHouseholds([]);
-        return;
+      try {
+        const cache = await applyCache(false);
+        if (remote && navigator.onLine) {
+          try {
+            await applyCache(true);
+            setSyncError("");
+          } catch (e) {
+            setSyncError(
+              `Server refresh failed: ${e.message}. Showing cached data.`,
+            );
+          }
+        }
+        return cache;
+      } catch (e) {
+        setSyncError(`Local storage error: ${e.message}`);
+      } finally {
+        setLoading(false);
       }
+    },
+    [applyCache],
+  );
 
-      const { data, error } = await supabase
-        .from("households")
-        .select(
-          `
-          *,
-          local_areas (
-            id,
-            name,
-            type,
-            barangays (
-              id,
-              name
-            )
-          ),
-          residents (
-            id
-          )
-        `,
-        )
-        .in("local_area_id", areaIds)
-        .order("created_at", {
-          ascending: false,
-        });
-
-      if (error) throw error;
-
-      const householdsWithCount = (data || []).map((household) => ({
-        ...household,
-        resident_count: household.residents?.length || 0,
-      }));
-
-      setHouseholds(householdsWithCount);
-    } catch (error) {
-      console.error("Error loading households:", error);
-      alert("Failed to load households.");
+  const doSync = useCallback(async () => {
+    if (!userId || !navigator.onLine) return;
+    setSyncing(true);
+    try {
+      const result = await syncHouseholds(userId);
+      if (result.error) setSyncError(result.error);
+      else {
+        setSyncError("");
+        try {
+          await applyCache(true);
+        } catch (e) {
+          setSyncError(`Upload finished, but refresh failed: ${e.message}`);
+        }
+      }
+      await applyCache(false);
+    } catch (e) {
+      setSyncError(e.message);
     } finally {
-      setLoading(false);
+      setSyncing(false);
+    }
+  }, [userId, applyCache]);
+
+  useEffect(() => {
+    if (!userId) return;
+    loadData(true);
+    const onOnline = () => {
+      setOnline(true);
+      doSync();
+    };
+    const onOffline = () => setOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [userId, loadData, doSync]);
+
+  const updateLocal = async () => {
+    const cache = await applyCache(false);
+    if (selectedHousehold)
+      setResidents(cache.residents[String(selectedHousehold.id)] || []);
+    if (navigator.onLine) void doSync();
+  };
+  const fetchLocalAreas = () => loadData(true);
+  const fetchHouseholds = () => loadData(true);
+  const fetchResidents = async (householdId) => {
+    setResidentsLoading(true);
+    try {
+      const cache = await getHouseholdCache(userId);
+      setResidents(cache.residents[String(householdId)] || []);
+    } catch (e) {
+      setSyncError(e.message);
+    } finally {
+      setResidentsLoading(false);
     }
   };
-
-  // =========================================================
-  // HOUSEHOLD FORM
-  // =========================================================
-
+  const refreshSelectedHousehold = async (householdId) => {
+    const cache = await getHouseholdCache(userId);
+    setSelectedHousehold(
+      cache.households.find((h) => String(h.id) === String(householdId)) ||
+        null,
+    );
+  };
   const openAddModal = () => {
     setEditingHousehold(null);
-
     setForm({
+      ...emptyHousehold(),
       household_code: `HH-${Date.now()}`,
-      household_head: "",
-      contact_number: "",
-      address: "",
       local_area_id: localAreas.length === 1 ? String(localAreas[0].id) : "",
     });
-
     setShowHouseholdModal(true);
   };
-
   const openEditModal = (household) => {
     setEditingHousehold(household);
-
     setForm({
       household_code: household.household_code || "",
       household_head: household.household_head || "",
       contact_number: household.contact_number || "",
       address: household.address || "",
-      local_area_id: household.local_area_id
-        ? String(household.local_area_id)
-        : "",
+      local_area_id: String(household.local_area_id || ""),
     });
-
     setShowHouseholdModal(true);
   };
-
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-
-    setForm((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
-  };
-
+  const handleChange = (e) =>
+    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
   const handleHouseholdSubmit = async (e) => {
     e.preventDefault();
-
-    if (!form.household_head.trim()) {
-      alert("Please enter the household head.");
-      return;
-    }
-
-    if (!form.local_area_id) {
-      alert("Please select a Purok/Sitio.");
-      return;
-    }
-
+    if (!form.household_head.trim() || !form.household_code.trim())
+      return alert("Enter household code and head.");
+    if (!localAreas.some((a) => String(a.id) === String(form.local_area_id)))
+      return alert("Select an assigned Purok/Sitio.");
     try {
-      const householdData = {
+      await saveHouseholdLocal(userId, editingHousehold?.id || null, {
         household_code: form.household_code.trim(),
         household_head: form.household_head.trim(),
         contact_number: form.contact_number.trim() || null,
         address: form.address.trim() || null,
         local_area_id: Number(form.local_area_id),
-      };
-
-      if (editingHousehold) {
-        const { error } = await supabase
-          .from("households")
-          .update({
-            ...householdData,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", editingHousehold.id);
-
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from("households").insert({
-          ...householdData,
-          created_by: user.id,
-        });
-
-        if (error) throw error;
-      }
-
+      });
       setShowHouseholdModal(false);
-      await fetchHouseholds();
-    } catch (error) {
-      console.error("Error saving household:", error);
-      alert(error.message || "Failed to save household.");
+      await updateLocal();
+    } catch (e) {
+      alert(e.message);
     }
   };
-
-  // =========================================================
-  // DELETE HOUSEHOLD
-  // =========================================================
-
   const handleDeleteHousehold = async (id) => {
-    const confirmed = window.confirm(
-      "Are you sure you want to delete this household?",
-    );
-
-    if (!confirmed) return;
-
+    if (
+      !window.confirm(
+        "Delete this household? This can fail on sync if related records exist.",
+      )
+    )
+      return;
     try {
-      const { error } = await supabase.from("households").delete().eq("id", id);
-
-      if (error) throw error;
-
-      await fetchHouseholds();
-    } catch (error) {
-      console.error("Error deleting household:", error);
-      alert(error.message || "Failed to delete household.");
+      await deleteHouseholdLocal(userId, id);
+      await updateLocal();
+    } catch (e) {
+      alert(e.message);
     }
   };
-
-  // =========================================================
-  // VIEW HOUSEHOLD
-  // =========================================================
-
   const viewHousehold = async (household) => {
     setSelectedHousehold(household);
-    setResidents([]);
     setShowDetailsModal(true);
-
     await fetchResidents(household.id);
   };
-
-  // =========================================================
-  // FETCH RESIDENTS
-  // =========================================================
-
-  const fetchResidents = async (householdId) => {
-    try {
-      setResidentsLoading(true);
-
-      const { data, error } = await supabase
-        .from("residents")
-        .select("*")
-        .eq("household_id", householdId)
-        .order("is_household_head", {
-          ascending: false,
-        })
-        .order("last_name", {
-          ascending: true,
-        });
-
-      if (error) throw error;
-
-      setResidents(data || []);
-    } catch (error) {
-      console.error("Error loading residents:", error);
-      alert("Failed to load household members.");
-    } finally {
-      setResidentsLoading(false);
-    }
-  };
-
-  // =========================================================
-  // REFRESH SELECTED HOUSEHOLD
-  // =========================================================
-
-  const refreshSelectedHousehold = async (householdId) => {
-    try {
-      const { data, error } = await supabase
-        .from("households")
-        .select(
-          `
-          id,
-          household_code,
-          household_head,
-          contact_number,
-          address,
-          local_area_id,
-          created_at,
-          updated_at,
-          local_areas (
-            id,
-            name,
-            type,
-            barangays (
-              id,
-              name,
-              district_id
-            )
-          )
-        `,
-        )
-        .eq("id", householdId)
-        .single();
-
-      if (error) throw error;
-
-      setSelectedHousehold(data);
-    } catch (error) {
-      console.error("Error refreshing household:", error);
-    }
-  };
-
-  // =========================================================
-  // RESIDENT FORM
-  // =========================================================
-
-  const resetResidentForm = () => {
-    setResidentForm({
-      first_name: "",
-      middle_name: "",
-      last_name: "",
-      sex: "Male",
-      birth_date: "",
-      civil_status: "",
-      relationship_to_head: "",
-      contact_number: "",
-      is_household_head: false,
-    });
-  };
-
+  const resetResidentForm = () => setResidentForm(emptyResident());
   const openAddResidentModal = () => {
     setEditingResident(null);
     resetResidentForm();
     setShowResidentModal(true);
   };
-
   const openEditResidentModal = (resident) => {
     setEditingResident(resident);
-
     setResidentForm({
       first_name: resident.first_name || "",
       middle_name: resident.middle_name || "",
@@ -405,190 +251,106 @@ function BnsHousehold() {
       civil_status: resident.civil_status || "",
       relationship_to_head: resident.relationship_to_head || "",
       contact_number: resident.contact_number || "",
-      is_household_head: resident.is_household_head || false,
+      is_household_head: !!resident.is_household_head,
     });
-
     setShowResidentModal(true);
   };
-
   const handleResidentChange = (e) => {
     const { name, value, type, checked } = e.target;
-
     setResidentForm((prev) => ({
       ...prev,
       [name]: type === "checkbox" ? checked : value,
     }));
   };
-
-  // =========================================================
-  // SAVE RESIDENT
-  // =========================================================
-
   const handleResidentSubmit = async (e) => {
     e.preventDefault();
-
-    if (!selectedHousehold) return;
-
-    if (!residentForm.first_name.trim() || !residentForm.last_name.trim()) {
-      alert("Please enter the resident's first and last name.");
-      return;
-    }
-
+    if (
+      !selectedHousehold ||
+      !residentForm.first_name.trim() ||
+      !residentForm.last_name.trim()
+    )
+      return alert("Enter first and last name.");
+    setResidentSaving(true);
     try {
-      setResidentSaving(true);
-
-      const householdId = selectedHousehold.id;
-
-      // If this resident is becoming the household head,
-      // remove household-head status from other residents first.
-      if (residentForm.is_household_head) {
-        const { error: headError } = await supabase
-          .from("residents")
-          .update({
-            is_household_head: false,
-          })
-          .eq("household_id", householdId);
-
-        if (headError) throw headError;
-      }
-
-      const residentData = {
-        first_name: residentForm.first_name.trim(),
-        middle_name: residentForm.middle_name.trim() || null,
-        last_name: residentForm.last_name.trim(),
-        sex: residentForm.sex,
-        birth_date: residentForm.birth_date || null,
-        civil_status: residentForm.civil_status || null,
-        relationship_to_head: residentForm.relationship_to_head.trim() || null,
-        contact_number: residentForm.contact_number.trim() || null,
-        is_household_head: residentForm.is_household_head,
-      };
-
-      if (editingResident) {
-        const { error } = await supabase
-          .from("residents")
-          .update(residentData)
-          .eq("id", editingResident.id);
-
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from("residents").insert({
-          ...residentData,
-          household_id: householdId,
-        });
-
-        if (error) throw error;
-      }
-
-      const fullName = [
-        residentForm.first_name,
-        residentForm.middle_name,
-        residentForm.last_name,
-      ]
-        .filter(Boolean)
-        .join(" ");
-
-      // Update household head name
-      if (residentForm.is_household_head) {
-        const { error } = await supabase
-          .from("households")
-          .update({
-            household_head: fullName,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", householdId);
-
-        if (error) throw error;
-      } else if (editingResident?.is_household_head) {
-        // If the previous household head was edited
-        // and is no longer the head, clear household_head.
-        const { error } = await supabase
-          .from("households")
-          .update({
-            household_head: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", householdId);
-
-        if (error) throw error;
-      }
-
+      await saveResidentLocal(
+        userId,
+        selectedHousehold.id,
+        editingResident?.id || null,
+        {
+          first_name: residentForm.first_name.trim(),
+          middle_name: residentForm.middle_name.trim() || null,
+          last_name: residentForm.last_name.trim(),
+          sex: residentForm.sex,
+          birth_date: residentForm.birth_date || null,
+          civil_status: residentForm.civil_status || null,
+          relationship_to_head: residentForm.relationship_to_head || null,
+          contact_number: residentForm.contact_number.trim() || null,
+          is_household_head: !!residentForm.is_household_head,
+        },
+      );
       setShowResidentModal(false);
       resetResidentForm();
-
-      await fetchResidents(householdId);
-      await refreshSelectedHousehold(householdId);
-      await fetchHouseholds();
-    } catch (error) {
-      console.error("Error saving resident:", error);
-      alert(error.message || "Failed to save resident.");
+      await updateLocal();
+      await refreshSelectedHousehold(selectedHousehold.id);
+    } catch (e) {
+      alert(e.message);
     } finally {
       setResidentSaving(false);
     }
   };
-
-  // =========================================================
-  // DELETE RESIDENT
-  // =========================================================
-
   const handleDeleteResident = async (resident) => {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${resident.first_name} ${resident.last_name}?`,
-    );
-
-    if (!confirmed) return;
-
+    if (!window.confirm(`Delete ${resident.first_name} ${resident.last_name}?`))
+      return;
     try {
-      const { error } = await supabase
-        .from("residents")
-        .delete()
-        .eq("id", resident.id);
-
-      if (error) throw error;
-
-      // Clear household head if deleted resident was the head
-      if (resident.is_household_head && selectedHousehold) {
-        const { error: householdError } = await supabase
-          .from("households")
-          .update({
-            household_head: null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", selectedHousehold.id);
-
-        if (householdError) throw householdError;
-      }
-
-      await fetchResidents(selectedHousehold.id);
+      await deleteResidentLocal(userId, selectedHousehold.id, resident.id);
+      await updateLocal();
       await refreshSelectedHousehold(selectedHousehold.id);
-      await fetchHouseholds();
-    } catch (error) {
-      console.error("Error deleting resident:", error);
-      alert(error.message || "Failed to delete resident.");
+    } catch (e) {
+      alert(e.message);
     }
   };
-
-  // =========================================================
-  // FILTER HOUSEHOLDS
-  // =========================================================
-
-  const filteredHouseholds = households.filter((household) => {
-    const searchText = search.toLowerCase();
-
-    return (
-      household.household_code?.toLowerCase().includes(searchText) ||
-      household.household_head?.toLowerCase().includes(searchText) ||
-      household.local_areas?.name?.toLowerCase().includes(searchText)
-    );
-  });
-
-  if (!user) {
-    return null;
-  }
-
+  const filteredHouseholds = households.filter((h) =>
+    [h.household_code, h.household_head, h.local_areas?.name].some((s) =>
+      String(s || "")
+        .toLowerCase()
+        .includes(search.toLowerCase()),
+    ),
+  );
+  if (!user) return null;
   return (
     <DashboardLayout>
       <div className="space-y-6">
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-4 text-sm">
+          <span
+            className={
+              online
+                ? "font-semibold text-green-700"
+                : "font-semibold text-amber-700"
+            }
+          >
+            {online ? "Online" : "Offline"}
+          </span>
+          <span>
+            {pending} pending change{pending === 1 ? "" : "s"}
+          </span>
+          <button
+            type="button"
+            onClick={() => doSync()}
+            disabled={!online || syncing}
+            className="rounded-lg bg-green-600 px-3 py-2 text-white disabled:opacity-50"
+          >
+            {syncing ? "Syncing..." : "Sync Now"}
+          </button>
+          <button
+            type="button"
+            onClick={() => loadData(true)}
+            disabled={!online || syncing}
+            className="rounded-lg border px-3 py-2 disabled:opacity-50"
+          >
+            Refresh
+          </button>
+          {syncError && <span className="text-red-600">{syncError}</span>}
+        </div>
         {/* =====================================================
             PAGE HEADER
         ===================================================== */}
@@ -737,6 +499,11 @@ function BnsHousehold() {
                     >
                       <td className="px-5 py-4 text-sm font-medium text-gray-800">
                         {household.household_code}
+                        {household._pending && (
+                          <span className="ml-2 text-xs text-amber-600">
+                            Pending
+                          </span>
+                        )}
                       </td>
 
                       <td className="px-5 py-4 text-sm text-gray-700">
@@ -1150,6 +917,11 @@ function BnsHousehold() {
                                       ? `${resident.middle_name} `
                                       : ""}
                                     {resident.last_name}
+                                    {resident._pending && (
+                                      <span className="ml-2 text-xs text-amber-600">
+                                        Pending
+                                      </span>
+                                    )}
                                   </span>
 
                                   {resident.is_household_head && (

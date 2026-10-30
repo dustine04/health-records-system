@@ -22,7 +22,19 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
-import { supabase } from "../../lib/supabase";
+import { queuePregnancySave } from "../../lib/bhwPregnancyOffline";
+import {
+  cachedAncVisits,
+  cachedHomeVisits,
+  refreshMonitoringVisits,
+  getMonitoringWomen,
+  refreshMonitoringWomen,
+  queueMonitoringSave,
+  queueMonitoringDelete,
+  syncMonitoringQueue,
+  pendingMonitoringCount,
+} from "../../lib/bhwMonitoringOffline";
+import { Wifi, WifiOff, RefreshCw } from "lucide-react";
 
 const safeText = (value) => (value == null ? "" : String(value));
 
@@ -31,6 +43,10 @@ function BhwPregnantMonitoring() {
   const user = storedUser ? JSON.parse(storedUser) : null;
 
   const [pregnantWomen, setPregnantWomen] = useState([]);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pending, setPending] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [offlineError, setOfflineError] = useState("");
   const [localAreas, setLocalAreas] = useState([]);
 
   const [loading, setLoading] = useState(true);
@@ -191,227 +207,72 @@ function BhwPregnantMonitoring() {
   // =====================================================
 
   useEffect(() => {
-    if (user) {
-      fetchLocalAreas();
-    }
+    const connected = () => setOnline(true);
+    const disconnected = () => setOnline(false);
+    window.addEventListener("online", connected);
+    window.addEventListener("offline", disconnected);
+    return () => {
+      window.removeEventListener("online", connected);
+      window.removeEventListener("offline", disconnected);
+    };
   }, []);
+  useEffect(() => {
+    if (user?.id) fetchPregnantWomen();
+  }, [user?.id]);
+  useEffect(() => {
+    if (online && user?.id) runSync();
+  }, [online, user?.id]);
 
-  // =====================================================
-  // GET ASSIGNED AREAS
-  // =====================================================
-
-  const fetchLocalAreas = async () => {
+  const runSync = async () => {
+    if (!user?.id || !navigator.onLine || syncing) return;
+    setSyncing(true);
     try {
-      const { data, error } = await supabase
-        .from("worker_area_assignments")
-        .select(
-          `
-          local_area_id,
-          local_areas (
-            id,
-            name,
-            type,
-            barangay_id,
-            barangays (
-              id,
-              name
-            )
-          )
-        `,
-        )
-        .eq("worker_id", user.id)
-        .eq("is_active", true);
-
-      if (error) throw error;
-
-      const areas = (data || [])
-        .map((item) => item.local_areas)
-        .filter(Boolean);
-
-      setLocalAreas(areas);
+      await syncMonitoringQueue(user.id);
+      await fetchPregnantWomen();
+      if (selectedWoman?.pregnancy?.id) {
+        const data = await refreshMonitoringVisits(
+          user.id,
+          selectedWoman.pregnancy.id,
+        );
+        setVisits(data.anc);
+        setHomeVisits(data.homes);
+      }
+      setOfflineError("");
     } catch (error) {
-      console.error(error);
-      alert("Failed to load your assigned areas.");
+      setOfflineError(
+        error.message ||
+          "Synchronization failed. Pending changes were retained.",
+      );
+    } finally {
+      setPending(await pendingMonitoringCount(user.id));
+      setSyncing(false);
     }
   };
-
-  useEffect(() => {
-    if (localAreas.length > 0) {
-      fetchPregnantWomen();
-    } else {
-      setPregnantWomen([]);
-      setLoading(false);
-    }
-  }, [localAreas]);
 
   // =====================================================
   // GET PREGNANT WOMEN
   // =====================================================
 
   const fetchPregnantWomen = async () => {
+    if (!user?.id) return;
+    setLoading(true);
     try {
-      setLoading(true);
-
-      const areaIds = localAreas.map((area) => area.id);
-
-      if (areaIds.length === 0) {
-        setPregnantWomen([]);
-        return;
-      }
-
-      const { data: households, error: householdError } = await supabase
-        .from("households")
-        .select("id, household_code, household_head, local_area_id")
-        .in("local_area_id", areaIds);
-
-      if (householdError) throw householdError;
-
-      const householdIds = (households || []).map((h) => h.id);
-
-      if (householdIds.length === 0) {
-        setPregnantWomen([]);
-        return;
-      }
-
-      const { data: residents, error: residentError } = await supabase
-        .from("residents")
-        .select(
-          `
-          id,
-          household_id,
-          first_name,
-          middle_name,
-          last_name,
-          sex,
-          birth_date,
-          civil_status,
-          contact_number,
-          households (
-            id,
-            household_code,
-            household_head,
-            local_area_id,
-            local_areas (
-              id,
-              name,
-              type,
-              barangays (
-                id,
-                name
-              )
-            )
-          )
-        `,
-        )
-        .in("household_id", householdIds)
-        .eq("sex", "Female");
-
-      if (residentError) throw residentError;
-
-      const residentIds = (residents || []).map((r) => r.id);
-
-      if (residentIds.length === 0) {
-        setPregnantWomen([]);
-        return;
-      }
-
-      const { data: registrations, error: registrationError } = await supabase
-        .from("pregnant_women")
-        .select("*")
-        .in("resident_id", residentIds)
-        .order("created_at", { ascending: false });
-
-      if (registrationError) throw registrationError;
-
-      if (!registrations || registrations.length === 0) {
-        setPregnantWomen([]);
-        return;
-      }
-
-      const registrationMap = new Map();
-
-      registrations.forEach((record) => {
-        const residentId = Number(record.resident_id);
-
-        if (!registrationMap.has(residentId)) {
-          registrationMap.set(residentId, record);
+      const cached = await getMonitoringWomen(user.id);
+      setLocalAreas(cached.areas);
+      setPregnantWomen(cached.women);
+      if (navigator.onLine) {
+        try {
+          const fresh = await refreshMonitoringWomen(user.id);
+          setLocalAreas(fresh.areas);
+          setPregnantWomen(fresh.women);
+          setOfflineError("");
+        } catch (error) {
+          setOfflineError(`Showing cached data: ${error.message}`);
         }
-      });
-
-      const pregnancyIds = registrations.map((record) => record.id);
-
-      // Fetch ANC visits only for the ANC visit count.
-      const { data: allVisits, error: visitsError } = await supabase
-        .from("pregnant_woman_visits")
-        .select("id, pregnant_woman_id, visit_number, visit_date")
-        .in("pregnant_woman_id", pregnancyIds)
-        .order("visit_date", { ascending: false });
-
-      if (visitsError) throw visitsError;
-
-      // Count recorded ANC visits for each pregnancy.
-      const visitCountMap = new Map();
-
-      (allVisits || []).forEach((visit) => {
-        const pregnancyId = Number(visit.pregnant_woman_id);
-
-        visitCountMap.set(
-          pregnancyId,
-          (visitCountMap.get(pregnancyId) || 0) + 1,
-        );
-      });
-
-      // Fetch BHW home visits separately.
-      // The next visit date must come from this table, NOT the ANC table.
-      const { data: allHomeVisits, error: homeVisitsError } = await supabase
-        .from("pregnant_woman_home_visits")
-        .select("id, pregnant_woman_id, visit_date, next_visit_date")
-        .in("pregnant_woman_id", pregnancyIds);
-
-      if (homeVisitsError) throw homeVisitsError;
-
-      // Get the earliest upcoming BHW home visit for each pregnancy.
-      const today = new Date().toLocaleDateString("en-CA", {
-        timeZone: "Asia/Manila",
-      });
-
-      const nextHomeVisitMap = new Map();
-
-      (allHomeVisits || [])
-        .filter(
-          (visit) => visit.next_visit_date && visit.next_visit_date >= today,
-        )
-        .sort((a, b) => a.next_visit_date.localeCompare(b.next_visit_date))
-        .forEach((visit) => {
-          const pregnancyId = Number(visit.pregnant_woman_id);
-
-          if (!nextHomeVisitMap.has(pregnancyId)) {
-            nextHomeVisitMap.set(pregnancyId, visit.next_visit_date);
-          }
-        });
-      const result = (residents || [])
-        .map((resident) => {
-          const registration = registrationMap.get(Number(resident.id));
-
-          if (!registration) return null;
-
-          return {
-            ...resident,
-            pregnancy: registration,
-            visit_count: visitCountMap.get(Number(registration.id)) || 0,
-
-            // This is the next scheduled BHW home visit,
-            // not the next ANC appointment.
-            next_visit_date:
-              nextHomeVisitMap.get(Number(registration.id)) || null,
-          };
-        })
-        .filter(Boolean);
-
-      setPregnantWomen(result);
+      }
+      setPending(await pendingMonitoringCount(user.id));
     } catch (error) {
-      console.error("Error loading pregnant women:", error);
-      alert(error.message || "Failed to load pregnant women.");
+      setOfflineError(error.message || "Unable to load offline data");
     } finally {
       setLoading(false);
     }
@@ -436,21 +297,20 @@ function BhwPregnantMonitoring() {
   // =====================================================
 
   const fetchVisits = async (pregnantWomanId) => {
+    setLoadingVisits(true);
     try {
-      setLoadingVisits(true);
-
-      const { data, error } = await supabase
-        .from("pregnant_woman_visits")
-        .select("*")
-        .eq("pregnant_woman_id", pregnantWomanId)
-        .order("visit_number", { ascending: true });
-
-      if (error) throw error;
-
-      setVisits(data || []);
+      setVisits(await cachedAncVisits(user.id, pregnantWomanId));
+      if (navigator.onLine) {
+        try {
+          const data = await refreshMonitoringVisits(user.id, pregnantWomanId);
+          setVisits(data.anc);
+          setHomeVisits(data.homes);
+        } catch (error) {
+          setOfflineError(`Using cached visits: ${error.message}`);
+        }
+      }
     } catch (error) {
-      console.error("Error loading ANC visits:", error);
-      alert(error.message || "Failed to load ANC visits.");
+      setOfflineError(error.message);
     } finally {
       setLoadingVisits(false);
     }
@@ -461,21 +321,20 @@ function BhwPregnantMonitoring() {
   // =====================================================
 
   const fetchHomeVisits = async (pregnantWomanId) => {
+    setLoadingHomeVisits(true);
     try {
-      setLoadingHomeVisits(true);
-
-      const { data, error } = await supabase
-        .from("pregnant_woman_home_visits")
-        .select("*")
-        .eq("pregnant_woman_id", pregnantWomanId)
-        .order("visit_number", { ascending: true });
-
-      if (error) throw error;
-
-      setHomeVisits(data || []);
+      setHomeVisits(await cachedHomeVisits(user.id, pregnantWomanId));
+      if (navigator.onLine) {
+        try {
+          const data = await refreshMonitoringVisits(user.id, pregnantWomanId);
+          setHomeVisits(data.homes);
+          setVisits(data.anc);
+        } catch (error) {
+          setOfflineError(`Using cached visits: ${error.message}`);
+        }
+      }
     } catch (error) {
-      console.error("Error loading home visits:", error);
-      alert(error.message || "Failed to load home visits.");
+      setOfflineError(error.message);
     } finally {
       setLoadingHomeVisits(false);
     }
@@ -570,126 +429,27 @@ function BhwPregnantMonitoring() {
         facility_name: pregnancyInfoForm.facility_name.trim() || null,
       };
 
-      const { data: updated, error } = await supabase
-        .from("pregnant_women")
-        .update(data)
-        .eq("id", selectedWoman.pregnancy.id)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      const updatedWoman = {
-        ...selectedWoman,
-        pregnancy: updated,
-      };
-
-      setSelectedWoman(updatedWoman);
-
+      await queuePregnancySave(user.id, selectedWoman.pregnancy, data);
+      const updated = { ...selectedWoman.pregnancy, ...data, _pending: true };
+      setSelectedWoman((prev) => ({ ...prev, pregnancy: updated }));
       setPregnantWomen((prev) =>
-        prev.map((woman) =>
-          woman.pregnancy.id === updated.id
-            ? {
-                ...woman,
-                pregnancy: updated,
-              }
-            : woman,
+        prev.map((w) =>
+          String(w.pregnancy.id) === String(updated.id)
+            ? { ...w, pregnancy: updated }
+            : w,
         ),
       );
-
+      setPending(await pendingMonitoringCount(user.id));
       setShowPregnancyInfoModal(false);
 
-      alert("Pregnancy information updated successfully.");
+      alert(
+        "Pregnancy information saved locally. It will synchronize when online.",
+      );
     } catch (error) {
       console.error("Error updating pregnancy information:", error);
       alert(error.message || "Failed to update pregnancy information.");
     } finally {
       setSavingPregnancyInfo(false);
-    }
-  };
-
-  // =====================================================
-  // DELIVERY / PREGNANCY OUTCOME
-  // =====================================================
-
-  const openOutcomeModal = () => {
-    if (!selectedWoman) return;
-
-    const pregnancy = selectedWoman.pregnancy || {};
-
-    setOutcomeForm({
-      place_of_delivery: safeText(pregnancy.place_of_delivery),
-      date_of_delivery: safeText(pregnancy.date_of_delivery),
-      pregnancy_outcome: safeText(pregnancy.pregnancy_outcome),
-      birth_status: safeText(pregnancy.birth_status),
-      attended_by: safeText(pregnancy.attended_by),
-    });
-
-    setShowOutcomeModal(true);
-  };
-
-  const handleOutcomeChange = (e) => {
-    const { name, value } = e.target;
-
-    setOutcomeForm((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
-  };
-
-  const saveOutcome = async (e) => {
-    e.preventDefault();
-
-    if (!selectedWoman) return;
-
-    try {
-      setSavingOutcome(true);
-
-      const data = {
-        place_of_delivery: outcomeForm.place_of_delivery.trim() || null,
-
-        date_of_delivery: outcomeForm.date_of_delivery || null,
-
-        pregnancy_outcome: outcomeForm.pregnancy_outcome.trim() || null,
-
-        birth_status: outcomeForm.birth_status.trim() || null,
-
-        attended_by: outcomeForm.attended_by.trim() || null,
-      };
-
-      const { data: updated, error } = await supabase
-        .from("pregnant_women")
-        .update(data)
-        .eq("id", selectedWoman.pregnancy.id)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      setSelectedWoman((prev) => ({
-        ...prev,
-        pregnancy: updated,
-      }));
-
-      setPregnantWomen((prev) =>
-        prev.map((woman) =>
-          woman.pregnancy.id === updated.id
-            ? {
-                ...woman,
-                pregnancy: updated,
-              }
-            : woman,
-        ),
-      );
-
-      setShowOutcomeModal(false);
-
-      alert("Pregnancy outcome updated successfully.");
-    } catch (error) {
-      console.error("Error updating pregnancy outcome:", error);
-      alert(error.message || "Failed to update pregnancy outcome.");
-    } finally {
-      setSavingOutcome(false);
     }
   };
 
@@ -864,225 +624,22 @@ function BhwPregnantMonitoring() {
   // SAVE ANC VISIT
   // =====================================================
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-
-    if (!selectedWoman) return;
-
-    if (!form.visit_number) {
-      alert("Please select an ANC visit number.");
-      return;
-    }
-
-    if (!form.visit_date) {
-      alert("Please enter the visit date.");
-      return;
-    }
-
-    try {
-      setSaving(true);
-
-      const visitData = {
-        pregnant_woman_id: Number(selectedWoman.pregnancy.id),
-
-        visit_number: Number(form.visit_number),
-
-        visit_date: form.visit_date,
-
-        emergency_signs: form.emergency_signs.trim() || null,
-
-        respiratory_rate: form.respiratory_rate
-          ? Number(form.respiratory_rate)
-          : null,
-
-        systolic_bp: form.systolic_bp ? Number(form.systolic_bp) : null,
-
-        diastolic_bp: form.diastolic_bp ? Number(form.diastolic_bp) : null,
-
-        pulse_rate: form.pulse_rate ? Number(form.pulse_rate) : null,
-
-        temperature: form.temperature ? Number(form.temperature) : null,
-
-        gestational_age_weeks: form.gestational_age_weeks
-          ? Number(form.gestational_age_weeks)
-          : null,
-
-        birth_plan: form.birth_plan.trim() || null,
-
-        vaginal_bleeding: form.vaginal_bleeding,
-
-        severe_headache: form.severe_headache,
-
-        blurred_vision: form.blurred_vision,
-
-        severe_abdominal_pain: form.severe_abdominal_pain,
-
-        fetal_movement: form.fetal_movement,
-
-        fundal_height_cm: form.fundal_height_cm
-          ? Number(form.fundal_height_cm)
-          : null,
-
-        weight_kg: form.weight_kg ? Number(form.weight_kg) : null,
-
-        edema: form.edema,
-
-        concerns: form.concerns.trim() || null,
-
-        multiple_pregnancy: form.multiple_pregnancy,
-
-        presentation: form.presentation.trim() || null,
-
-        fetal_heart_rate: form.fetal_heart_rate
-          ? Number(form.fetal_heart_rate)
-          : null,
-
-        transverse_or_breech: form.transverse_or_breech,
-
-        family_planning_counseled: form.family_planning_counseled,
-
-        preeclampsia_check: form.preeclampsia_check.trim() || null,
-
-        urine_protein: form.urine_protein.trim() || null,
-
-        hemoglobin: form.hemoglobin ? Number(form.hemoglobin) : null,
-
-        anemia_tiredness: form.anemia_tiredness,
-
-        anemia_shortness_of_breath: form.anemia_shortness_of_breath,
-
-        anemia_pallor: form.anemia_pallor,
-
-        no_fetal_movement: form.no_fetal_movement,
-
-        ruptured_membranes: form.ruptured_membranes,
-
-        fever_or_burning_urination: form.fever_or_burning_urination,
-
-        vaginal_discharge: form.vaginal_discharge,
-
-        coughing_or_breathing_difficulty: form.coughing_or_breathing_difficulty,
-
-        taking_anti_tb_drugs: form.taking_anti_tb_drugs,
-
-        smoking_alcohol_drug_use: form.smoking_alcohol_drug_use,
-
-        history_of_violence: form.history_of_violence,
-
-        signs_of_sti_hiv: form.signs_of_sti_hiv,
-
-        current_medical_condition:
-          form.current_medical_condition.trim() || null,
-
-        physical_exam_findings: form.physical_exam_findings.trim() || null,
-
-        other_laboratory_findings:
-          form.other_laboratory_findings.trim() || null,
-
-        other_problems: form.other_problems.trim() || null,
-
-        hiv_counseling: form.hiv_counseling,
-
-        hiv_test_result: form.hiv_test_result.trim() || null,
-
-        infant_feeding_counseling: form.infant_feeding_counseling,
-
-        tetanus_toxoid: form.tetanus_toxoid.trim() || null,
-
-        iron_folate_given: form.iron_folate_given,
-
-        oral_care_done: form.oral_care_done,
-
-        self_care_advice: form.self_care_advice,
-
-        nutrition_advice: form.nutrition_advice,
-
-        routine_followup_advice: form.routine_followup_advice,
-
-        labor_danger_signs_advice: form.labor_danger_signs_advice,
-
-        breastfeeding_advice: form.breastfeeding_advice,
-
-        newborn_screening_advice: form.newborn_screening_advice,
-
-        birth_emergency_plan: form.birth_emergency_plan.trim() || null,
-
-        overall_assessment: form.overall_assessment.trim() || null,
-
-        management_advice: form.management_advice.trim() || null,
-
-        next_visit_date: form.next_visit_date || null,
-
-        assessed_by: user.id,
-
-        updated_at: new Date().toISOString(),
-      };
-
-      if (editingVisit) {
-        const { error } = await supabase
-          .from("pregnant_woman_visits")
-          .update(visitData)
-          .eq("id", editingVisit.id);
-
-        if (error) throw error;
-      } else {
-        const { error } = await supabase.from("pregnant_woman_visits").insert({
-          ...visitData,
-          created_by: user.id,
-        });
-
-        if (error) throw error;
-      }
-
-      setShowVisitModal(false);
-
-      await fetchVisits(selectedWoman.pregnancy.id);
-
-      await fetchPregnantWomen();
-
-      alert(
-        editingVisit
-          ? "ANC visit updated successfully."
-          : "ANC visit recorded successfully.",
-      );
-    } catch (error) {
-      console.error("Error saving ANC visit:", error);
-
-      alert(error.message || "Failed to save ANC visit.");
-    } finally {
-      setSaving(false);
-    }
+  const handleSubmit = async (event) => {
+    event?.preventDefault?.();
+    alert(
+      "ANC clinical records are read-only for BHW. They are managed by the Midwife.",
+    );
   };
 
   // =====================================================
   // DELETE ANC VISIT
   // =====================================================
 
-  const handleDeleteVisit = async (visit) => {
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ANC Visit ${visit.visit_number}?`,
+  const handleDeleteVisit = async (event) => {
+    event?.preventDefault?.();
+    alert(
+      "ANC clinical records are read-only for BHW. They are managed by the Midwife.",
     );
-
-    if (!confirmed) return;
-
-    try {
-      const { error } = await supabase
-        .from("pregnant_woman_visits")
-        .delete()
-        .eq("id", visit.id);
-
-      if (error) throw error;
-
-      await fetchVisits(selectedWoman.pregnancy.id);
-
-      await fetchPregnantWomen();
-
-      alert("ANC visit deleted successfully.");
-    } catch (error) {
-      console.error(error);
-
-      alert(error.message || "Failed to delete ANC visit.");
-    }
   };
 
   // =====================================================
@@ -1144,103 +701,60 @@ function BhwPregnantMonitoring() {
 
   const saveHomeVisit = async (e) => {
     e.preventDefault();
-
     if (!selectedWoman) return;
-
-    if (!homeVisitForm.visit_number) {
-      alert("Please select a home visit number.");
+    if (!homeVisitForm.visit_number || !homeVisitForm.visit_date) {
+      alert("Visit number and date are required.");
       return;
     }
-
-    if (!homeVisitForm.visit_date) {
-      alert("Please enter the visit date.");
-      return;
-    }
-
+    setSavingHomeVisit(true);
     try {
-      setSavingHomeVisit(true);
-
       const data = {
-        pregnant_woman_id: Number(selectedWoman.pregnancy.id),
-
+        pregnant_woman_id: selectedWoman.pregnancy.id,
         visit_number: Number(homeVisitForm.visit_number),
-
         trimester: homeVisitForm.trimester.trim() || null,
-
         visit_date: homeVisitForm.visit_date,
-
         findings: homeVisitForm.findings.trim() || null,
-
         danger_signs: homeVisitForm.danger_signs.trim() || null,
-
         action_taken: homeVisitForm.action_taken.trim() || null,
-
         next_visit_date: homeVisitForm.next_visit_date || null,
-
         recorded_by: user.id,
-
         updated_at: new Date().toISOString(),
       };
-
-      if (editingHomeVisit) {
-        const { error } = await supabase
-          .from("pregnant_woman_home_visits")
-          .update(data)
-          .eq("id", editingHomeVisit.id);
-
-        if (error) throw error;
-      } else {
-        const { error } = await supabase
-          .from("pregnant_woman_home_visits")
-          .insert({
-            ...data,
-            created_at: new Date().toISOString(),
-          });
-
-        if (error) throw error;
-      }
-
-      setShowHomeVisitModal(false);
-
-      await fetchHomeVisits(selectedWoman.pregnancy.id);
-      await fetchPregnantWomen();
-
-      alert(
-        editingHomeVisit
-          ? "Home visit updated successfully."
-          : "Home visit recorded successfully.",
+      await queueMonitoringSave(
+        user.id,
+        selectedWoman.pregnancy.id,
+        "homes",
+        editingHomeVisit,
+        data,
       );
+      setHomeVisits(
+        await cachedHomeVisits(user.id, selectedWoman.pregnancy.id),
+      );
+      setPending(await pendingMonitoringCount(user.id));
+      setShowHomeVisitModal(false);
+      alert("Home visit saved offline-first. Use Sync Now when connected.");
     } catch (error) {
-      console.error("Error saving home visit:", error);
-
-      alert(error.message || "Failed to save home visit.");
+      alert(error.message || "Could not save home visit");
     } finally {
       setSavingHomeVisit(false);
     }
   };
 
   const handleDeleteHomeVisit = async (visit) => {
-    const confirmed = window.confirm(
-      `Delete Home Visit ${visit.visit_number}?`,
-    );
-
-    if (!confirmed) return;
-
+    if (!window.confirm(`Delete Home Visit ${visit.visit_number}?`)) return;
     try {
-      const { error } = await supabase
-        .from("pregnant_woman_home_visits")
-        .delete()
-        .eq("id", visit.id);
-
-      if (error) throw error;
-
-      await fetchHomeVisits(selectedWoman.pregnancy.id);
-      await fetchPregnantWomen();
-      alert("Home visit deleted successfully.");
+      await queueMonitoringDelete(
+        user.id,
+        selectedWoman.pregnancy.id,
+        "homes",
+        visit,
+      );
+      setHomeVisits(
+        await cachedHomeVisits(user.id, selectedWoman.pregnancy.id),
+      );
+      setPending(await pendingMonitoringCount(user.id));
     } catch (error) {
-      console.error(error);
-
-      alert(error.message || "Failed to delete home visit.");
+      alert(error.message || "Could not delete home visit");
     }
   };
 
@@ -1335,6 +849,34 @@ function BhwPregnantMonitoring() {
             Monitor pregnancy registration, home visits, antenatal care, and
             pregnancy outcomes.
           </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
+          {online ? (
+            <Wifi size={18} className="text-green-600" />
+          ) : (
+            <WifiOff size={18} className="text-amber-600" />
+          )}
+          <span className="text-sm font-medium">
+            {online ? "Online" : "Offline — cached records"}
+          </span>
+          <span className="text-sm text-gray-500">
+            Pending home visits: {pending}
+          </span>
+          <button
+            type="button"
+            onClick={runSync}
+            disabled={!online || syncing}
+            className="ml-auto inline-flex items-center gap-2 rounded-lg bg-pink-600 px-3 py-2 text-sm text-white disabled:opacity-50"
+          >
+            <RefreshCw size={15} className={syncing ? "animate-spin" : ""} />
+            {syncing ? "Syncing..." : "Sync Now"}
+          </button>
+          {offlineError && (
+            <p className="w-full text-xs text-amber-700" role="alert">
+              {offlineError}
+            </p>
+          )}
         </div>
 
         {/* =====================================================
