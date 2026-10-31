@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -23,6 +23,12 @@ import {
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
+import {
+  pregnancyDraftKey,
+  readPregnancyDraft,
+  savePregnancyDraft,
+  deletePregnancyDraft,
+} from "../../lib/pregnancyDrafts";
 
 /* =========================================================
    HELPERS
@@ -31,52 +37,9 @@ import { supabase } from "../../lib/supabase";
 const today = () => new Date().toISOString().split("T")[0];
 
 /* =========================================================
-   LOCAL DRAFT STORAGE
-   Drafts are scoped to the signed-in user, pregnancy, and form/record.
+   LOCAL DRAFT STORAGE — IndexedDB (Dexie)
 ========================================================= */
-const DRAFT_PREFIX = "pregnancy_monitoring_draft";
-const DRAFT_SAVE_DELAY = 700;
-
-const makeDraftKey = (userId, pregnancyId, formType, recordId = "new") =>
-  [DRAFT_PREFIX, userId, pregnancyId, formType, recordId]
-    .map((part) => encodeURIComponent(String(part ?? "")))
-    .join(":");
-
-const readLocalDraft = (key) => {
-  try {
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && parsed.data && typeof parsed.data === "object"
-      ? parsed
-      : null;
-  } catch (error) {
-    console.error("Unable to read pregnancy-monitoring draft:", error);
-    return null;
-  }
-};
-
-const writeLocalDraft = (key, data, userId) => {
-  try {
-    localStorage.setItem(
-      key,
-      JSON.stringify({ data, userId, savedAt: new Date().toISOString() }),
-    );
-    return true;
-  } catch (error) {
-    console.error("Unable to save pregnancy-monitoring draft:", error);
-    return false;
-  }
-};
-
-const removeLocalDraft = (key) => {
-  try {
-    if (key) localStorage.removeItem(key);
-  } catch (error) {
-    console.error("Unable to remove pregnancy-monitoring draft:", error);
-  }
-};
-
+const DRAFT_SAVE_DELAY = 500;
 const formatDraftTime = (value) => {
   if (!value) return "";
   const date = new Date(value);
@@ -1037,75 +1000,99 @@ export default function PregnancyMonitoring() {
      DRAFT RESTORE / AUTO-SAVE
   ========================================================= */
 
-  const prepareDraft = (key, initialData, formLabel) => {
-    const savedDraft = readLocalDraft(key);
+  // Keep the current form in a ref so closing immediately after typing
+  // cannot lose changes while the 500ms debounce is still pending.
+  const draftRef = useRef(null);
+  const draftOpenToken = useRef(0);
+
+  const prepareDraft = async (key, initialData, formLabel, applyData) => {
+    const token = ++draftOpenToken.current;
+    setDraftReady(false);
+    setDraftStatus("Checking saved draft...");
     let restoredData = initialData;
-    let restored = false;
-
-    if (savedDraft) {
-      const savedAt = formatDraftTime(savedDraft.savedAt);
-      const shouldRestore = window.confirm(
-        `An unfinished ${formLabel} draft was found${savedAt ? ` (last saved ${savedAt})` : ""}.\n\nWould you like to restore it?`,
-      );
-
-      if (shouldRestore) {
-        restoredData = { ...initialData, ...savedDraft.data };
-        restored = true;
+    try {
+      const savedDraft = await readPregnancyDraft(key);
+      if (token !== draftOpenToken.current) return;
+      if (savedDraft) {
+        const savedAt = formatDraftTime(savedDraft.savedAt);
+        if (
+          window.confirm(
+            `An unfinished ${formLabel} draft was found${savedAt ? ` (last saved ${savedAt})` : ""}.\\n\\nRestore it?`,
+          )
+        ) {
+          restoredData = { ...initialData, ...savedDraft.data };
+          setDraftStatus("Draft restored");
+        } else {
+          await deletePregnancyDraft(key);
+          setDraftStatus("Draft will save automatically");
+        }
       } else {
-        removeLocalDraft(key);
+        setDraftStatus("Draft will save automatically");
       }
+      if (token !== draftOpenToken.current) return;
+      draftRef.current = { key, data: restoredData };
+      setActiveDraftKey(key);
+      applyData(restoredData);
+      setDraftReady(true);
+    } catch (error) {
+      console.error("Unable to restore draft:", error);
+      if (token !== draftOpenToken.current) return;
+      draftRef.current = { key, data: initialData };
+      setActiveDraftKey(key);
+      applyData(initialData);
+      setDraftReady(true);
+      setDraftStatus("Draft storage unavailable");
     }
-
-    setActiveDraftKey(key);
-    setDraftReady(true);
-    setDraftStatus(
-      restored ? "Draft restored" : "Draft will save automatically",
-    );
-    return restoredData;
   };
 
-  const discardActiveDraft = () => {
+  const discardActiveDraft = async () => {
     if (!activeDraftKey) return;
     if (
       !window.confirm("Discard this unfinished draft? This cannot be undone.")
-    ) {
+    )
       return;
-    }
-    removeLocalDraft(activeDraftKey);
-    setDraftStatus("Draft discarded");
+    ++draftOpenToken.current;
+    const key = activeDraftKey;
+    draftRef.current = null;
     setActiveDraftKey(null);
     setDraftReady(false);
+    setDraftStatus("Draft discarded");
+    try {
+      await deletePregnancyDraft(key);
+    } catch (error) {
+      console.error("Unable to delete draft:", error);
+      setDraftStatus("Could not delete draft");
+    }
   };
 
   useEffect(() => {
     if (!draftReady || !activeDraftKey || !user?.id) return undefined;
-
-    let formData = null;
-    let formIsOpen = false;
-
+    let formData;
     if (ancModal && activeDraftKey.includes(":anc:")) {
       formData = ancForm;
-      formIsOpen = true;
     } else if (referralModal && activeDraftKey.includes(":referral:")) {
       formData = { status: referralStatus, notes: referralNotes };
-      formIsOpen = true;
     } else if (outcomeModal && activeDraftKey.includes(":outcome:")) {
       formData = outcomeForm;
-      formIsOpen = true;
+    } else {
+      return undefined;
     }
 
-    if (!formIsOpen || !formData) return undefined;
-
+    const key = activeDraftKey;
+    draftRef.current = { key, data: formData };
     setDraftStatus("Saving draft...");
-    const timer = window.setTimeout(() => {
-      const saved = writeLocalDraft(activeDraftKey, formData, user.id);
-      setDraftStatus(
-        saved
-          ? `Draft saved at ${new Date().toLocaleTimeString()}`
-          : "Draft could not be saved in this browser",
-      );
+    const timer = window.setTimeout(async () => {
+      if (draftRef.current?.key !== key) return;
+      try {
+        await savePregnancyDraft(user, key, formData);
+        if (draftRef.current?.key === key) {
+          setDraftStatus(`Draft saved at ${new Date().toLocaleTimeString()}`);
+        }
+      } catch (error) {
+        console.error("Unable to autosave:", error);
+        setDraftStatus("Draft could not be saved");
+      }
     }, DRAFT_SAVE_DELAY);
-
     return () => window.clearTimeout(timer);
   }, [
     ancForm,
@@ -1117,14 +1104,44 @@ export default function PregnancyMonitoring() {
     outcomeForm,
     activeDraftKey,
     draftReady,
-    user?.id,
+    user,
   ]);
 
-  const clearSavedDraft = () => {
-    removeLocalDraft(activeDraftKey);
-    setActiveDraftKey(null);
+  const closeDraftModal = async (kind) => {
+    const snapshot = draftRef.current;
+    if (snapshot && user) {
+      try {
+        await savePregnancyDraft(user, snapshot.key, snapshot.data);
+      } catch (error) {
+        console.error("Unable to save draft on close:", error);
+        alert("The unfinished draft could not be saved. Please try again.");
+        return;
+      }
+    }
+    ++draftOpenToken.current;
+    draftRef.current = null;
     setDraftReady(false);
+    setActiveDraftKey(null);
     setDraftStatus("");
+    if (kind === "anc") setAncModal(false);
+    if (kind === "referral") setReferralModal(false);
+    if (kind === "outcome") setOutcomeModal(false);
+  };
+
+  const clearSavedDraft = async () => {
+    const key = activeDraftKey;
+    ++draftOpenToken.current;
+    draftRef.current = null;
+    setDraftReady(false);
+    setActiveDraftKey(null);
+    setDraftStatus("");
+    if (key) {
+      try {
+        await deletePregnancyDraft(key);
+      } catch (error) {
+        console.error("Unable to clear saved draft:", error);
+      }
+    }
   };
 
   /* =========================================================
@@ -1160,8 +1177,8 @@ export default function PregnancyMonitoring() {
           ? String(gestationalAge.weeks)
           : "",
     };
-    const key = makeDraftKey(user?.id, selectedPregnancy?.id, "anc", "new");
-    setAncForm(prepareDraft(key, initialForm, "ANC visit"));
+    const key = pregnancyDraftKey(user, selectedPregnancy?.id, "anc", "new");
+    prepareDraft(key, initialForm, "ANC visit", setAncForm);
     setAncModal(true);
   };
 
@@ -1205,8 +1222,8 @@ export default function PregnancyMonitoring() {
         ? String(gestationalAge.weeks)
         : "";
 
-    const key = makeDraftKey(user?.id, selectedPregnancy?.id, "anc", visit.id);
-    setAncForm(prepareDraft(key, form, "ANC visit"));
+    const key = pregnancyDraftKey(user, selectedPregnancy?.id, "anc", visit.id);
+    prepareDraft(key, form, "ANC visit", setAncForm);
     setAncModal(true);
   };
 
@@ -1291,7 +1308,7 @@ export default function PregnancyMonitoring() {
 
       if (result.error) throw result.error;
 
-      clearSavedDraft();
+      await clearSavedDraft();
       setAncModal(false);
       setEditingAnc(null);
 
@@ -1342,16 +1359,17 @@ export default function PregnancyMonitoring() {
       status: referral.status || "pending",
       notes: referral.midwife_notes || "",
     };
-    const key = makeDraftKey(
-      user?.id,
+    const key = pregnancyDraftKey(
+      user,
       selectedPregnancy?.id,
       "referral",
       referral.id,
     );
-    const restored = prepareDraft(key, initialData, "referral review");
-    setReferralStatus(restored.status || "pending");
-    setReferralNotes(restored.notes || "");
     setReferralModal(true);
+    prepareDraft(key, initialData, "referral review", (restored) => {
+      setReferralStatus(restored.status || "pending");
+      setReferralNotes(restored.notes || "");
+    });
   };
 
   const saveReferralReview = async (event) => {
@@ -1373,7 +1391,7 @@ export default function PregnancyMonitoring() {
 
       if (error) throw error;
 
-      clearSavedDraft();
+      await clearSavedDraft();
       setReferralModal(false);
       await openPregnancy(selectedPregnancy);
 
@@ -1401,13 +1419,13 @@ export default function PregnancyMonitoring() {
       facility_name: selectedPregnancy.facility_name || "",
       attended_by: selectedPregnancy.attended_by || "",
     };
-    const key = makeDraftKey(
-      user?.id,
+    const key = pregnancyDraftKey(
+      user,
       selectedPregnancy.id,
       "outcome",
       "current",
     );
-    setOutcomeForm(prepareDraft(key, initialForm, "pregnancy outcome"));
+    prepareDraft(key, initialForm, "pregnancy outcome", setOutcomeForm);
     setOutcomeModal(true);
   };
 
@@ -1433,7 +1451,7 @@ export default function PregnancyMonitoring() {
 
       if (error) throw error;
 
-      clearSavedDraft();
+      await clearSavedDraft();
       setOutcomeModal(false);
 
       const updatedPregnancy = {
@@ -2277,7 +2295,7 @@ export default function PregnancyMonitoring() {
               ? `Edit ANC Visit #${editingAnc.visit_number}`
               : "Add ANC Visit"
           }
-          onClose={() => setAncModal(false)}
+          onClose={() => closeDraftModal("anc")}
           large
         >
           <form onSubmit={saveAnc} className="space-y-6">
@@ -2583,7 +2601,7 @@ export default function PregnancyMonitoring() {
             <div className="flex justify-end gap-3 border-t pt-5">
               <button
                 type="button"
-                onClick={() => setAncModal(false)}
+                onClick={() => closeDraftModal("anc")}
                 className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
               >
                 Cancel
@@ -2609,7 +2627,7 @@ export default function PregnancyMonitoring() {
       {referralModal && selectedReferral && (
         <Modal
           title="Review Pregnancy Referral"
-          onClose={() => setReferralModal(false)}
+          onClose={() => closeDraftModal("referral")}
         >
           <form onSubmit={saveReferralReview} className="space-y-5">
             <DraftStatus status={draftStatus} onDiscard={discardActiveDraft} />
@@ -2667,7 +2685,7 @@ export default function PregnancyMonitoring() {
             <div className="flex justify-end gap-3 border-t pt-4">
               <button
                 type="button"
-                onClick={() => setReferralModal(false)}
+                onClick={() => closeDraftModal("referral")}
                 className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
               >
                 Cancel
@@ -2686,7 +2704,10 @@ export default function PregnancyMonitoring() {
 
       {/* OUTCOME MODAL */}
       {outcomeModal && (
-        <Modal title="Pregnancy Outcome" onClose={() => setOutcomeModal(false)}>
+        <Modal
+          title="Pregnancy Outcome"
+          onClose={() => closeDraftModal("outcome")}
+        >
           <form onSubmit={saveOutcome} className="space-y-5">
             <DraftStatus status={draftStatus} onDiscard={discardActiveDraft} />
             <div>
@@ -2770,7 +2791,7 @@ export default function PregnancyMonitoring() {
             <div className="flex justify-end gap-3 border-t pt-4">
               <button
                 type="button"
-                onClick={() => setOutcomeModal(false)}
+                onClick={() => closeDraftModal("outcome")}
                 className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
               >
                 Cancel

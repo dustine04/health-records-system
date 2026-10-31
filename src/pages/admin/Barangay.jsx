@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Search,
   Plus,
@@ -8,730 +8,822 @@ import {
   MapPin,
   Loader2,
   Map,
+  Wifi,
+  WifiOff,
+  RefreshCw,
 } from "lucide-react";
+
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
 
+import {
+  getBarangayCache,
+  saveBarangayCache,
+  getAreasCache,
+  saveAreasCache,
+  pendingBarangayActions,
+  queueBarangayEdit,
+  syncBarangayActions,
+} from "../../lib/adminBarangayOffline";
+
+const userNow = () => {
+  try {
+    return JSON.parse(localStorage.getItem("user") || "null");
+  } catch {
+    return null;
+  }
+};
+
+const formatDate = (v) => (v ? new Date(v).toLocaleDateString() : "—");
+
+const inputStyle =
+  "w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm outline-none focus:border-blue-500";
+
+const buttonStyle =
+  "inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium disabled:opacity-50";
+
+const normalize = (v) => String(v ?? "");
+
 export default function Barangay() {
-  // =========================
-  // Barangay States
-  // =========================
+  const user = userNow();
+  const valid = !!user?.id && user.role === "cho_admin";
+
   const [barangays, setBarangays] = useState([]);
   const [districts, setDistricts] = useState([]);
-
   const [search, setSearch] = useState("");
   const [districtFilter, setDistrictFilter] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-
-  const [showModal, setShowModal] = useState(false);
-  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [syncing, setSyncing] = useState(false);
+  const [pending, setPending] = useState([]);
+  const [notice, setNotice] = useState("");
+  const [cachedAt, setCachedAt] = useState(null);
 
   const [editingBarangay, setEditingBarangay] = useState(null);
+  const [showModal, setShowModal] = useState(false);
   const [deletingBarangay, setDeletingBarangay] = useState(null);
-
   const [name, setName] = useState("");
   const [districtId, setDistrictId] = useState("");
 
-  // =========================
-  // Local Area States
-  // =========================
-  const [showAreaModal, setShowAreaModal] = useState(false);
-  const [showAreaForm, setShowAreaForm] = useState(false);
-  const [showAreaDeleteModal, setShowAreaDeleteModal] = useState(false);
-
   const [selectedBarangay, setSelectedBarangay] = useState(null);
-
   const [localAreas, setLocalAreas] = useState([]);
   const [areaLoading, setAreaLoading] = useState(false);
-  const [areaSaving, setAreaSaving] = useState(false);
-
   const [editingArea, setEditingArea] = useState(null);
-  const [deletingArea, setDeletingArea] = useState(null);
-
+  const [showAreaForm, setShowAreaForm] = useState(false);
   const [areaName, setAreaName] = useState("");
   const [areaType, setAreaType] = useState("purok");
+  const [deletingArea, setDeletingArea] = useState(null);
 
-  // =========================
-  // Fetch Districts
-  // =========================
-  const fetchDistricts = async () => {
-    const { data, error } = await supabase
-      .from("districts")
-      .select("*")
-      .order("name", { ascending: true });
+  const refreshPending = useCallback(async () => {
+    const u = userNow();
 
-    if (error) {
-      console.error("Error fetching districts:", error);
-      return;
+    if (u?.role === "cho_admin") {
+      setPending(await pendingBarangayActions(u));
     }
+  }, []);
 
-    setDistricts(data || []);
-  };
+  const refreshDirectory = useCallback(async () => {
+    const u = userNow();
 
-  // =========================
-  // Fetch Barangays
-  // =========================
-  const fetchBarangays = async () => {
-    setLoading(true);
-
-    const { data, error } = await supabase
-      .from("barangays")
-      .select(
-        `
-        *,
-        districts (
-          id,
-          name
-        )
-      `,
-      )
-      .order("id", { ascending: true });
-
-    if (error) {
-      console.error("Error fetching barangays:", error);
+    if (u?.role !== "cho_admin" || !u?.id) {
       setLoading(false);
       return;
     }
 
-    setBarangays(data || []);
-    setLoading(false);
-  };
+    setLoading(true);
+    let cached = null;
 
-  useEffect(() => {
-    fetchDistricts();
-    fetchBarangays();
+    try {
+      cached = await getBarangayCache(u);
+
+      if (cached) {
+        setBarangays(cached.barangays || []);
+        setDistricts(cached.districts || []);
+        setCachedAt(cached.cachedAt);
+      }
+
+      if (!navigator.onLine) {
+        setNotice(
+          cached
+            ? "Showing cached barangays and districts."
+            : "No offline cache. Load this page online first.",
+        );
+        return;
+      }
+
+      const [b, d] = await Promise.all([
+        supabase.from("barangays").select("*,districts(id,name)").order("id"),
+        supabase.from("districts").select("id,name").order("name"),
+      ]);
+
+      if (b.error) throw b.error;
+      if (d.error) throw d.error;
+
+      setBarangays(b.data || []);
+      setDistricts(d.data || []);
+
+      await saveBarangayCache(u, b.data || [], d.data || []);
+
+      setCachedAt(Date.now());
+      setNotice("");
+    } catch (e) {
+      setNotice(
+        `Directory refresh failed: ${e.message}. ${
+          cached ? "Showing cache." : ""
+        }`,
+      );
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  // =========================
-  // Barangay Modal
-  // =========================
-  const openAddModal = () => {
-    setEditingBarangay(null);
-    setName("");
-    setDistrictId("");
-    setShowModal(true);
-  };
+  const refreshAreas = useCallback(async (barangayId) => {
+    const u = userNow();
+    setAreaLoading(true);
 
-  const openEditModal = (barangay) => {
-    setEditingBarangay(barangay);
-    setName(barangay.name);
-    setDistrictId(barangay.district_id?.toString() || "");
-    setShowModal(true);
-  };
+    let cached = null;
 
-  const closeBarangayModal = () => {
-    if (saving) return;
+    try {
+      cached = await getAreasCache(u, barangayId);
 
-    setShowModal(false);
-    setEditingBarangay(null);
-    setName("");
-    setDistrictId("");
-  };
+      if (cached) {
+        setLocalAreas(cached.areas || []);
+      }
 
-  // =========================
-  // Save Barangay
-  // =========================
-  const handleSaveBarangay = async (e) => {
-    e.preventDefault();
+      if (!navigator.onLine) {
+        if (!cached) {
+          setNotice(
+            "No offline area cache for this barangay. Open it online first.",
+          );
+        }
+        return;
+      }
 
-    if (!name.trim()) {
-      alert("Please enter a barangay name.");
+      const { data, error } = await supabase
+        .from("local_areas")
+        .select("*")
+        .eq("barangay_id", barangayId)
+        .order("type")
+        .order("name");
+
+      if (error) throw error;
+
+      setLocalAreas(data || []);
+
+      await saveAreasCache(u, barangayId, data || []);
+    } catch (e) {
+      setNotice(
+        `Area refresh failed: ${e.message}. ${cached ? "Showing cache." : ""}`,
+      );
+    } finally {
+      setAreaLoading(false);
+    }
+  }, []);
+
+  const syncNow = useCallback(async () => {
+    const u = userNow();
+
+    if (u?.role !== "cho_admin" || !navigator.onLine) {
       return;
     }
 
-    if (!districtId) {
-      alert("Please select a district.");
-      return;
+    setSyncing(true);
+
+    try {
+      const count = await syncBarangayActions(u);
+
+      await refreshPending();
+      await refreshDirectory();
+
+      if (selectedBarangay) {
+        await refreshAreas(selectedBarangay.id);
+      }
+
+      setNotice(`${count} pending edit(s) synchronized successfully.`);
+    } catch (e) {
+      await refreshPending();
+
+      setNotice(`Sync stopped: ${e.message}. Pending changes remain saved.`);
+    } finally {
+      setSyncing(false);
+    }
+  }, [refreshPending, refreshDirectory, refreshAreas, selectedBarangay]);
+
+  useEffect(() => {
+    refreshDirectory();
+    refreshPending();
+  }, [refreshDirectory, refreshPending]);
+
+  useEffect(() => {
+    const on = () => {
+      setOnline(true);
+      syncNow();
+    };
+
+    const off = () => {
+      setOnline(false);
+      setNotice("Offline: cached data available; edits can be queued.");
+    };
+
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+
+    return () => {
+      window.removeEventListener("online", on);
+      window.removeEventListener("offline", off);
+    };
+  }, [syncNow]);
+
+  const pendingKey = (table, id) =>
+    pending.some(
+      (p) => p.table === table && normalize(p.recordId) === normalize(id),
+    );
+
+  const filtered = useMemo(
+    () =>
+      barangays.filter(
+        (b) =>
+          b.name?.toLowerCase().includes(search.trim().toLowerCase()) &&
+          (!districtFilter || normalize(b.district_id) === districtFilter),
+      ),
+    [barangays, search, districtFilter],
+  );
+
+  const districtName = (id) =>
+    districts.find((d) => normalize(d.id) === normalize(id))?.name || "—";
+
+  const busy = saving || syncing;
+
+  const onlineRequired = (label) => {
+    setNotice(`${label} requires an internet connection.`);
+  };
+
+  const openAddBarangay = () => {
+    if (!online) {
+      return onlineRequired("Adding a barangay");
+    }
+
+    setEditingBarangay(null);
+    setName("");
+    setDistrictId("");
+    setShowModal(true);
+  };
+
+  const openEditBarangay = (b) => {
+    if (pendingKey("barangays", b.id)) {
+      return setNotice("Sync this barangay's pending edit first.");
+    }
+
+    setEditingBarangay(b);
+    setName(b.name);
+    setDistrictId(normalize(b.district_id));
+    setShowModal(true);
+  };
+
+  const saveBarangay = async (e) => {
+    e.preventDefault();
+
+    if (busy) return;
+
+    if (!name.trim() || !districtId) {
+      return setNotice("Enter a barangay name and district.");
+    }
+
+    if (!districts.some((d) => normalize(d.id) === districtId)) {
+      return setNotice("Select a valid district.");
+    }
+
+    if (!editingBarangay && !navigator.onLine) {
+      return onlineRequired("Adding a barangay");
+    }
+
+    if (
+      editingBarangay &&
+      normalize(editingBarangay.district_id) !== districtId &&
+      !navigator.onLine
+    ) {
+      return onlineRequired("Changing a barangay's district");
     }
 
     setSaving(true);
 
     try {
-      if (editingBarangay) {
-        const { error } = await supabase
+      if (
+        editingBarangay &&
+        normalize(editingBarangay.district_id) === districtId
+      ) {
+        if (editingBarangay.name !== name.trim()) {
+          await queueBarangayEdit(userNow(), "barangays", editingBarangay, {
+            name: name.trim(),
+          });
+
+          await refreshPending();
+          setNotice("Barangay rename queued.");
+        }
+      } else if (editingBarangay) {
+        const { data, error } = await supabase
           .from("barangays")
           .update({
             name: name.trim(),
             district_id: Number(districtId),
           })
-          .eq("id", editingBarangay.id);
+          .eq("id", editingBarangay.id)
+          .eq("district_id", editingBarangay.district_id)
+          .select("id")
+          .maybeSingle();
 
         if (error) throw error;
+
+        if (!data) {
+          throw new Error("Server did not confirm barangay update.");
+        }
+
+        await refreshDirectory();
       } else {
-        const { error } = await supabase.from("barangays").insert([
-          {
+        const { data, error } = await supabase
+          .from("barangays")
+          .insert({
             name: name.trim(),
             district_id: Number(districtId),
-          },
-        ]);
+          })
+          .select("id")
+          .single();
 
         if (error) throw error;
+
+        if (!data) {
+          throw new Error("Server did not confirm creation.");
+        }
+
+        await refreshDirectory();
       }
 
-      await fetchBarangays();
-      closeBarangayModal();
-    } catch (error) {
-      console.error("Error saving barangay:", error);
-      alert(error.message || "Failed to save barangay.");
+      setShowModal(false);
+      setEditingBarangay(null);
+
+      if (navigator.onLine) {
+        await syncNow();
+      }
+    } catch (e) {
+      setNotice(e.message);
     } finally {
       setSaving(false);
     }
   };
 
-  // =========================
-  // Delete Barangay
-  // =========================
-  const openDeleteModal = (barangay) => {
-    setDeletingBarangay(barangay);
-    setShowDeleteModal(true);
-  };
+  const deleteBarangay = async () => {
+    if (!deletingBarangay || busy) return;
 
-  const closeDeleteModal = () => {
-    if (saving) return;
-
-    setShowDeleteModal(false);
-    setDeletingBarangay(null);
-  };
-
-  const handleDeleteBarangay = async () => {
-    if (!deletingBarangay) return;
+    if (!navigator.onLine) {
+      return onlineRequired("Deleting a barangay");
+    }
 
     setSaving(true);
 
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from("barangays")
         .delete()
-        .eq("id", deletingBarangay.id);
+        .eq("id", deletingBarangay.id)
+        .select("id");
 
       if (error) throw error;
 
-      await fetchBarangays();
-      closeDeleteModal();
-    } catch (error) {
-      console.error("Error deleting barangay:", error);
-      alert(error.message || "Failed to delete barangay.");
+      if (!data?.length) {
+        throw new Error("Server did not confirm deletion.");
+      }
+
+      setDeletingBarangay(null);
+      await refreshDirectory();
+      setNotice("Barangay deleted.");
+    } catch (e) {
+      setNotice(
+        e.code === "23503"
+          ? "Cannot delete: related records reference this barangay."
+          : e.message,
+      );
     } finally {
       setSaving(false);
     }
   };
 
-  // =========================
-  // Local Areas
-  // =========================
-  const fetchLocalAreas = async (barangayId) => {
-    setAreaLoading(true);
+  const manageAreas = async (b) => {
+    setSelectedBarangay(b);
+    setLocalAreas([]);
+    setShowAreaForm(false);
+    setEditingArea(null);
 
-    const { data, error } = await supabase
-      .from("local_areas")
-      .select("*")
-      .eq("barangay_id", barangayId)
-      .order("type", { ascending: true })
-      .order("name", { ascending: true });
+    await refreshAreas(b.id);
+  };
 
-    if (error) {
-      console.error("Error fetching local areas:", error);
-      setLocalAreas([]);
-      setAreaLoading(false);
-      return;
+  const openAreaForm = (area) => {
+    if (area && pendingKey("local_areas", area.id)) {
+      return setNotice("Sync this area's pending edit first.");
     }
 
-    setLocalAreas(data || []);
-    setAreaLoading(false);
-  };
+    if (!area && !online) {
+      return onlineRequired("Adding an area");
+    }
 
-  // =========================
-  // Open Manage Areas
-  // =========================
-  const handleManageAreas = async (barangay) => {
-    setSelectedBarangay(barangay);
-
-    setEditingArea(null);
-    setAreaName("");
-    setAreaType("purok");
-    setShowAreaForm(false);
-
-    setShowAreaModal(true);
-
-    await fetchLocalAreas(barangay.id);
-  };
-
-  const closeAreaModal = () => {
-    if (areaSaving) return;
-
-    setShowAreaModal(false);
-    setShowAreaForm(false);
-    setSelectedBarangay(null);
-    setLocalAreas([]);
-    setEditingArea(null);
-    setAreaName("");
-    setAreaType("purok");
-  };
-
-  // =========================
-  // Add Area
-  // =========================
-  const openAddAreaForm = () => {
-    setEditingArea(null);
-    setAreaName("");
-    setAreaType("purok");
+    setEditingArea(area || null);
+    setAreaName(area?.name || "");
+    setAreaType(area?.type || "purok");
     setShowAreaForm(true);
   };
 
-  // =========================
-  // Edit Area
-  // =========================
-  const openEditAreaForm = (area) => {
-    setEditingArea(area);
-    setAreaName(area.name);
-    setAreaType(area.type);
-    setShowAreaForm(true);
-  };
-
-  // =========================
-  // Save Area
-  // =========================
-  const handleSaveArea = async (e) => {
+  const saveArea = async (e) => {
     e.preventDefault();
 
-    if (!selectedBarangay) return;
+    if (!selectedBarangay || busy) return;
 
-    if (!areaName.trim()) {
-      alert("Please enter a Purok/Sitio name.");
-      return;
+    if (!areaName.trim() || !["purok", "sitio"].includes(areaType)) {
+      return setNotice("Enter a valid area name and type.");
     }
 
-    setAreaSaving(true);
+    if (!editingArea && !navigator.onLine) {
+      return onlineRequired("Adding an area");
+    }
+
+    setSaving(true);
 
     try {
       if (editingArea) {
-        const { error } = await supabase
-          .from("local_areas")
-          .update({
-            name: areaName.trim(),
-            type: areaType,
-          })
-          .eq("id", editingArea.id);
+        const changes = {};
 
-        if (error) throw error;
+        if (editingArea.name !== areaName.trim()) {
+          changes.name = areaName.trim();
+        }
+
+        if (editingArea.type !== areaType) {
+          changes.type = areaType;
+        }
+
+        if (Object.keys(changes).length) {
+          await queueBarangayEdit(
+            userNow(),
+            "local_areas",
+            editingArea,
+            changes,
+          );
+
+          await refreshPending();
+          setNotice("Area edit queued.");
+        }
       } else {
-        const { error } = await supabase.from("local_areas").insert([
-          {
+        const { data, error } = await supabase
+          .from("local_areas")
+          .insert({
             barangay_id: selectedBarangay.id,
             name: areaName.trim(),
             type: areaType,
-          },
-        ]);
+          })
+          .select("id")
+          .single();
 
         if (error) throw error;
+
+        if (!data) {
+          throw new Error("Server did not confirm area creation.");
+        }
+
+        await refreshAreas(selectedBarangay.id);
       }
 
-      await fetchLocalAreas(selectedBarangay.id);
-
-      setEditingArea(null);
-      setAreaName("");
-      setAreaType("purok");
       setShowAreaForm(false);
-    } catch (error) {
-      console.error("Error saving local area:", error);
-      alert(error.message || "Failed to save local area.");
+      setEditingArea(null);
+
+      if (navigator.onLine) {
+        await syncNow();
+      }
+    } catch (e) {
+      setNotice(e.message);
     } finally {
-      setAreaSaving(false);
+      setSaving(false);
     }
   };
 
-  // =========================
-  // Delete Area
-  // =========================
-  const openDeleteAreaModal = (area) => {
-    setDeletingArea(area);
-    setShowAreaDeleteModal(true);
-  };
+  const deleteArea = async () => {
+    if (!deletingArea || !selectedBarangay || busy) {
+      return;
+    }
 
-  const closeAreaDeleteModal = () => {
-    if (areaSaving) return;
+    if (!navigator.onLine) {
+      return onlineRequired("Deleting an area");
+    }
 
-    setShowAreaDeleteModal(false);
-    setDeletingArea(null);
-  };
-
-  const handleDeleteArea = async () => {
-    if (!deletingArea || !selectedBarangay) return;
-
-    setAreaSaving(true);
+    setSaving(true);
 
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from("local_areas")
         .delete()
-        .eq("id", deletingArea.id);
+        .eq("id", deletingArea.id)
+        .eq("barangay_id", selectedBarangay.id)
+        .select("id");
 
       if (error) throw error;
 
-      await fetchLocalAreas(selectedBarangay.id);
+      if (!data?.length) {
+        throw new Error("Server did not confirm area deletion.");
+      }
 
-      closeAreaDeleteModal();
-    } catch (error) {
-      console.error("Error deleting local area:", error);
-      alert(error.message || "Failed to delete local area.");
+      setDeletingArea(null);
+      await refreshAreas(selectedBarangay.id);
+      setNotice("Area deleted.");
+    } catch (e) {
+      setNotice(
+        e.code === "23503"
+          ? "Cannot delete: this area is referenced by other records."
+          : e.message,
+      );
     } finally {
-      setAreaSaving(false);
+      setSaving(false);
     }
   };
 
-  // =========================
-  // Filtering
-  // =========================
-  const filteredBarangays = barangays.filter((barangay) => {
-    const matchesSearch = barangay.name
-      ?.toLowerCase()
-      .includes(search.toLowerCase());
-
-    const matchesDistrict =
-      !districtFilter || barangay.district_id?.toString() === districtFilter;
-
-    return matchesSearch && matchesDistrict;
-  });
+  if (!valid) {
+    return (
+      <DashboardLayout>
+        <div className="p-8 text-red-600">CHO Admin account required.</div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
-      <div className="p-4 sm:p-6 lg:p-8">
-        {/* =========================
-            Page Header
-        ========================= */}
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="space-y-6 p-4 sm:p-6 lg:p-8">
+        {/* HEADER */}
+        <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Barangays</h1>
 
-            <p className="mt-1 text-sm text-gray-500">
+            <p className="text-sm text-gray-500">
               Manage barangays and their Purok/Sitio areas.
             </p>
           </div>
 
-          <button
-            onClick={openAddModal}
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
-          >
-            <Plus size={18} />
-            Add Barangay
-          </button>
-        </div>
-
-        {/* =========================
-            Filters
-        ========================= */}
-        <div className="mt-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            {/* Search */}
-            <div className="relative">
-              <Search
-                size={18}
-                className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
-              />
-
-              <input
-                type="text"
-                placeholder="Search barangay..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full rounded-lg border border-gray-300 py-2.5 pl-10 pr-4 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-              />
-            </div>
-
-            {/* District Filter */}
-            <select
-              value={districtFilter}
-              onChange={(e) => setDistrictFilter(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+          <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`flex items-center gap-1 rounded-lg px-3 py-2 text-sm ${
+                online
+                  ? "bg-green-50 text-green-700"
+                  : "bg-amber-50 text-amber-700"
+              }`}
             >
-              <option value="">All Districts</option>
+              {online ? <Wifi size={16} /> : <WifiOff size={16} />}
 
-              {districts.map((district) => (
-                <option key={district.id} value={district.id}>
-                  {district.name}
-                </option>
-              ))}
-            </select>
+              {online ? "Online" : "Offline"}
+            </span>
+
+            <span className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {pending.length} pending
+            </span>
+
+            <button
+              type="button"
+              className={`${buttonStyle} bg-blue-600 text-white`}
+              disabled={!online || busy}
+              onClick={syncNow}
+            >
+              <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+              Sync Now
+            </button>
+
+            <button
+              type="button"
+              className={`${buttonStyle} border bg-white`}
+              disabled={busy || loading}
+              onClick={refreshDirectory}
+            >
+              <RefreshCw size={16} />
+              Refresh
+            </button>
+
+            <button
+              type="button"
+              className={`${buttonStyle} bg-blue-600 text-white`}
+              disabled={!online || busy}
+              onClick={openAddBarangay}
+            >
+              <Plus size={16} />
+              Add Barangay
+            </button>
           </div>
         </div>
 
-        {/* =========================
-            Desktop Table
-        ========================= */}
-        <div className="mt-6 hidden overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm md:block">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="border-b border-gray-200 bg-gray-50">
+        {/* NOTICE */}
+        {notice && (
+          <div className="flex items-start justify-between rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+            <span>{notice}</span>
+
+            <button type="button" onClick={() => setNotice("")}>
+              <X size={16} />
+            </button>
+          </div>
+        )}
+
+        {cachedAt && (
+          <p className="text-xs text-gray-500">
+            Last cached: {new Date(cachedAt).toLocaleString()}
+          </p>
+        )}
+
+        {/* FILTERS */}
+        <div className="grid gap-3 rounded-xl border bg-white p-4 md:grid-cols-2">
+          <div className="relative">
+            <Search size={17} className="absolute left-3 top-3 text-gray-400" />
+
+            <input
+              className={`${inputStyle} pl-10`}
+              placeholder="Search barangay..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          </div>
+
+          <select
+            className={inputStyle}
+            value={districtFilter}
+            onChange={(e) => setDistrictFilter(e.target.value)}
+          >
+            <option value="">All Districts</option>
+
+            {districts.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* BARANGAY TABLE */}
+        <div className="overflow-x-auto rounded-xl border bg-white shadow-sm">
+          <table className="w-full min-w-[650px] text-sm">
+            <thead className="bg-gray-50 text-left text-gray-500">
+              <tr>
+                {[
+                  "#",
+                  "Barangay",
+                  "District",
+                  "Created",
+                  "Sync",
+                  "Actions",
+                ].map((h) => (
+                  <th key={h} className="px-4 py-3">
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+
+            <tbody className="divide-y">
+              {loading && !barangays.length ? (
                 <tr>
-                  <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    #
-                  </th>
-
-                  <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    Barangay
-                  </th>
-
-                  <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    District
-                  </th>
-
-                  <th className="px-5 py-4 text-left text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    Created
-                  </th>
-
-                  <th className="px-5 py-4 text-right text-xs font-semibold uppercase tracking-wide text-gray-500">
-                    Actions
-                  </th>
+                  <td colSpan={6} className="p-10 text-center">
+                    <Loader2 className="mx-auto animate-spin" />
+                  </td>
                 </tr>
-              </thead>
+              ) : !filtered.length ? (
+                <tr>
+                  <td colSpan={6} className="p-10 text-center text-gray-500">
+                    No barangays found.
+                  </td>
+                </tr>
+              ) : (
+                filtered.map((b, i) => (
+                  <tr key={b.id}>
+                    <td className="px-4 py-3">{i + 1}</td>
 
-              <tbody className="divide-y divide-gray-100">
-                {loading ? (
-                  <tr>
-                    <td
-                      colSpan="5"
-                      className="px-5 py-10 text-center text-gray-500"
-                    >
-                      <div className="flex items-center justify-center gap-2">
-                        <Loader2 size={18} className="animate-spin" />
-                        Loading barangays...
+                    <td className="px-4 py-3 font-semibold">
+                      <MapPin className="mr-2 inline text-blue-600" size={16} />
+                      {b.name}
+                    </td>
+
+                    <td className="px-4 py-3">{districtName(b.district_id)}</td>
+
+                    <td className="px-4 py-3">{formatDate(b.created_at)}</td>
+
+                    <td className="px-4 py-3 text-xs">
+                      {pendingKey("barangays", b.id) ? (
+                        <span className="text-amber-700">Pending edit</span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+
+                    <td className="px-4 py-3">
+                      <div className="flex justify-end gap-2">
+                        <button
+                          type="button"
+                          className={`${buttonStyle} bg-blue-50 text-blue-700`}
+                          onClick={() => manageAreas(b)}
+                        >
+                          <Map size={16} />
+                          Areas
+                        </button>
+
+                        <button
+                          type="button"
+                          title="Edit"
+                          disabled={busy || pendingKey("barangays", b.id)}
+                          className="p-2 text-blue-600 disabled:opacity-40"
+                          onClick={() => openEditBarangay(b)}
+                        >
+                          <Pencil size={17} />
+                        </button>
+
+                        <button
+                          type="button"
+                          title="Delete"
+                          disabled={
+                            busy || !online || pendingKey("barangays", b.id)
+                          }
+                          className="p-2 text-red-600 disabled:opacity-40"
+                          onClick={() => setDeletingBarangay(b)}
+                        >
+                          <Trash2 size={17} />
+                        </button>
                       </div>
                     </td>
                   </tr>
-                ) : filteredBarangays.length === 0 ? (
-                  <tr>
-                    <td
-                      colSpan="5"
-                      className="px-5 py-10 text-center text-gray-500"
-                    >
-                      No barangays found.
-                    </td>
-                  </tr>
-                ) : (
-                  filteredBarangays.map((barangay, index) => (
-                    <tr
-                      key={barangay.id}
-                      className="transition hover:bg-gray-50"
-                    >
-                      <td className="px-5 py-4 text-sm text-gray-500">
-                        {index + 1}
-                      </td>
-
-                      <td className="px-5 py-4">
-                        <div className="flex items-center gap-3">
-                          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-                            <MapPin size={18} />
-                          </div>
-
-                          <span className="text-sm font-medium text-gray-900">
-                            {barangay.name}
-                          </span>
-                        </div>
-                      </td>
-
-                      <td className="px-5 py-4 text-sm text-gray-600">
-                        {barangay.districts?.name || "—"}
-                      </td>
-
-                      <td className="px-5 py-4 text-sm text-gray-500">
-                        {barangay.created_at
-                          ? new Date(barangay.created_at).toLocaleDateString()
-                          : "—"}
-                      </td>
-
-                      <td className="px-5 py-4">
-                        <div className="flex justify-end gap-2">
-                          {/* Manage Areas */}
-                          <button
-                            onClick={() => handleManageAreas(barangay)}
-                            title="Manage Purok/Sitio"
-                            className="inline-flex items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-600 transition hover:bg-blue-100"
-                          >
-                            <Map size={16} />
-                            Areas
-                          </button>
-
-                          {/* Edit */}
-                          <button
-                            onClick={() => openEditModal(barangay)}
-                            title="Edit Barangay"
-                            className="rounded-lg p-2 text-gray-500 transition hover:bg-gray-100 hover:text-blue-600"
-                          >
-                            <Pencil size={17} />
-                          </button>
-
-                          {/* Delete */}
-                          <button
-                            onClick={() => openDeleteModal(barangay)}
-                            title="Delete Barangay"
-                            className="rounded-lg p-2 text-gray-500 transition hover:bg-red-50 hover:text-red-600"
-                          >
-                            <Trash2 size={17} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-
-        {/* =========================
-            Mobile Cards
-        ========================= */}
-        <div className="mt-6 space-y-3 md:hidden">
-          {loading ? (
-            <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-500">
-              <div className="flex items-center justify-center gap-2">
-                <Loader2 size={18} className="animate-spin" />
-                Loading barangays...
-              </div>
-            </div>
-          ) : filteredBarangays.length === 0 ? (
-            <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-gray-500">
-              No barangays found.
-            </div>
-          ) : (
-            filteredBarangays.map((barangay) => (
-              <div
-                key={barangay.id}
-                className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-                      <MapPin size={19} />
-                    </div>
-
-                    <div>
-                      <h3 className="font-semibold text-gray-900">
-                        {barangay.name}
-                      </h3>
-
-                      <p className="text-sm text-gray-500">
-                        {barangay.districts?.name || "No district"}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="mt-4 flex gap-2 border-t border-gray-100 pt-3">
-                  <button
-                    onClick={() => handleManageAreas(barangay)}
-                    className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-blue-50 px-3 py-2 text-sm font-medium text-blue-600 transition hover:bg-blue-100"
-                  >
-                    <Map size={16} />
-                    Areas
-                  </button>
-
-                  <button
-                    onClick={() => openEditModal(barangay)}
-                    className="rounded-lg border border-gray-200 p-2 text-gray-500 transition hover:bg-gray-50 hover:text-blue-600"
-                  >
-                    <Pencil size={17} />
-                  </button>
-
-                  <button
-                    onClick={() => openDeleteModal(barangay)}
-                    className="rounded-lg border border-gray-200 p-2 text-gray-500 transition hover:bg-red-50 hover:text-red-600"
-                  >
-                    <Trash2 size={17} />
-                  </button>
-                </div>
-              </div>
-            ))
-          )}
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
       </div>
 
-      {/* =====================================================
-          ADD / EDIT BARANGAY MODAL
-      ===================================================== */}
+      {/* ADD / EDIT BARANGAY MODAL */}
       {showModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-              <div>
-                <h2 className="text-lg font-semibold text-gray-900">
-                  {editingBarangay ? "Edit Barangay" : "Add Barangay"}
-                </h2>
-
-                <p className="mt-0.5 text-sm text-gray-500">
-                  {editingBarangay
-                    ? "Update barangay information."
-                    : "Add a new barangay."}
-                </p>
-              </div>
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <div className="mb-5 flex justify-between">
+              <h2 className="text-lg font-bold">
+                {editingBarangay ? "Edit Barangay" : "Add Barangay"}
+              </h2>
 
               <button
-                onClick={closeBarangayModal}
-                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                type="button"
+                onClick={() => !saving && setShowModal(false)}
               >
-                <X size={20} />
+                <X />
               </button>
             </div>
 
-            {/* Form */}
-            <form onSubmit={handleSaveBarangay} className="space-y-4 p-6">
-              {/* District */}
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-gray-700">
-                  District
-                </label>
+            <form className="space-y-4" onSubmit={saveBarangay}>
+              <label className="block text-sm font-medium">District</label>
 
-                <select
-                  value={districtId}
-                  onChange={(e) => setDistrictId(e.target.value)}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                >
-                  <option value="">Select District</option>
+              <select
+                required
+                className={inputStyle}
+                value={districtId}
+                onChange={(e) => setDistrictId(e.target.value)}
+              >
+                <option value="">Select District</option>
 
-                  {districts.map((district) => (
-                    <option key={district.id} value={district.id}>
-                      {district.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                {districts.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name}
+                  </option>
+                ))}
+              </select>
 
-              {/* Barangay Name */}
-              <div>
-                <label className="mb-1.5 block text-sm font-medium text-gray-700">
-                  Barangay Name
-                </label>
+              <label className="block text-sm font-medium">Barangay Name</label>
 
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="Enter barangay name"
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-                />
-              </div>
+              <input
+                required
+                className={inputStyle}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
 
-              {/* Buttons */}
-              <div className="flex justify-end gap-3 pt-2">
+              {!online && editingBarangay && (
+                <p className="text-xs text-amber-700">
+                  Only name edits can be queued offline. District changes
+                  require internet.
+                </p>
+              )}
+
+              <div className="flex justify-end gap-2">
                 <button
                   type="button"
-                  onClick={closeBarangayModal}
-                  className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+                  className={`${buttonStyle} border`}
+                  disabled={saving}
+                  onClick={() => setShowModal(false)}
                 >
                   Cancel
                 </button>
 
                 <button
                   type="submit"
-                  disabled={saving}
-                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  className={`${buttonStyle} bg-blue-600 text-white`}
+                  disabled={busy}
                 >
                   {saving && <Loader2 size={16} className="animate-spin" />}
 
-                  {editingBarangay ? "Update Barangay" : "Add Barangay"}
+                  {editingBarangay ? "Save Barangay" : "Add Barangay"}
                 </button>
               </div>
             </form>
@@ -739,320 +831,232 @@ export default function Barangay() {
         </div>
       )}
 
-      {/* =====================================================
-          DELETE BARANGAY MODAL
-      ===================================================== */}
-      {showDeleteModal && deletingBarangay && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 text-red-600">
-              <Trash2 size={22} />
-            </div>
-
-            <h2 className="mt-4 text-lg font-semibold text-gray-900">
-              Delete Barangay?
-            </h2>
-
-            <p className="mt-2 text-sm leading-6 text-gray-500">
-              Are you sure you want to delete{" "}
-              <span className="font-semibold text-gray-700">
-                {deletingBarangay.name}
-              </span>
-              ? Any Purok/Sitio areas belonging to this barangay may also be
-              deleted because of the database relationship.
-            </p>
-
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                onClick={closeDeleteModal}
-                disabled={saving}
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-
-              <button
-                onClick={handleDeleteBarangay}
-                disabled={saving}
-                className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
-              >
-                {saving && <Loader2 size={16} className="animate-spin" />}
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* DELETE BARANGAY */}
+      {deletingBarangay && (
+        <Confirm
+          title="Delete Barangay?"
+          detail={`Delete ${deletingBarangay.name}? Related records may prevent deletion.`}
+          busy={busy}
+          onCancel={() => setDeletingBarangay(null)}
+          onConfirm={deleteBarangay}
+        />
       )}
 
-      {/* =====================================================
-          MANAGE PUROK / SITIO MODAL
-      ===================================================== */}
-      {showAreaModal && selectedBarangay && (
+      {/* MANAGE AREAS MODAL */}
+      {selectedBarangay && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-xl">
-            {/* Header */}
-            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
+          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b p-5">
               <div>
-                <h2 className="text-lg font-semibold text-gray-900">
-                  Manage Purok / Sitio
-                </h2>
+                <h2 className="text-lg font-bold">Manage Purok / Sitio</h2>
 
-                <p className="mt-0.5 text-sm text-gray-500">
-                  {selectedBarangay.name}
-                  {selectedBarangay.districts?.name
-                    ? ` • ${selectedBarangay.districts.name}`
-                    : ""}
+                <p className="text-sm text-gray-500">
+                  {selectedBarangay.name} ·{" "}
+                  {districtName(selectedBarangay.district_id)}
                 </p>
               </div>
 
               <button
-                onClick={closeAreaModal}
-                className="rounded-lg p-2 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                type="button"
+                disabled={saving}
+                onClick={() => {
+                  setSelectedBarangay(null);
+                  setShowAreaForm(false);
+                }}
               >
-                <X size={20} />
+                <X />
               </button>
             </div>
 
-            {/* Body */}
-            <div className="overflow-y-auto p-6">
-              {/* Add Area Button */}
+            <div className="space-y-4 overflow-y-auto p-5">
               {!showAreaForm && (
-                <div className="mb-5 flex justify-end">
+                <div className="flex justify-end">
                   <button
-                    onClick={openAddAreaForm}
-                    className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-blue-700"
+                    type="button"
+                    className={`${buttonStyle} bg-blue-600 text-white`}
+                    disabled={!online || busy}
+                    onClick={() => openAreaForm(null)}
                   >
-                    <Plus size={17} />
+                    <Plus size={16} />
                     Add Area
                   </button>
                 </div>
               )}
 
-              {/* Area Form */}
               {showAreaForm && (
                 <form
-                  onSubmit={handleSaveArea}
-                  className="mb-6 rounded-xl border border-blue-100 bg-blue-50/50 p-4"
+                  onSubmit={saveArea}
+                  className="space-y-3 rounded-xl border bg-blue-50 p-4"
                 >
-                  <div className="mb-4 flex items-center justify-between">
-                    <h3 className="font-semibold text-gray-900">
+                  <div className="flex justify-between">
+                    <h3 className="font-semibold">
                       {editingArea ? "Edit Area" : "Add Area"}
                     </h3>
 
                     <button
                       type="button"
-                      onClick={() => {
-                        setShowAreaForm(false);
-                        setEditingArea(null);
-                        setAreaName("");
-                        setAreaType("purok");
-                      }}
-                      className="rounded-lg p-1.5 text-gray-400 hover:bg-white hover:text-gray-600"
+                      onClick={() => setShowAreaForm(false)}
                     >
-                      <X size={18} />
+                      <X size={17} />
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                    {/* Type */}
+                  <div className="grid gap-3 sm:grid-cols-2">
                     <div>
-                      <label className="mb-1.5 block text-sm font-medium text-gray-700">
-                        Area Type
-                      </label>
+                      <label className="mb-1 block text-sm">Type</label>
 
                       <select
+                        className={inputStyle}
                         value={areaType}
                         onChange={(e) => setAreaType(e.target.value)}
-                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                       >
                         <option value="purok">Purok</option>
-
                         <option value="sitio">Sitio</option>
                       </select>
                     </div>
 
-                    {/* Name */}
                     <div>
-                      <label className="mb-1.5 block text-sm font-medium text-gray-700">
-                        Name
-                      </label>
+                      <label className="mb-1 block text-sm">Name</label>
 
                       <input
-                        type="text"
+                        required
+                        className={inputStyle}
                         value={areaName}
                         onChange={(e) => setAreaName(e.target.value)}
-                        placeholder="e.g. Purok 1"
-                        className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
                       />
                     </div>
                   </div>
 
-                  <div className="mt-4 flex justify-end gap-2">
+                  <div className="flex justify-end gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        setShowAreaForm(false);
-                        setEditingArea(null);
-                        setAreaName("");
-                        setAreaType("purok");
-                      }}
-                      className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                      className={`${buttonStyle} border bg-white`}
+                      onClick={() => setShowAreaForm(false)}
                     >
                       Cancel
                     </button>
 
                     <button
                       type="submit"
-                      disabled={areaSaving}
-                      className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
+                      disabled={busy}
+                      className={`${buttonStyle} bg-blue-600 text-white`}
                     >
-                      {areaSaving && (
-                        <Loader2 size={16} className="animate-spin" />
-                      )}
-
-                      {editingArea ? "Update Area" : "Add Area"}
+                      {editingArea ? "Save Area" : "Add Area"}
                     </button>
                   </div>
                 </form>
               )}
 
-              {/* Areas List */}
-              <div>
-                <div className="mb-3 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-gray-900">Areas</h3>
-
-                  <span className="text-xs text-gray-500">
-                    {localAreas.length}{" "}
-                    {localAreas.length === 1 ? "area" : "areas"}
-                  </span>
+              {/* AREAS LIST */}
+              {areaLoading && !localAreas.length ? (
+                <div className="p-8 text-center">
+                  <Loader2 className="mx-auto animate-spin" />
                 </div>
+              ) : !localAreas.length ? (
+                <p className="rounded-lg border border-dashed p-8 text-center text-sm text-gray-500">
+                  No Purok/Sitio areas cached or available.
+                </p>
+              ) : (
+                <div className="divide-y rounded-xl border">
+                  {localAreas.map((a) => (
+                    <div
+                      key={a.id}
+                      className="flex items-center justify-between gap-3 p-4"
+                    >
+                      <div className="min-w-0">
+                        <p className="font-medium">{a.name}</p>
 
-                {areaLoading ? (
-                  <div className="rounded-xl border border-gray-200 p-8 text-center text-gray-500">
-                    <div className="flex items-center justify-center gap-2">
-                      <Loader2 size={18} className="animate-spin" />
-                      Loading areas...
-                    </div>
-                  </div>
-                ) : localAreas.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-gray-300 p-8 text-center">
-                    <Map size={28} className="mx-auto text-gray-400" />
+                        <p className="text-xs capitalize text-gray-500">
+                          {a.type}{" "}
+                          {pendingKey("local_areas", a.id) && "· Pending edit"}
+                        </p>
+                      </div>
 
-                    <p className="mt-2 text-sm font-medium text-gray-700">
-                      No Purok or Sitio yet
-                    </p>
-
-                    <p className="mt-1 text-xs text-gray-500">
-                      Add the local areas covered by this barangay.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="overflow-hidden rounded-xl border border-gray-200">
-                    <div className="divide-y divide-gray-100">
-                      {localAreas.map((area, index) => (
-                        <div
-                          key={area.id}
-                          className="flex items-center justify-between gap-4 p-4 hover:bg-gray-50"
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          disabled={busy || pendingKey("local_areas", a.id)}
+                          className="p-2 text-blue-600 disabled:opacity-40"
+                          onClick={() => openAreaForm(a)}
                         >
-                          <div className="flex min-w-0 items-center gap-3">
-                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-600">
-                              <MapPin size={17} />
-                            </div>
+                          <Pencil size={17} />
+                        </button>
 
-                            <div className="min-w-0">
-                              <p className="truncate text-sm font-medium text-gray-900">
-                                {area.name}
-                              </p>
-
-                              <span className="mt-0.5 inline-flex rounded-full bg-gray-100 px-2 py-0.5 text-xs capitalize text-gray-600">
-                                {area.type}
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex shrink-0 gap-1">
-                            <button
-                              onClick={() => openEditAreaForm(area)}
-                              title="Edit area"
-                              className="rounded-lg p-2 text-gray-500 hover:bg-blue-50 hover:text-blue-600"
-                            >
-                              <Pencil size={16} />
-                            </button>
-
-                            <button
-                              onClick={() => openDeleteAreaModal(area)}
-                              title="Delete area"
-                              className="rounded-lg p-2 text-gray-500 hover:bg-red-50 hover:text-red-600"
-                            >
-                              <Trash2 size={16} />
-                            </button>
-                          </div>
-                        </div>
-                      ))}
+                        <button
+                          type="button"
+                          disabled={
+                            !online || busy || pendingKey("local_areas", a.id)
+                          }
+                          className="p-2 text-red-600 disabled:opacity-40"
+                          onClick={() => setDeletingArea(a)}
+                        >
+                          <Trash2 size={17} />
+                        </button>
+                      </div>
                     </div>
-                  </div>
-                )}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
 
-            {/* Footer */}
-            <div className="border-t border-gray-200 px-6 py-4">
-              <div className="flex justify-end">
-                <button
-                  onClick={closeAreaModal}
-                  className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
-                  Close
-                </button>
-              </div>
+            <div className="flex justify-end border-t p-4">
+              <button
+                type="button"
+                className={`${buttonStyle} border`}
+                disabled={saving}
+                onClick={() => setSelectedBarangay(null)}
+              >
+                Close
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* =====================================================
-          DELETE AREA MODAL
-      ===================================================== */}
-      {showAreaDeleteModal && deletingArea && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
-          <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 text-red-600">
-              <Trash2 size={22} />
-            </div>
-
-            <h2 className="mt-4 text-lg font-semibold text-gray-900">
-              Delete Area?
-            </h2>
-
-            <p className="mt-2 text-sm leading-6 text-gray-500">
-              Are you sure you want to delete{" "}
-              <span className="font-semibold text-gray-700">
-                {deletingArea.name}
-              </span>
-              ?
-            </p>
-
-            <div className="mt-6 flex justify-end gap-3">
-              <button
-                onClick={closeAreaDeleteModal}
-                disabled={areaSaving}
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-
-              <button
-                onClick={handleDeleteArea}
-                disabled={areaSaving}
-                className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-60"
-              >
-                {areaSaving && <Loader2 size={16} className="animate-spin" />}
-                Delete
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* DELETE AREA */}
+      {deletingArea && (
+        <Confirm
+          title="Delete Area?"
+          detail={`Delete ${deletingArea.name}? Areas used by households or assignments may not be deletable.`}
+          busy={busy}
+          onCancel={() => setDeletingArea(null)}
+          onConfirm={deleteArea}
+        />
       )}
     </DashboardLayout>
+  );
+}
+
+function Confirm({ title, detail, busy, onCancel, onConfirm }) {
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+        <Trash2 className="mb-3 text-red-600" />
+
+        <h2 className="text-lg font-bold">{title}</h2>
+
+        <p className="mt-2 text-sm text-gray-600">{detail}</p>
+
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            type="button"
+            className={`${buttonStyle} border`}
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+
+          <button
+            type="button"
+            className={`${buttonStyle} bg-red-600 text-white`}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

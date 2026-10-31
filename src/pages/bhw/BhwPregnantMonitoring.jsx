@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Baby,
@@ -23,6 +23,12 @@ import {
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { queuePregnancySave } from "../../lib/bhwPregnancyOffline";
+import {
+  bhwMonitoringDraftKey,
+  readBhwMonitoringDraft,
+  saveBhwMonitoringDraft,
+  deleteBhwMonitoringDraft,
+} from "../../lib/bhwMonitoringDrafts";
 import {
   cachedAncVisits,
   cachedHomeVisits,
@@ -203,6 +209,161 @@ function BhwPregnantMonitoring() {
   );
 
   // =====================================================
+  // LOCAL FORM AUTOSAVE
+  // =====================================================
+  const [draft, setDraft] = useState(null);
+  const [draftLoading, setDraftLoading] = useState(false);
+  const [draftStatus, setDraftStatus] = useState("");
+  const draftTimer = useRef(null);
+  const draftEpoch = useRef(0);
+  const draftValues = useRef(null);
+  const activeDraftKey = useRef(null);
+
+  const cancelDraftTimer = () => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = null;
+  };
+
+  const resetDraft = () => {
+    cancelDraftTimer();
+    draftEpoch.current++;
+    activeDraftKey.current = null;
+    draftValues.current = null;
+    setDraft(null);
+    setDraftLoading(false);
+    setDraftStatus("");
+  };
+
+  const restoreDraft = async (kind, pregnancyId, recordId, initial) => {
+    cancelDraftTimer();
+    const epoch = ++draftEpoch.current;
+    setDraftLoading(true);
+    setDraft(null);
+    setDraftStatus("Checking saved draft...");
+    const key = bhwMonitoringDraftKey(user, pregnancyId, kind, recordId);
+    try {
+      const saved = await readBhwMonitoringDraft(key);
+      if (epoch !== draftEpoch.current) return;
+      let values = initial;
+      if (saved?.data) {
+        const restore = window.confirm(
+          `An unfinished ${kind === "home" ? "home visit" : "pregnancy information"} draft was found.\nLast saved: ${saved.savedAt ? new Date(saved.savedAt).toLocaleString() : "Previously"}\n\nRestore it?`,
+        );
+        if (restore) {
+          values = { ...initial, ...saved.data };
+          setDraftStatus("Previous draft restored");
+        } else {
+          await deleteBhwMonitoringDraft(key);
+          setDraftStatus("Auto-save enabled");
+        }
+      } else {
+        setDraftStatus("Auto-save enabled");
+      }
+      if (epoch !== draftEpoch.current) return;
+      draftValues.current = values;
+      activeDraftKey.current = key;
+      if (kind === "home") setHomeVisitForm(values);
+      else setPregnancyInfoForm(values);
+      setDraft({ key, kind });
+    } catch (error) {
+      console.error("Draft restore failed", error);
+      if (epoch !== draftEpoch.current) return;
+      draftValues.current = initial;
+      activeDraftKey.current = key;
+      if (kind === "home") setHomeVisitForm(initial);
+      else setPregnancyInfoForm(initial);
+      setDraft({ key, kind });
+      setDraftStatus("Draft storage unavailable");
+    } finally {
+      if (epoch === draftEpoch.current) setDraftLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!draft || draftLoading) return;
+    const visible =
+      draft.kind === "home" ? showHomeVisitModal : showPregnancyInfoModal;
+    if (!visible) return;
+    const values = draft.kind === "home" ? homeVisitForm : pregnancyInfoForm;
+    draftValues.current = values;
+    cancelDraftTimer();
+    setDraftStatus("Saving draft...");
+    const key = draft.key;
+    const snapshot = { ...values };
+    draftTimer.current = setTimeout(async () => {
+      try {
+        await saveBhwMonitoringDraft(user, key, snapshot);
+        if (activeDraftKey.current === key)
+          setDraftStatus("Draft saved on this device");
+      } catch (error) {
+        console.error("Draft autosave failed", error);
+        if (activeDraftKey.current === key) setDraftStatus("Draft save failed");
+      }
+    }, 700);
+    return cancelDraftTimer;
+  }, [
+    draft,
+    draftLoading,
+    homeVisitForm,
+    pregnancyInfoForm,
+    showHomeVisitModal,
+    showPregnancyInfoModal,
+  ]);
+
+  const closeDraftModal = async (kind) => {
+    if (draftLoading || savingHomeVisit || savingPregnancyInfo) return;
+    cancelDraftTimer();
+    try {
+      if (draft && draft.kind === kind) {
+        await saveBhwMonitoringDraft(user, draft.key, draftValues.current);
+      }
+    } catch (error) {
+      alert("Unable to save unfinished draft. Please retry before closing.");
+      return;
+    }
+    resetDraft();
+    if (kind === "home") {
+      setShowHomeVisitModal(false);
+      setEditingHomeVisit(null);
+    } else setShowPregnancyInfoModal(false);
+  };
+
+  const discardDraft = async () => {
+    if (!draft || !window.confirm("Discard unfinished changes?")) return;
+    cancelDraftTimer();
+    try {
+      await deleteBhwMonitoringDraft(draft.key);
+      const kind = draft.kind;
+      resetDraft();
+      if (kind === "home") {
+        setShowHomeVisitModal(false);
+        setEditingHomeVisit(null);
+      } else setShowPregnancyInfoModal(false);
+    } catch (error) {
+      alert(error.message);
+    }
+  };
+
+  const DraftNotice = ({ kind }) => (
+    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-green-50 border border-green-100 px-4 py-3 text-sm text-green-800">
+      <span>
+        {draftLoading
+          ? "Restoring saved draft..."
+          : draftStatus || "Auto-save enabled"}
+      </span>
+      {draft?.kind === kind && (
+        <button
+          type="button"
+          onClick={discardDraft}
+          className="text-red-600 font-medium hover:underline"
+        >
+          Discard draft
+        </button>
+      )}
+    </div>
+  );
+
+  // =====================================================
   // INITIAL LOAD
   // =====================================================
 
@@ -344,33 +505,28 @@ function BhwPregnantMonitoring() {
   // PREGNANCY INFORMATION
   // =====================================================
 
-  const openPregnancyInfo = () => {
-    if (!selectedWoman) return;
-
-    const pregnancy = selectedWoman.pregnancy || {};
-
-    setPregnancyInfoForm({
+  const openPregnancyInfo = async () => {
+    if (!selectedWoman?.pregnancy?.id) return;
+    const pregnancy = selectedWoman.pregnancy;
+    const initial = {
       family_record_no: safeText(pregnancy.family_record_no),
       date_of_registration: safeText(pregnancy.date_of_registration),
-
       gravida: pregnancy.gravida ?? "",
       para: pregnancy.para ?? "",
       term: pregnancy.term ?? "",
       preterm: pregnancy.preterm ?? "",
       abortion: pregnancy.abortion ?? "",
       living: pregnancy.living ?? "",
-
       lmp: safeText(pregnancy.lmp),
       edc: safeText(pregnancy.edc),
-
       civil_status: safeText(pregnancy.civil_status),
       husband_name: safeText(pregnancy.husband_name),
       philhealth_no: safeText(pregnancy.philhealth_no),
       blood_type: safeText(pregnancy.blood_type),
       facility_name: safeText(pregnancy.facility_name),
-    });
-
+    };
     setShowPregnancyInfoModal(true);
+    await restoreDraft("pregnancy", pregnancy.id, pregnancy.id, initial);
   };
 
   const handlePregnancyInfoChange = (e) => {
@@ -385,7 +541,7 @@ function BhwPregnantMonitoring() {
   const savePregnancyInfo = async (e) => {
     e.preventDefault();
 
-    if (!selectedWoman) return;
+    if (!selectedWoman || draftLoading || draft?.kind !== "pregnancy") return;
 
     try {
       setSavingPregnancyInfo(true);
@@ -429,7 +585,14 @@ function BhwPregnantMonitoring() {
         facility_name: pregnancyInfoForm.facility_name.trim() || null,
       };
 
+      cancelDraftTimer();
       await queuePregnancySave(user.id, selectedWoman.pregnancy, data);
+      try {
+        await deleteBhwMonitoringDraft(draft.key);
+      } catch (error) {
+        console.error("Draft cleanup failed", error);
+      }
+      resetDraft();
       const updated = { ...selectedWoman.pregnancy, ...data, _pending: true };
       setSelectedWoman((prev) => ({ ...prev, pregnancy: updated }));
       setPregnantWomen((prev) =>
@@ -646,38 +809,27 @@ function BhwPregnantMonitoring() {
   // HOME VISIT
   // =====================================================
 
-  const openAddHomeVisit = () => {
-    const usedVisits = homeVisits.map((visit) => Number(visit.visit_number));
-
-    let nextVisit = "";
-
-    for (let i = 1; i <= 4; i++) {
-      if (!usedVisits.includes(i)) {
-        nextVisit = String(i);
-        break;
-      }
-    }
-
-    if (!nextVisit) {
-      alert("All 4 home visits have already been recorded.");
-      return;
-    }
-
+  const openAddHomeVisit = async () => {
+    if (!selectedWoman?.pregnancy?.id) return;
+    const used = homeVisits.map((v) => Number(v.visit_number));
+    const next = [1, 2, 3, 4].find((n) => !used.includes(n));
+    if (!next) return alert("All 4 home visits have already been recorded.");
     setEditingHomeVisit(null);
-
-    setHomeVisitForm({
-      ...emptyHomeVisitForm,
-      visit_number: nextVisit,
-      visit_date: new Date().toISOString().split("T")[0],
-    });
-
     setShowHomeVisitModal(true);
+    const local = new Date();
+    const date = `${local.getFullYear()}-${String(local.getMonth() + 1).padStart(2, "0")}-${String(local.getDate()).padStart(2, "0")}`;
+    await restoreDraft("home", selectedWoman.pregnancy.id, "new", {
+      ...emptyHomeVisitForm,
+      visit_number: String(next),
+      visit_date: date,
+    });
   };
 
-  const openEditHomeVisit = (visit) => {
+  const openEditHomeVisit = async (visit) => {
+    if (!selectedWoman?.pregnancy?.id) return;
     setEditingHomeVisit(visit);
-
-    setHomeVisitForm({
+    setShowHomeVisitModal(true);
+    await restoreDraft("home", selectedWoman.pregnancy.id, visit.id, {
       visit_number: safeText(visit.visit_number),
       trimester: safeText(visit.trimester),
       visit_date: safeText(visit.visit_date),
@@ -686,8 +838,6 @@ function BhwPregnantMonitoring() {
       action_taken: safeText(visit.action_taken),
       next_visit_date: safeText(visit.next_visit_date),
     });
-
-    setShowHomeVisitModal(true);
   };
 
   const handleHomeVisitChange = (e) => {
@@ -701,7 +851,7 @@ function BhwPregnantMonitoring() {
 
   const saveHomeVisit = async (e) => {
     e.preventDefault();
-    if (!selectedWoman) return;
+    if (!selectedWoman || draftLoading || draft?.kind !== "home") return;
     if (!homeVisitForm.visit_number || !homeVisitForm.visit_date) {
       alert("Visit number and date are required.");
       return;
@@ -727,6 +877,13 @@ function BhwPregnantMonitoring() {
         editingHomeVisit,
         data,
       );
+      cancelDraftTimer();
+      try {
+        await deleteBhwMonitoringDraft(draft.key);
+      } catch (error) {
+        console.error("Draft cleanup failed", error);
+      }
+      resetDraft();
       setHomeVisits(
         await cachedHomeVisits(user.id, selectedWoman.pregnancy.id),
       );
@@ -777,13 +934,8 @@ function BhwPregnantMonitoring() {
     setForm(emptyForm);
   };
 
-  const closeHomeVisitModal = () => {
-    if (savingHomeVisit) return;
-
-    setShowHomeVisitModal(false);
-    setEditingHomeVisit(null);
-    setHomeVisitForm(emptyHomeVisitForm);
-  };
+  const closeHomeVisitModal = () => closeDraftModal("home");
+  const closePregnancyInfoModal = () => closeDraftModal("pregnancy");
 
   // =====================================================
   // FILTER
@@ -1608,142 +1760,149 @@ function BhwPregnantMonitoring() {
           <ModalShell
             title="Pregnancy Registration Information"
             subtitle={getFullName(selectedWoman)}
-            onClose={() => setShowPregnancyInfoModal(false)}
+            onClose={closePregnancyInfoModal}
           >
             <form onSubmit={savePregnancyInfo} className="p-6 space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                <TextField
-                  label="Family Record No."
-                  name="family_record_no"
-                  value={pregnancyInfoForm.family_record_no}
-                  onChange={handlePregnancyInfoChange}
-                />
+              <DraftNotice kind="pregnancy" />
+              {draftLoading ? (
+                <p>Restoring saved form...</p>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <TextField
+                      label="Family Record No."
+                      name="family_record_no"
+                      value={pregnancyInfoForm.family_record_no}
+                      onChange={handlePregnancyInfoChange}
+                    />
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Date of Registration
-                  </label>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Date of Registration
+                      </label>
 
-                  <input
-                    type="date"
-                    name="date_of_registration"
-                    value={pregnancyInfoForm.date_of_registration}
-                    onChange={handlePregnancyInfoChange}
-                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-pink-500"
+                      <input
+                        type="date"
+                        name="date_of_registration"
+                        value={pregnancyInfoForm.date_of_registration}
+                        onChange={handlePregnancyInfoChange}
+                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-pink-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        LMP
+                      </label>
+
+                      <input
+                        type="date"
+                        name="lmp"
+                        value={pregnancyInfoForm.lmp}
+                        onChange={handlePregnancyInfoChange}
+                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-pink-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        EDC / EDD
+                      </label>
+
+                      <input
+                        type="date"
+                        name="edc"
+                        value={pregnancyInfoForm.edc}
+                        onChange={handlePregnancyInfoChange}
+                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-pink-500"
+                      />
+                    </div>
+
+                    <NumberField
+                      label="Gravida"
+                      name="gravida"
+                      value={pregnancyInfoForm.gravida}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <NumberField
+                      label="Para"
+                      name="para"
+                      value={pregnancyInfoForm.para}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <NumberField
+                      label="Term"
+                      name="term"
+                      value={pregnancyInfoForm.term}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <NumberField
+                      label="Preterm"
+                      name="preterm"
+                      value={pregnancyInfoForm.preterm}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <NumberField
+                      label="Abortion"
+                      name="abortion"
+                      value={pregnancyInfoForm.abortion}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <NumberField
+                      label="Living"
+                      name="living"
+                      value={pregnancyInfoForm.living}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <TextField
+                      label="Civil Status"
+                      name="civil_status"
+                      value={pregnancyInfoForm.civil_status}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <TextField
+                      label="Husband / Partner"
+                      name="husband_name"
+                      value={pregnancyInfoForm.husband_name}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <TextField
+                      label="PhilHealth No."
+                      name="philhealth_no"
+                      value={pregnancyInfoForm.philhealth_no}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <TextField
+                      label="Blood Type"
+                      name="blood_type"
+                      value={pregnancyInfoForm.blood_type}
+                      onChange={handlePregnancyInfoChange}
+                    />
+
+                    <TextField
+                      label="Health Facility"
+                      name="facility_name"
+                      value={pregnancyInfoForm.facility_name}
+                      onChange={handlePregnancyInfoChange}
+                    />
+                  </div>
+
+                  <ModalButtons
+                    saving={savingPregnancyInfo}
+                    onCancel={closePregnancyInfoModal}
+                    saveText="Save Pregnancy Information"
                   />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    LMP
-                  </label>
-
-                  <input
-                    type="date"
-                    name="lmp"
-                    value={pregnancyInfoForm.lmp}
-                    onChange={handlePregnancyInfoChange}
-                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-pink-500"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    EDC / EDD
-                  </label>
-
-                  <input
-                    type="date"
-                    name="edc"
-                    value={pregnancyInfoForm.edc}
-                    onChange={handlePregnancyInfoChange}
-                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-pink-500"
-                  />
-                </div>
-
-                <NumberField
-                  label="Gravida"
-                  name="gravida"
-                  value={pregnancyInfoForm.gravida}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <NumberField
-                  label="Para"
-                  name="para"
-                  value={pregnancyInfoForm.para}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <NumberField
-                  label="Term"
-                  name="term"
-                  value={pregnancyInfoForm.term}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <NumberField
-                  label="Preterm"
-                  name="preterm"
-                  value={pregnancyInfoForm.preterm}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <NumberField
-                  label="Abortion"
-                  name="abortion"
-                  value={pregnancyInfoForm.abortion}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <NumberField
-                  label="Living"
-                  name="living"
-                  value={pregnancyInfoForm.living}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <TextField
-                  label="Civil Status"
-                  name="civil_status"
-                  value={pregnancyInfoForm.civil_status}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <TextField
-                  label="Husband / Partner"
-                  name="husband_name"
-                  value={pregnancyInfoForm.husband_name}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <TextField
-                  label="PhilHealth No."
-                  name="philhealth_no"
-                  value={pregnancyInfoForm.philhealth_no}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <TextField
-                  label="Blood Type"
-                  name="blood_type"
-                  value={pregnancyInfoForm.blood_type}
-                  onChange={handlePregnancyInfoChange}
-                />
-
-                <TextField
-                  label="Health Facility"
-                  name="facility_name"
-                  value={pregnancyInfoForm.facility_name}
-                  onChange={handlePregnancyInfoChange}
-                />
-              </div>
-
-              <ModalButtons
-                saving={savingPregnancyInfo}
-                onCancel={() => setShowPregnancyInfoModal(false)}
-                saveText="Save Pregnancy Information"
-              />
+                </>
+              )}
             </form>
           </ModalShell>
         )}
@@ -2215,89 +2374,96 @@ function BhwPregnantMonitoring() {
             onClose={closeHomeVisitModal}
           >
             <form onSubmit={saveHomeVisit} className="p-6 space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <SelectField
-                  label="Home Visit Number"
-                  name="visit_number"
-                  value={homeVisitForm.visit_number}
-                  onChange={handleHomeVisitChange}
-                  options={["1", "2", "3", "4"]}
-                />
+              <DraftNotice kind="home" />
+              {draftLoading ? (
+                <p>Restoring saved form...</p>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <SelectField
+                      label="Home Visit Number"
+                      name="visit_number"
+                      value={homeVisitForm.visit_number}
+                      onChange={handleHomeVisitChange}
+                      options={["1", "2", "3", "4"]}
+                    />
 
-                <SelectField
-                  label="Trimester"
-                  name="trimester"
-                  value={homeVisitForm.trimester}
-                  onChange={handleHomeVisitChange}
-                  options={[
-                    "1st Trimester",
-                    "2nd Trimester",
-                    "3rd Trimester",
-                    "4th / 9 Months",
-                  ]}
-                />
+                    <SelectField
+                      label="Trimester"
+                      name="trimester"
+                      value={homeVisitForm.trimester}
+                      onChange={handleHomeVisitChange}
+                      options={[
+                        "1st Trimester",
+                        "2nd Trimester",
+                        "3rd Trimester",
+                        "4th / 9 Months",
+                      ]}
+                    />
 
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Visit Date *
-                  </label>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">
+                        Visit Date *
+                      </label>
 
-                  <input
-                    type="date"
-                    name="visit_date"
-                    value={homeVisitForm.visit_date}
+                      <input
+                        type="date"
+                        name="visit_date"
+                        value={homeVisitForm.visit_date}
+                        onChange={handleHomeVisitChange}
+                        required
+                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+                      />
+                    </div>
+                  </div>
+
+                  <TextAreaField
+                    label="Findings / Home Visit Notes"
+                    name="findings"
+                    value={homeVisitForm.findings}
                     onChange={handleHomeVisitChange}
-                    required
-                    className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+                    placeholder="Record observations, condition of mother, follow-up information, etc."
                   />
-                </div>
-              </div>
 
-              <TextAreaField
-                label="Findings / Home Visit Notes"
-                name="findings"
-                value={homeVisitForm.findings}
-                onChange={handleHomeVisitChange}
-                placeholder="Record observations, condition of mother, follow-up information, etc."
-              />
+                  <TextAreaField
+                    label="Danger Signs"
+                    name="danger_signs"
+                    value={homeVisitForm.danger_signs}
+                    onChange={handleHomeVisitChange}
+                    placeholder="Record any danger signs observed or reported."
+                  />
 
-              <TextAreaField
-                label="Danger Signs"
-                name="danger_signs"
-                value={homeVisitForm.danger_signs}
-                onChange={handleHomeVisitChange}
-                placeholder="Record any danger signs observed or reported."
-              />
+                  <TextAreaField
+                    label="Action Taken"
+                    name="action_taken"
+                    value={homeVisitForm.action_taken}
+                    onChange={handleHomeVisitChange}
+                    placeholder="Referral, counseling, coordination with midwife, etc."
+                  />
 
-              <TextAreaField
-                label="Action Taken"
-                name="action_taken"
-                value={homeVisitForm.action_taken}
-                onChange={handleHomeVisitChange}
-                placeholder="Referral, counseling, coordination with midwife, etc."
-              />
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Next Home Visit
+                    </label>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Next Home Visit
-                </label>
+                    <input
+                      type="date"
+                      name="next_visit_date"
+                      value={homeVisitForm.next_visit_date}
+                      onChange={handleHomeVisitChange}
+                      className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
+                    />
+                  </div>
 
-                <input
-                  type="date"
-                  name="next_visit_date"
-                  value={homeVisitForm.next_visit_date}
-                  onChange={handleHomeVisitChange}
-                  className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-green-500"
-                />
-              </div>
-
-              <ModalButtons
-                saving={savingHomeVisit}
-                onCancel={closeHomeVisitModal}
-                saveText={
-                  editingHomeVisit ? "Update Home Visit" : "Save Home Visit"
-                }
-              />
+                  <ModalButtons
+                    saving={savingHomeVisit}
+                    onCancel={closeHomeVisitModal}
+                    saveText={
+                      editingHomeVisit ? "Update Home Visit" : "Save Home Visit"
+                    }
+                  />
+                </>
+              )}
             </form>
           </ModalShell>
         )}

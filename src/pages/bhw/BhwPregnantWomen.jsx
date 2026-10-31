@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Baby,
   Plus,
@@ -11,25 +11,217 @@ import {
   UserRound,
   MapPin,
   CalendarDays,
-  HeartPulse,
   RefreshCw,
   Wifi,
   WifiOff,
+  FileText,
+  Clock3,
+  AlertCircle,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+
 import {
   getPregnancyCache,
   refreshPregnancyCache,
   queuePregnancySave,
   queuePregnancyDelete,
   syncPregnancyQueue,
-  pendingPregnancyCount,
 } from "../../lib/bhwPregnancyOffline";
 
-function BhwPregnantWomen() {
-  const storedUser = localStorage.getItem("user");
-  const user = storedUser ? JSON.parse(storedUser) : null;
+import {
+  bhwPregnancyDraftKey,
+  readBhwPregnancyDraft,
+  saveBhwPregnancyDraft,
+  deleteBhwPregnancyDraft,
+} from "../../lib/bhwPregnancyDrafts";
+
+// =========================================================
+// HELPERS
+// =========================================================
+
+const today = () => {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
+
+const emptyForm = () => ({
+  resident_id: "",
+  family_record_no: "",
+  date_of_registration: today(),
+
+  gravida: "",
+  para: "",
+  term: "",
+  preterm: "",
+  abortion: "",
+  living: "",
+
+  lmp: "",
+  edc: "",
+
+  civil_status: "",
+  husband_name: "",
+  philhealth_no: "",
+  blood_type: "",
+  facility_name: "",
+});
+
+const numberFields = [
+  "gravida",
+  "para",
+  "term",
+  "preterm",
+  "abortion",
+  "living",
+];
+
+const ongoingStatuses = ["active", "for_review", "high_risk", "referred"];
+
+const getFullName = (person) => {
+  if (!person) return "Unknown";
+
+  return [person.first_name, person.middle_name, person.last_name]
+    .filter(Boolean)
+    .join(" ");
+};
+
+const formatDate = (value) => {
+  if (!value) return "—";
+
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00`);
+
+  if (Number.isNaN(date.getTime())) return "—";
+
+  return date.toLocaleDateString("en-PH", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+};
+
+const calculateAge = (birthDate) => {
+  if (!birthDate) return "—";
+
+  const birth = new Date(`${String(birthDate).slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(birth.getTime())) return "—";
+
+  const current = new Date();
+
+  let age = current.getFullYear() - birth.getFullYear();
+
+  const monthDifference = current.getMonth() - birth.getMonth();
+
+  if (
+    monthDifference < 0 ||
+    (monthDifference === 0 && current.getDate() < birth.getDate())
+  ) {
+    age--;
+  }
+
+  return age;
+};
+
+const calculateEdcFromLmp = (lmp) => {
+  if (!lmp) return "";
+
+  const [year, month, day] = lmp.split("-").map(Number);
+
+  if (!year || !month || !day) return "";
+
+  const targetMonthIndex = year * 12 + (month - 1) + 9;
+  const targetYear = Math.floor(targetMonthIndex / 12);
+  const targetMonth = targetMonthIndex % 12;
+
+  const lastDay = new Date(targetYear, targetMonth + 1, 0).getDate();
+
+  const targetDay = Math.min(day, lastDay);
+
+  return [
+    targetYear,
+    String(targetMonth + 1).padStart(2, "0"),
+    String(targetDay).padStart(2, "0"),
+  ].join("-");
+};
+
+const inputClass =
+  "w-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-100";
+
+const labelClass = "mb-1.5 block text-sm font-medium text-gray-700";
+
+function FormField({
+  label,
+  name,
+  value,
+  onChange,
+  type = "text",
+  required = false,
+  placeholder = "",
+  disabled = false,
+  min,
+}) {
+  return (
+    <div>
+      <label className={labelClass}>{label}</label>
+
+      <input
+        type={type}
+        name={name}
+        value={value ?? ""}
+        onChange={onChange}
+        required={required}
+        disabled={disabled}
+        placeholder={placeholder}
+        min={min}
+        className={`${inputClass} disabled:bg-gray-100`}
+      />
+    </div>
+  );
+}
+
+function DetailItem({ label, value }) {
+  return (
+    <div>
+      <p className="text-xs text-gray-500">{label}</p>
+      <p className="mt-1 text-sm font-medium text-gray-800">
+        {value === null || value === undefined || value === "" ? "—" : value}
+      </p>
+    </div>
+  );
+}
+
+function FormSection({ title, description, children }) {
+  return (
+    <section className="overflow-hidden rounded-xl border border-gray-200">
+      <div className="border-b bg-gray-50 px-5 py-4">
+        <h4 className="font-semibold text-gray-800">{title}</h4>
+
+        {description && (
+          <p className="mt-1 text-xs text-gray-500">{description}</p>
+        )}
+      </div>
+
+      <div className="p-5">{children}</div>
+    </section>
+  );
+}
+
+// =========================================================
+// MAIN COMPONENT
+// =========================================================
+
+export default function BhwPregnantWomen() {
+  const [user] = useState(() => {
+    try {
+      const stored = localStorage.getItem("user");
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
 
   const [pregnantWomen, setPregnantWomen] = useState([]);
   const [eligibleResidents, setEligibleResidents] = useState([]);
@@ -42,105 +234,122 @@ function BhwPregnantWomen() {
   const [offlineError, setOfflineError] = useState("");
   const [search, setSearch] = useState("");
 
-  // Registration modal
   const [showModal, setShowModal] = useState(false);
   const [editingRecord, setEditingRecord] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState(emptyForm);
 
-  // View modal
   const [showViewModal, setShowViewModal] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
 
-  const emptyForm = {
-    resident_id: "",
-    family_record_no: "",
-    date_of_registration: new Date().toISOString().split("T")[0],
+  // =========================================================
+  // AUTO-SAVE STATES
+  // =========================================================
 
-    gravida: "",
-    para: "",
-    term: "",
-    preterm: "",
-    abortion: "",
-    living: "",
+  const [draftKey, setDraftKey] = useState(null);
+  const [draftReady, setDraftReady] = useState(false);
+  const [draftStatus, setDraftStatus] = useState("");
+  const [draftSavedAt, setDraftSavedAt] = useState(null);
+  const [draftLoading, setDraftLoading] = useState(false);
 
-    lmp: "",
-    edc: "",
+  const draftRef = useRef(null);
+  const draftTimer = useRef(null);
+  const draftRequest = useRef(0);
+  const savingRef = useRef(false);
 
-    civil_status: "",
-    husband_name: "",
-    philhealth_no: "",
-    blood_type: "",
-    facility_name: "",
-  };
+  // =========================================================
+  // CACHE
+  // =========================================================
 
-  const [form, setForm] = useState(emptyForm);
+  const applyCache = useCallback((cache) => {
+    setLocalAreas(cache?.areas || []);
+    setEligibleResidents(cache?.residents || []);
+    setPregnantWomen(cache?.records || []);
+    setPending(cache?.pending || 0);
+  }, []);
 
-  const applyCache = (cache) => {
-    setLocalAreas(cache.areas);
-    setEligibleResidents(cache.residents);
-    setPregnantWomen(cache.records);
-    setPending(cache.pending);
-  };
+  const loadData = useCallback(async () => {
+    if (!user?.id) {
+      setLoading(false);
+      return;
+    }
 
-  const loadData = async () => {
-    if (!user) return;
     setLoading(true);
+
     try {
       applyCache(await getPregnancyCache(user.id));
+
       if (navigator.onLine) {
         try {
-          applyCache(await refreshPregnancyCache(user.id));
+          const updated = await refreshPregnancyCache(user.id);
+          applyCache(updated);
           setOfflineError("");
-        } catch (err) {
-          setOfflineError(`Using cached data: ${err.message}`);
+        } catch (error) {
+          setOfflineError(`Using locally cached data: ${error.message}`);
         }
       }
-    } catch (err) {
-      setOfflineError(err.message);
+    } catch (error) {
+      console.error("Error loading pregnancy cache:", error);
+      setOfflineError(error.message || "Unable to load records.");
     } finally {
       setLoading(false);
     }
-  };
+  }, [user?.id, applyCache]);
 
-  const syncNow = async () => {
-    if (!user || !navigator.onLine || syncing) return;
+  const syncNow = useCallback(async () => {
+    if (!user?.id || !navigator.onLine || syncing) return;
+
     setSyncing(true);
     setOfflineError("");
+
     try {
       await syncPregnancyQueue(user.id);
-      applyCache(await refreshPregnancyCache(user.id));
-    } catch (err) {
-      setOfflineError(`Synchronization stopped: ${err.message}`);
-      applyCache(await getPregnancyCache(user.id));
+
+      const updated = await refreshPregnancyCache(user.id);
+      applyCache(updated);
+    } catch (error) {
+      console.error("Pregnancy synchronization failed:", error);
+
+      setOfflineError(`Synchronization stopped: ${error.message}`);
+
+      try {
+        applyCache(await getPregnancyCache(user.id));
+      } catch (cacheError) {
+        console.error(cacheError);
+      }
     } finally {
       setSyncing(false);
     }
-  };
+  }, [user?.id, syncing, applyCache]);
 
   useEffect(() => {
-    if (!user) return;
-    loadData();
-    const onOnline = () => {
-      setOnline(true);
-      syncNow();
-    };
-    const onOffline = () => setOnline(false);
-    window.addEventListener("online", onOnline);
-    window.addEventListener("offline", onOffline);
-    return () => {
-      window.removeEventListener("online", onOnline);
-      window.removeEventListener("offline", onOffline);
-    };
-  }, [user?.id]);
+    if (!user?.id) return;
 
-  // Completed pregnancy episodes remain in history, but do not block a new one.
-  // Cache records include pending offline registrations and deletions.
-  const ONGOING_STATUSES = ["active", "for_review", "high_risk", "referred"];
-  const isOngoing = (record) =>
-    ONGOING_STATUSES.includes(record.status || "active");
+    loadData();
+
+    const handleOnline = () => {
+      setOnline(true);
+    };
+
+    const handleOffline = () => {
+      setOnline(false);
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, [user?.id, loadData]);
+
+  // =========================================================
+  // AVAILABLE WOMEN
+  // =========================================================
+
   const availableWomen = useMemo(() => {
     if (editingRecord) {
-      // Preserve the selected resident when editing an existing record.
       return eligibleResidents.filter(
         (resident) => String(resident.id) === String(editingRecord.resident_id),
       );
@@ -148,131 +357,256 @@ function BhwPregnantWomen() {
 
     const registeredIds = new Set(
       pregnantWomen
-        .filter(isOngoing)
+        .filter((record) => ongoingStatuses.includes(record.status || "active"))
         .map((record) => String(record.resident_id)),
     );
+
     return eligibleResidents.filter(
       (resident) => !registeredIds.has(String(resident.id)),
     );
   }, [eligibleResidents, pregnantWomen, editingRecord]);
 
-  // =====================================================
-  // AUTOMATIC EDC CALCULATION
-  // EDC = 9 calendar months after LMP
-  // =====================================================
+  // =========================================================
+  // DRAFT HELPERS
+  // =========================================================
 
-  const calculateEdcFromLmp = (lmp) => {
-    if (!lmp) return "";
-
-    const [year, month, day] = lmp.split("-").map(Number);
-
-    if (!year || !month || !day) return "";
-
-    // Convert the LMP month to a zero-based month index
-    const targetMonthIndex = year * 12 + (month - 1) + 9;
-
-    const targetYear = Math.floor(targetMonthIndex / 12);
-    const targetMonth = targetMonthIndex % 12;
-
-    // Handle dates near the end of a month safely
-    const lastDayOfTargetMonth = new Date(
-      targetYear,
-      targetMonth + 1,
-      0,
-    ).getDate();
-
-    const targetDay = Math.min(day, lastDayOfTargetMonth);
-
-    // Format as YYYY-MM-DD without timezone conversion
-    const formattedMonth = String(targetMonth + 1).padStart(2, "0");
-    const formattedDay = String(targetDay).padStart(2, "0");
-
-    return `${targetYear}-${formattedMonth}-${formattedDay}`;
+  const clearDraftTimer = () => {
+    if (draftTimer.current) {
+      clearTimeout(draftTimer.current);
+      draftTimer.current = null;
+    }
   };
-  // =====================================================
-  // FORM CHANGE HANDLER
-  // Automatically calculate EDC when LMP changes
-  // =====================================================
 
-  const handleChange = (e) => {
-    const { name, value } = e.target;
+  const restoreDraft = async (recordId, initialData) => {
+    if (!user?.id) return;
 
-    setForm((prev) => {
-      // Automatically update EDC when LMP changes
-      if (name === "lmp") {
-        return {
-          ...prev,
-          lmp: value,
-          edc: calculateEdcFromLmp(value),
-        };
+    const requestId = ++draftRequest.current;
+
+    clearDraftTimer();
+
+    setDraftReady(false);
+    setDraftLoading(true);
+    setDraftStatus("Checking saved draft...");
+
+    const key = bhwPregnancyDraftKey(user, recordId);
+
+    try {
+      const savedDraft = await readBhwPregnancyDraft(key);
+
+      if (requestId !== draftRequest.current) return;
+
+      let values = initialData;
+
+      if (savedDraft?.data) {
+        const savedTime = savedDraft.savedAt
+          ? new Date(savedDraft.savedAt).toLocaleString()
+          : "previously";
+
+        const shouldRestore = window.confirm(
+          `An unfinished pregnancy registration draft was found.\n\nLast saved: ${savedTime}\n\nWould you like to restore it?`,
+        );
+
+        if (shouldRestore) {
+          values = {
+            ...initialData,
+            ...savedDraft.data,
+          };
+
+          setDraftStatus("Previous draft restored");
+          setDraftSavedAt(savedDraft.savedAt);
+        } else {
+          await deleteBhwPregnancyDraft(key);
+          setDraftStatus("New draft ready");
+          setDraftSavedAt(null);
+        }
+      } else {
+        setDraftStatus("Auto-save enabled");
+        setDraftSavedAt(null);
       }
 
-      // Keep normal behavior for all other fields
-      return {
-        ...prev,
-        [name]: value,
+      if (requestId !== draftRequest.current) return;
+
+      draftRef.current = { key, data: values };
+
+      setDraftKey(key);
+      setForm(values);
+      setDraftReady(true);
+    } catch (error) {
+      console.error("Draft restore error:", error);
+
+      if (requestId !== draftRequest.current) return;
+
+      draftRef.current = {
+        key,
+        data: initialData,
       };
-    });
+
+      setDraftKey(key);
+      setForm(initialData);
+      setDraftReady(true);
+      setDraftStatus("Draft storage unavailable");
+    } finally {
+      if (requestId === draftRequest.current) {
+        setDraftLoading(false);
+      }
+    }
   };
 
-  // =====================================================
-  // OPEN ADD
-  // =====================================================
+  // =========================================================
+  // AUTOMATIC SAVE WHEN FORM CHANGES
+  // =========================================================
 
-  const openAddModal = () => {
+  useEffect(() => {
+    if (
+      !showModal ||
+      !draftReady ||
+      !draftKey ||
+      !user?.id ||
+      savingRef.current
+    ) {
+      return;
+    }
+
+    clearDraftTimer();
+
+    draftRef.current = {
+      key: draftKey,
+      data: form,
+    };
+
+    setDraftStatus("Saving draft...");
+
+    draftTimer.current = setTimeout(async () => {
+      const snapshot = draftRef.current;
+
+      if (!snapshot || snapshot.key !== draftKey) return;
+
+      try {
+        await saveBhwPregnancyDraft(user, snapshot.key, snapshot.data);
+
+        if (draftRef.current?.key === snapshot.key) {
+          const savedAt = new Date().toISOString();
+
+          setDraftSavedAt(savedAt);
+          setDraftStatus("Draft saved on this device");
+        }
+      } catch (error) {
+        console.error("Auto-save failed:", error);
+        setDraftStatus("Unable to save draft");
+      }
+    }, 500);
+
+    return clearDraftTimer;
+  }, [form, showModal, draftReady, draftKey, user]);
+
+  // =========================================================
+  // SAVE IMMEDIATELY WHEN FORM CLOSES
+  // =========================================================
+
+  const closeForm = async () => {
+    if (saving || draftLoading) return;
+
+    clearDraftTimer();
+
+    if (draftKey && user?.id && draftReady) {
+      try {
+        await saveBhwPregnancyDraft(user, draftKey, form);
+      } catch (error) {
+        console.error("Unable to preserve unfinished form:", error);
+
+        alert(
+          "Your unfinished form could not be saved. Please try again before closing.",
+        );
+
+        return;
+      }
+    }
+
+    ++draftRequest.current;
+
+    draftRef.current = null;
+
+    setDraftKey(null);
+    setDraftReady(false);
+    setDraftStatus("");
+    setDraftSavedAt(null);
+
+    setShowModal(false);
     setEditingRecord(null);
-
-    setForm({
-      ...emptyForm,
-      date_of_registration: new Date().toISOString().split("T")[0],
-    });
-
-    setShowModal(true);
   };
 
-  // =====================================================
-  // OPEN EDIT
-  // =====================================================
+  // =========================================================
+  // DISCARD UNFINISHED DRAFT
+  // =========================================================
 
-  const openEditModal = (record) => {
+  const discardDraft = async () => {
+    if (!draftKey || !user?.id) return;
+
+    if (
+      !window.confirm(
+        "Discard this unfinished registration draft? All unsaved changes will be lost.",
+      )
+    ) {
+      return;
+    }
+
+    clearDraftTimer();
+
+    try {
+      await deleteBhwPregnancyDraft(draftKey);
+
+      ++draftRequest.current;
+
+      draftRef.current = null;
+
+      setDraftKey(null);
+      setDraftReady(false);
+      setDraftStatus("");
+      setDraftSavedAt(null);
+
+      setShowModal(false);
+      setEditingRecord(null);
+    } catch (error) {
+      console.error("Unable to discard draft:", error);
+      alert(error.message || "Unable to discard draft.");
+    }
+  };
+
+  // =========================================================
+  // OPEN ADD MODAL
+  // =========================================================
+
+  const openAddModal = async () => {
+    setEditingRecord(null);
+    setShowModal(true);
+
+    await restoreDraft("new", emptyForm());
+  };
+
+  // =========================================================
+  // OPEN EDIT MODAL
+  // =========================================================
+
+  const openEditModal = async (record) => {
     setEditingRecord(record);
+    setShowModal(true);
 
-    setForm({
-      resident_id: record.resident_id ? String(record.resident_id) : "",
-
+    const initialData = {
+      resident_id: String(record.resident_id ?? ""),
       family_record_no: record.family_record_no || "",
-
       date_of_registration: record.date_of_registration || "",
 
-      gravida:
-        record.gravida !== null && record.gravida !== undefined
-          ? String(record.gravida)
-          : "",
+      gravida: record.gravida != null ? String(record.gravida) : "",
 
-      para:
-        record.para !== null && record.para !== undefined
-          ? String(record.para)
-          : "",
+      para: record.para != null ? String(record.para) : "",
 
-      term:
-        record.term !== null && record.term !== undefined
-          ? String(record.term)
-          : "",
+      term: record.term != null ? String(record.term) : "",
 
-      preterm:
-        record.preterm !== null && record.preterm !== undefined
-          ? String(record.preterm)
-          : "",
+      preterm: record.preterm != null ? String(record.preterm) : "",
 
-      abortion:
-        record.abortion !== null && record.abortion !== undefined
-          ? String(record.abortion)
-          : "",
+      abortion: record.abortion != null ? String(record.abortion) : "",
 
-      living:
-        record.living !== null && record.living !== undefined
-          ? String(record.living)
-          : "",
+      living: record.living != null ? String(record.living) : "",
 
       lmp: record.lmp || "",
       edc: record.edc || "",
@@ -282,36 +616,45 @@ function BhwPregnantWomen() {
       philhealth_no: record.philhealth_no || "",
       blood_type: record.blood_type || "",
       facility_name: record.facility_name || "",
-    });
+    };
 
-    setShowModal(true);
+    await restoreDraft(record.id, initialData);
   };
 
-  // =====================================================
-  // SAVE
-  // =====================================================
+  // =========================================================
+  // HANDLE FORM CHANGES
+  // =========================================================
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
+  const handleChange = (event) => {
+    const { name, value } = event.target;
+
+    setForm((previous) => {
+      const updated = {
+        ...previous,
+        [name]: value,
+      };
+
+      if (name === "lmp") {
+        updated.edc = calculateEdcFromLmp(value);
+      }
+
+      draftRef.current = draftKey ? { key: draftKey, data: updated } : null;
+
+      return updated;
+    });
+  };
+
+  // =========================================================
+  // SAVE REGISTRATION TO OFFLINE QUEUE
+  // =========================================================
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+
+    if (!user?.id || saving) return;
 
     if (!form.resident_id) {
       alert("Please select a woman.");
-      return;
-    }
-
-    // Guard against duplicate registrations even if the dropdown is stale.
-    // Includes offline pending registrations already reflected in the cache.
-    if (
-      !editingRecord &&
-      pregnantWomen.some(
-        (record) =>
-          String(record.resident_id) === String(form.resident_id) &&
-          isOngoing(record),
-      )
-    ) {
-      alert(
-        "This woman already has an ongoing pregnancy. Complete that episode before registering another.",
-      );
       return;
     }
 
@@ -320,207 +663,218 @@ function BhwPregnantWomen() {
       return;
     }
 
+    if (
+      !editingRecord &&
+      pregnantWomen.some(
+        (record) =>
+          String(record.resident_id) === String(form.resident_id) &&
+          ongoingStatuses.includes(record.status || "active"),
+      )
+    ) {
+      alert(
+        "This woman already has an ongoing pregnancy. Complete that episode before registering another.",
+      );
+      return;
+    }
+
+    const payload = {
+      resident_id: Number(form.resident_id),
+      family_record_no: form.family_record_no.trim() || null,
+      date_of_registration: form.date_of_registration,
+
+      gravida: form.gravida !== "" ? Number(form.gravida) : null,
+
+      para: form.para !== "" ? Number(form.para) : null,
+
+      term: form.term !== "" ? Number(form.term) : null,
+
+      preterm: form.preterm !== "" ? Number(form.preterm) : null,
+
+      abortion: form.abortion !== "" ? Number(form.abortion) : null,
+
+      living: form.living !== "" ? Number(form.living) : null,
+
+      lmp: form.lmp || null,
+      edc: form.edc || null,
+
+      civil_status: form.civil_status || null,
+      husband_name: form.husband_name.trim() || null,
+      philhealth_no: form.philhealth_no.trim() || null,
+      blood_type: form.blood_type || null,
+      facility_name: form.facility_name.trim() || null,
+
+      ...(!editingRecord
+        ? {
+            status: "active",
+            created_by: user.id,
+          }
+        : {}),
+
+      updated_at: new Date().toISOString(),
+    };
+
     try {
       setSaving(true);
-      const pregnancyData = {
-        resident_id: Number(form.resident_id),
+      savingRef.current = true;
+      clearDraftTimer();
 
-        family_record_no: form.family_record_no.trim() || null,
+      // Queueing is the submission point.
+      // The queue itself persists the submitted record locally.
+      await queuePregnancySave(user.id, editingRecord, payload);
 
-        date_of_registration: form.date_of_registration || null,
+      // Delete the unfinished draft only after queueing succeeds.
+      if (draftKey) {
+        try {
+          await deleteBhwPregnancyDraft(draftKey);
+        } catch (error) {
+          console.error(
+            "Registration queued, but draft cleanup failed:",
+            error,
+          );
+        }
+      }
 
-        gravida: form.gravida !== "" ? Number(form.gravida) : null,
+      ++draftRequest.current;
 
-        para: form.para !== "" ? Number(form.para) : null,
+      draftRef.current = null;
 
-        term: form.term !== "" ? Number(form.term) : null,
+      setDraftKey(null);
+      setDraftReady(false);
+      setDraftStatus("");
+      setDraftSavedAt(null);
 
-        preterm: form.preterm !== "" ? Number(form.preterm) : null,
-
-        abortion: form.abortion !== "" ? Number(form.abortion) : null,
-
-        living: form.living !== "" ? Number(form.living) : null,
-
-        lmp: form.lmp || null,
-        edc: form.edc || null,
-
-        civil_status: form.civil_status || null,
-
-        husband_name: form.husband_name.trim() || null,
-
-        philhealth_no: form.philhealth_no.trim() || null,
-
-        blood_type: form.blood_type || null,
-
-        facility_name: form.facility_name.trim() || null,
-
-        ...(!editingRecord ? { status: "active", created_by: user.id } : {}),
-
-        updated_at: new Date().toISOString(),
-      };
-
-      await queuePregnancySave(user.id, editingRecord, pregnancyData);
       setShowModal(false);
       setEditingRecord(null);
+
       applyCache(await getPregnancyCache(user.id));
-      if (navigator.onLine) await syncNow();
-      alert("Saved locally. Pending changes will synchronize when online.");
+
+      alert(
+        "Pregnancy registration saved locally. Pending changes will synchronize when online.",
+      );
+
+      if (navigator.onLine) {
+        await syncNow();
+      }
     } catch (error) {
       console.error("Error saving pregnancy:", error);
-      alert(error.message || "Failed to save pregnancy record.");
+
+      alert(error.message || "Failed to save pregnancy registration.");
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };
 
-  // =====================================================
-  // DELETE
-  // =====================================================
+  // =========================================================
+  // DELETE RECORD
+  // =========================================================
 
   const handleDelete = async (record) => {
     const name = getFullName(record.resident);
 
-    const confirmed = window.confirm(
-      `Are you sure you want to delete the pregnancy record of ${name}?`,
-    );
-
-    if (!confirmed) return;
+    if (
+      !window.confirm(
+        `Are you sure you want to delete the pregnancy record of ${name}?`,
+      )
+    ) {
+      return;
+    }
 
     try {
       await queuePregnancyDelete(user.id, record);
+
       applyCache(await getPregnancyCache(user.id));
-      if (navigator.onLine) await syncNow();
+
+      if (navigator.onLine) {
+        await syncNow();
+      }
     } catch (error) {
+      console.error(error);
       alert(error.message || "Failed to queue deletion.");
     }
   };
 
-  // =====================================================
-  // VIEW
-  // =====================================================
-
-  const openViewModal = (record) => {
-    setSelectedRecord(record);
-    setShowViewModal(true);
-  };
-
-  // =====================================================
-  // HELPERS
-  // =====================================================
-
-  const getFullName = (resident) => {
-    if (!resident) return "Unknown";
-
-    return [resident.first_name, resident.middle_name, resident.last_name]
-      .filter(Boolean)
-      .join(" ");
-  };
-
-  const calculateAge = (birthDate) => {
-    if (!birthDate) return "—";
-
-    const birth = new Date(birthDate);
-    const today = new Date();
-
-    let age = today.getFullYear() - birth.getFullYear();
-
-    const monthDifference = today.getMonth() - birth.getMonth();
-
-    if (
-      monthDifference < 0 ||
-      (monthDifference === 0 && today.getDate() < birth.getDate())
-    ) {
-      age--;
-    }
-
-    return age;
-  };
-
-  const formatDate = (date) => {
-    if (!date) return "—";
-
-    return new Date(date).toLocaleDateString("en-PH", {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-    });
-  };
-
-  // =====================================================
+  // =========================================================
   // FILTER
-  // =====================================================
+  // =========================================================
 
   const filteredRecords = useMemo(() => {
-    const searchText = search.toLowerCase();
+    const keyword = search.trim().toLowerCase();
+
+    if (!keyword) return pregnantWomen;
 
     return pregnantWomen.filter((record) => {
       const resident = record.resident;
 
-      const name = getFullName(resident).toLowerCase();
-
-      return (
-        name.includes(searchText) ||
-        record.family_record_no?.toLowerCase().includes(searchText) ||
-        resident?.households?.household_code
-          ?.toLowerCase()
-          .includes(searchText) ||
-        resident?.households?.local_areas?.name
-          ?.toLowerCase()
-          .includes(searchText)
+      return [
+        getFullName(resident),
+        record.family_record_no,
+        resident?.households?.household_code,
+        resident?.households?.local_areas?.name,
+      ].some((value) =>
+        String(value || "")
+          .toLowerCase()
+          .includes(keyword),
       );
     });
   }, [pregnantWomen, search]);
 
   if (!user) {
-    return null;
+    return (
+      <DashboardLayout>
+        <div className="rounded-xl border bg-white p-6">
+          Please log in to access pregnancy registration.
+        </div>
+      </DashboardLayout>
+    );
   }
+
+  // =========================================================
+  // RENDER
+  // =========================================================
 
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* =====================================================
-            HEADER
-        ===================================================== */}
+        {/* HEADER */}
 
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h2 className="text-2xl sm:text-3xl font-bold text-gray-800">
+            <h2 className="text-2xl font-bold text-gray-800 sm:text-3xl">
               Pregnant Women
             </h2>
 
-            <p className="text-gray-500 mt-1">
+            <p className="mt-1 text-gray-500">
               Register and manage pregnant women in your assigned areas.
             </p>
           </div>
 
           <button
+            type="button"
             onClick={openAddModal}
-            className="
-              inline-flex items-center justify-center gap-2
-              bg-teal-600
-              hover:bg-teal-700
-              text-white
-              px-4 py-2.5
-              rounded-lg
-              text-sm font-medium
-              transition
-            "
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-teal-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-teal-700"
           >
             <Plus size={18} />
             Register Pregnancy
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-3 text-sm">
+        {/* OFFLINE STATUS */}
+
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-4 text-sm">
           <span
-            className={`inline-flex items-center gap-2 font-medium ${online ? "text-green-700" : "text-amber-700"}`}
+            className={`inline-flex items-center gap-2 font-semibold ${
+              online ? "text-green-700" : "text-amber-700"
+            }`}
           >
-            {online ? <Wifi size={17} /> : <WifiOff size={17} />}
+            {online ? <Wifi size={18} /> : <WifiOff size={18} />}
             {online ? "Online" : "Offline"}
           </span>
+
           <span className="text-gray-600">
             Pending changes: <strong>{pending}</strong>
           </span>
+
           <button
             type="button"
             onClick={syncNow}
@@ -528,38 +882,32 @@ function BhwPregnantWomen() {
             className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-3 py-2 font-medium text-white disabled:opacity-50"
           >
             <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+
             {syncing ? "Syncing..." : "Sync Now"}
           </button>
+
           {offlineError && (
             <p className="w-full text-amber-700">{offlineError}</p>
           )}
         </div>
 
-        {/* =====================================================
-            ASSIGNED AREAS
-        ===================================================== */}
+        {/* ASSIGNED AREAS */}
 
-        <div className="bg-white border border-gray-200 rounded-xl p-5 shadow-sm">
+        <div className="rounded-xl border bg-white p-5 shadow-sm">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-teal-50 flex items-center justify-center">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-teal-50">
               <MapPin size={20} className="text-teal-600" />
             </div>
 
             <div>
-              <p className="text-sm text-gray-500">Assigned Purok/Sitio</p>
+              <p className="text-sm text-gray-500">Assigned Purok / Sitio</p>
 
-              <div className="flex flex-wrap gap-2 mt-1">
+              <div className="mt-2 flex flex-wrap gap-2">
                 {localAreas.length > 0 ? (
                   localAreas.map((area) => (
                     <span
                       key={area.id}
-                      className="
-                        text-sm font-medium
-                        text-gray-700
-                        bg-gray-100
-                        px-2.5 py-1
-                        rounded-md
-                      "
+                      className="rounded-md bg-gray-100 px-2.5 py-1 text-sm font-medium text-gray-700"
                     >
                       {area.name}
                     </span>
@@ -574,43 +922,26 @@ function BhwPregnantWomen() {
           </div>
         </div>
 
-        {/* =====================================================
-            SEARCH
-        ===================================================== */}
+        {/* SEARCH */}
 
         <div className="relative">
           <Search
             size={19}
-            className="
-              absolute left-3 top-1/2
-              -translate-y-1/2
-              text-gray-400
-            "
+            className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
           />
 
           <input
             type="text"
-            placeholder="Search pregnant women..."
             value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="
-              w-full
-              pl-10 pr-4 py-3
-              bg-white
-              border border-gray-200
-              rounded-xl
-              outline-none
-              focus:ring-2
-              focus:ring-teal-500
-            "
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search pregnant women..."
+            className="w-full rounded-xl border border-gray-200 bg-white py-3 pl-10 pr-4 outline-none focus:ring-2 focus:ring-teal-500"
           />
         </div>
 
-        {/* =====================================================
-            TABLE
-        ===================================================== */}
+        {/* RECORD TABLE */}
 
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="overflow-hidden rounded-xl border bg-white shadow-sm">
           {loading ? (
             <div className="p-10 text-center text-gray-500">
               Loading pregnant women...
@@ -619,17 +950,12 @@ function BhwPregnantWomen() {
             <div className="p-10 text-center">
               <Baby size={42} className="mx-auto text-gray-300" />
 
-              <p className="text-gray-500 mt-3">No pregnancy records found.</p>
+              <p className="mt-3 text-gray-500">No pregnancy records found.</p>
 
               <button
+                type="button"
                 onClick={openAddModal}
-                className="
-                  mt-4
-                  inline-flex items-center gap-2
-                  text-sm font-medium
-                  text-teal-600
-                  hover:text-teal-700
-                "
+                className="mt-4 inline-flex items-center gap-2 text-sm font-medium text-teal-600"
               >
                 <Plus size={16} />
                 Register a pregnant woman
@@ -637,50 +963,37 @@ function BhwPregnantWomen() {
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[1000px] text-sm">
-                <thead className="bg-gray-50 border-b border-gray-200">
+              <table className="min-w-[1000px] w-full text-sm">
+                <thead className="border-b bg-gray-50 text-left">
                   <tr>
-                    <th className="text-left px-6 py-4 font-semibold text-gray-600">
-                      Name
-                    </th>
-
-                    <th className="text-left px-6 py-4 font-semibold text-gray-600">
-                      Age
-                    </th>
-
-                    <th className="text-left px-6 py-4 font-semibold text-gray-600">
-                      Household
-                    </th>
-
-                    <th className="text-left px-6 py-4 font-semibold text-gray-600">
-                      Purok/Sitio
-                    </th>
-
-                    <th className="text-left px-6 py-4 font-semibold text-gray-600">
-                      EDC
-                    </th>
-
-                    <th className="text-left px-6 py-4 font-semibold text-gray-600">
-                      Record No.
-                    </th>
-
-                    <th className="text-right px-6 py-4 font-semibold text-gray-600">
-                      Actions
-                    </th>
+                    {[
+                      "Name",
+                      "Age",
+                      "Household",
+                      "Purok / Sitio",
+                      "EDC",
+                      "Record No.",
+                      "Actions",
+                    ].map((heading) => (
+                      <th
+                        key={heading}
+                        className="px-5 py-4 font-semibold text-gray-600"
+                      >
+                        {heading}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
 
-                <tbody className="divide-y divide-gray-100">
+                <tbody className="divide-y">
                   {filteredRecords.map((record) => {
                     const resident = record.resident;
 
                     return (
                       <tr key={record.id} className="hover:bg-gray-50">
-                        {/* NAME */}
-
-                        <td className="px-6 py-4">
+                        <td className="px-5 py-4">
                           <div className="flex items-center gap-3">
-                            <div className="w-9 h-9 rounded-full bg-pink-50 flex items-center justify-center">
+                            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-pink-50">
                               <UserRound size={17} className="text-pink-600" />
                             </div>
 
@@ -696,74 +1009,56 @@ function BhwPregnantWomen() {
                           </div>
                         </td>
 
-                        {/* AGE */}
-
-                        <td className="px-6 py-4 text-gray-600">
+                        <td className="px-5 py-4 text-gray-600">
                           {calculateAge(resident?.birth_date)}
                         </td>
 
-                        {/* HOUSEHOLD */}
-
-                        <td className="px-6 py-4 text-gray-600">
+                        <td className="px-5 py-4 text-gray-600">
                           {resident?.households?.household_code || "—"}
                         </td>
 
-                        {/* AREA */}
-
-                        <td className="px-6 py-4 text-gray-600">
+                        <td className="px-5 py-4 text-gray-600">
                           {resident?.households?.local_areas?.name || "—"}
                         </td>
 
-                        {/* EDC */}
-
-                        <td className="px-6 py-4 text-gray-600">
+                        <td className="px-5 py-4 text-gray-600">
                           {formatDate(record.edc)}
                         </td>
 
-                        {/* RECORD NO */}
-
-                        <td className="px-6 py-4 text-gray-600">
+                        <td className="px-5 py-4 text-gray-600">
                           {record.family_record_no || "—"}
                         </td>
 
-                        {/* ACTIONS */}
-
-                        <td className="px-6 py-4">
-                          <div className="flex justify-end gap-2">
+                        <td className="px-5 py-4">
+                          <div className="flex gap-2">
                             <button
-                              onClick={() => openViewModal(record)}
+                              type="button"
+                              onClick={() => {
+                                setSelectedRecord(record);
+                                setShowViewModal(true);
+                              }}
                               title="View"
-                              className="
-                                p-2 rounded-lg
-                                text-teal-600
-                                hover:bg-teal-50
-                              "
+                              className="rounded-lg p-2 text-teal-600 hover:bg-teal-50"
                             >
-                              <Eye size={17} />
+                              <Eye size={18} />
                             </button>
 
                             <button
+                              type="button"
                               onClick={() => openEditModal(record)}
                               title="Edit"
-                              className="
-                                p-2 rounded-lg
-                                text-blue-600
-                                hover:bg-blue-50
-                              "
+                              className="rounded-lg p-2 text-blue-600 hover:bg-blue-50"
                             >
-                              <Edit size={17} />
+                              <Edit size={18} />
                             </button>
 
                             <button
+                              type="button"
                               onClick={() => handleDelete(record)}
                               title="Delete"
-                              className="
-                                p-2 rounded-lg
-                                text-red-600
-                                hover:bg-red-50
-                              "
+                              className="rounded-lg p-2 text-red-600 hover:bg-red-50"
                             >
-                              <Trash2 size={17} />
+                              <Trash2 size={18} />
                             </button>
                           </div>
                         </td>
@@ -777,15 +1072,15 @@ function BhwPregnantWomen() {
         </div>
 
         {/* =====================================================
-            ADD / EDIT MODAL
+            ADD / EDIT REGISTRATION MODAL
         ===================================================== */}
 
         {showModal && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl max-h-[92vh] overflow-y-auto">
-              {/* HEADER */}
+            <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+              {/* MODAL HEADER */}
 
-              <div className="flex items-center justify-between px-6 py-5 border-b border-gray-200">
+              <div className="flex items-center justify-between border-b px-6 py-5">
                 <div>
                   <h3 className="text-lg font-semibold text-gray-800">
                     {editingRecord
@@ -793,288 +1088,226 @@ function BhwPregnantWomen() {
                       : "Pregnant Woman Registration"}
                   </h3>
 
-                  <p className="text-sm text-gray-500 mt-1">
+                  <p className="mt-1 text-sm text-gray-500">
                     Enter the information from the antenatal care record.
                   </p>
                 </div>
 
                 <button
                   type="button"
-                  onClick={() => setShowModal(false)}
-                  className="p-2 rounded-lg hover:bg-gray-100"
+                  onClick={closeForm}
+                  disabled={saving || draftLoading}
+                  className="rounded-lg p-2 hover:bg-gray-100 disabled:opacity-50"
                 >
                   <X size={20} />
                 </button>
               </div>
 
-              <form onSubmit={handleSubmit} className="p-6 space-y-6">
-                {/* =================================================
-                    WOMAN
-                ================================================= */}
+              {/* AUTOSAVE INDICATOR */}
 
-                <div className="border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
-                    <h4 className="font-semibold text-gray-800">
-                      Woman Information
-                    </h4>
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b bg-teal-50 px-6 py-3">
+                <div className="flex items-center gap-2 text-sm text-teal-800">
+                  <Clock3 size={17} />
 
-                    <p className="text-xs text-gray-500 mt-1">
-                      Select the female resident from your assigned area.
-                    </p>
-                  </div>
+                  <span>{draftStatus || "Auto-save enabled"}</span>
 
-                  <div className="p-5 space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Woman *
-                      </label>
+                  {draftSavedAt && (
+                    <span className="text-xs text-teal-700">
+                      ({new Date(draftSavedAt).toLocaleTimeString()})
+                    </span>
+                  )}
+                </div>
 
-                      <select
-                        name="resident_id"
-                        value={form.resident_id}
-                        onChange={handleChange}
-                        disabled={!!editingRecord}
-                        required
-                        className="
-                          w-full px-3 py-2.5
-                          border border-gray-200
-                          rounded-lg
-                          outline-none
-                          focus:ring-2
-                          focus:ring-teal-500
-                          disabled:bg-gray-100
-                        "
-                      >
-                        <option value="">Select woman</option>
-                        {!editingRecord && availableWomen.length === 0 && (
-                          <option value="" disabled>
-                            No women available without an ongoing pregnancy
-                          </option>
-                        )}
+                {draftKey && (
+                  <button
+                    type="button"
+                    onClick={discardDraft}
+                    disabled={saving || draftLoading}
+                    className="text-xs font-semibold text-red-600 hover:underline disabled:opacity-50"
+                  >
+                    Discard draft
+                  </button>
+                )}
+              </div>
 
-                        {availableWomen.map((resident) => (
-                          <option key={resident.id} value={resident.id}>
-                            {getFullName(resident)}
-                            {" — "}
-                            {resident.birth_date || "No birth date"}
-                            {" — "}
-                            {resident.households?.household_code || ""}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+              {draftLoading ? (
+                <div className="p-10 text-center text-gray-500">
+                  Loading registration draft...
+                </div>
+              ) : (
+                <form onSubmit={handleSubmit} className="space-y-6 p-6">
+                  {/* WOMAN INFORMATION */}
+
+                  <FormSection
+                    title="Woman Information"
+                    description="Select a female resident from your assigned area."
+                  >
+                    <label className={labelClass}>Woman *</label>
+
+                    <select
+                      name="resident_id"
+                      value={form.resident_id}
+                      onChange={handleChange}
+                      disabled={!!editingRecord}
+                      required
+                      className={`${inputClass} disabled:bg-gray-100`}
+                    >
+                      <option value="">Select woman</option>
+
+                      {availableWomen.map((resident) => (
+                        <option key={resident.id} value={resident.id}>
+                          {getFullName(resident)}
+                          {" — "}
+                          {resident.birth_date || "No birth date"}
+                          {" — "}
+                          {resident.households?.household_code || ""}
+                        </option>
+                      ))}
+                    </select>
 
                     {form.resident_id &&
                       (() => {
-                        const selectedResident = eligibleResidents.find(
-                          (item) => item.id === Number(form.resident_id),
+                        const resident = eligibleResidents.find(
+                          (item) =>
+                            String(item.id) === String(form.resident_id),
                         );
 
-                        if (!selectedResident) return null;
+                        if (!resident) return null;
 
                         return (
-                          <div className="p-4 bg-teal-50 border border-teal-100 rounded-lg">
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                              <div>
-                                <p className="text-xs text-gray-500">
-                                  Date of Birth
-                                </p>
-                                <p className="font-medium text-gray-800">
-                                  {selectedResident.birth_date || "—"}
-                                </p>
-                              </div>
+                          <div className="mt-4 grid grid-cols-1 gap-4 rounded-lg border border-teal-100 bg-teal-50 p-4 sm:grid-cols-3">
+                            <DetailItem
+                              label="Date of Birth"
+                              value={formatDate(resident.birth_date)}
+                            />
 
-                              <div>
-                                <p className="text-xs text-gray-500">Age</p>
-                                <p className="font-medium text-gray-800">
-                                  {calculateAge(selectedResident.birth_date)}
-                                </p>
-                              </div>
+                            <DetailItem
+                              label="Age"
+                              value={calculateAge(resident.birth_date)}
+                            />
 
-                              <div>
-                                <p className="text-xs text-gray-500">
-                                  Household
-                                </p>
-                                <p className="font-medium text-gray-800">
-                                  {selectedResident.households
-                                    ?.household_code || "—"}
-                                </p>
-                              </div>
+                            <DetailItem
+                              label="Household"
+                              value={resident.households?.household_code}
+                            />
 
-                              <div className="sm:col-span-2">
-                                <p className="text-xs text-gray-500">Address</p>
-                                <p className="font-medium text-gray-800">
-                                  {selectedResident.households?.address || "—"}
-                                </p>
-                              </div>
+                            <DetailItem
+                              label="Address"
+                              value={resident.households?.address}
+                            />
 
-                              <div>
-                                <p className="text-xs text-gray-500">
-                                  Purok / Sitio
-                                </p>
-                                <p className="font-medium text-gray-800">
-                                  {selectedResident.households?.local_areas
-                                    ?.name || "—"}
-                                </p>
-                              </div>
-                            </div>
+                            <DetailItem
+                              label="Purok / Sitio"
+                              value={resident.households?.local_areas?.name}
+                            />
                           </div>
                         );
                       })()}
-                  </div>
-                </div>
+                  </FormSection>
 
-                {/* =================================================
-                    REGISTRATION
-                ================================================= */}
+                  {/* REGISTRATION INFORMATION */}
 
-                <div className="border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
-                    <h4 className="font-semibold text-gray-800">
-                      Registration Information
-                    </h4>
-                  </div>
-
-                  <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Family Record No.
-                      </label>
-
-                      <input
-                        type="text"
+                  <FormSection title="Registration Information">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <FormField
+                        label="Family Record No."
                         name="family_record_no"
                         value={form.family_record_no}
                         onChange={handleChange}
                         placeholder="Family record number"
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
                       />
-                    </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Date of Registration *
-                      </label>
-
-                      <input
-                        type="date"
+                      <FormField
+                        label="Date of Registration *"
                         name="date_of_registration"
+                        type="date"
                         value={form.date_of_registration}
                         onChange={handleChange}
                         required
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
                       />
-                    </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Civil Status
-                      </label>
+                      <div>
+                        <label className={labelClass}>Civil Status</label>
 
-                      <select
-                        name="civil_status"
-                        value={form.civil_status}
-                        onChange={handleChange}
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
-                      >
-                        <option value="">Select status</option>
-                        <option value="Single">Single</option>
-                        <option value="Married">Married</option>
-                        <option value="Widowed">Widowed</option>
-                        <option value="Separated">Separated</option>
-                        <option value="Divorced">Divorced</option>
-                      </select>
-                    </div>
+                        <select
+                          name="civil_status"
+                          value={form.civil_status}
+                          onChange={handleChange}
+                          className={inputClass}
+                        >
+                          <option value="">Select status</option>
+                          <option value="Single">Single</option>
+                          <option value="Married">Married</option>
+                          <option value="Widowed">Widowed</option>
+                          <option value="Separated">Separated</option>
+                          <option value="Divorced">Divorced</option>
+                        </select>
+                      </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Name of Husband
-                      </label>
-
-                      <input
-                        type="text"
+                      <FormField
+                        label="Name of Husband"
                         name="husband_name"
                         value={form.husband_name}
                         onChange={handleChange}
                         placeholder="Name of husband"
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
                       />
-                    </div>
 
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        PhilHealth No.
-                      </label>
-
-                      <input
-                        type="text"
+                      <FormField
+                        label="PhilHealth No."
                         name="philhealth_no"
                         value={form.philhealth_no}
                         onChange={handleChange}
                         placeholder="PhilHealth number"
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
                       />
+
+                      <div>
+                        <label className={labelClass}>Blood Type</label>
+
+                        <select
+                          name="blood_type"
+                          value={form.blood_type}
+                          onChange={handleChange}
+                          className={inputClass}
+                        >
+                          <option value="">Select blood type</option>
+
+                          {[
+                            "A+",
+                            "A-",
+                            "B+",
+                            "B-",
+                            "AB+",
+                            "AB-",
+                            "O+",
+                            "O-",
+                            "Unknown",
+                          ].map((type) => (
+                            <option key={type} value={type}>
+                              {type}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="md:col-span-2">
+                        <FormField
+                          label="Name of Facility"
+                          name="facility_name"
+                          value={form.facility_name}
+                          onChange={handleChange}
+                          placeholder="Health facility"
+                        />
+                      </div>
                     </div>
+                  </FormSection>
 
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Blood Type
-                      </label>
+                  {/* OBSTETRIC HISTORY */}
 
-                      <select
-                        name="blood_type"
-                        value={form.blood_type}
-                        onChange={handleChange}
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
-                      >
-                        <option value="">Select blood type</option>
-                        <option value="A+">A+</option>
-                        <option value="A-">A-</option>
-                        <option value="B+">B+</option>
-                        <option value="B-">B-</option>
-                        <option value="AB+">AB+</option>
-                        <option value="AB-">AB-</option>
-                        <option value="O+">O+</option>
-                        <option value="O-">O-</option>
-                        <option value="Unknown">Unknown</option>
-                      </select>
-                    </div>
-
-                    <div className="md:col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        Name of Facility
-                      </label>
-
-                      <input
-                        type="text"
-                        name="facility_name"
-                        value={form.facility_name}
-                        onChange={handleChange}
-                        placeholder="Health facility"
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {/* =================================================
-                    OB HISTORY
-                ================================================= */}
-
-                <div className="border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
-                    <h4 className="font-semibold text-gray-800">
-                      Obstetric History
-                    </h4>
-
-                    <p className="text-xs text-gray-500 mt-1">
-                      Based on the G / P (F / P / A / L) section of the
-                      antenatal form.
-                    </p>
-                  </div>
-
-                  <div className="p-5">
-                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
+                  <FormSection
+                    title="Obstetric History"
+                    description="Based on the G / P (F / P / A / L) section of the antenatal form."
+                  >
+                    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
                       {[
                         ["gravida", "Gravida (G)"],
                         ["para", "Para (P)"],
@@ -1083,131 +1316,84 @@ function BhwPregnantWomen() {
                         ["abortion", "Abortion (A)"],
                         ["living", "Living (L)"],
                       ].map(([name, label]) => (
-                        <div key={name}>
-                          <label className="block text-sm font-medium text-gray-700 mb-1">
-                            {label}
-                          </label>
-
-                          <input
-                            type="number"
-                            min="0"
-                            name={name}
-                            value={form[name]}
-                            onChange={handleChange}
-                            className="
-                              w-full px-3 py-2.5
-                              border border-gray-200
-                              rounded-lg
-                              outline-none
-                              focus:ring-2
-                              focus:ring-teal-500
-                            "
-                          />
-                        </div>
+                        <FormField
+                          key={name}
+                          label={label}
+                          name={name}
+                          type="number"
+                          min="0"
+                          value={form[name]}
+                          onChange={handleChange}
+                        />
                       ))}
                     </div>
-                  </div>
-                </div>
+                  </FormSection>
 
-                {/* =================================================
-                    PREGNANCY DATES
-                ================================================= */}
+                  {/* PREGNANCY DATES */}
 
-                <div className="border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
-                    <h4 className="font-semibold text-gray-800">
-                      Pregnancy Information
-                    </h4>
-                  </div>
+                  <FormSection title="Pregnancy Information">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div>
+                        <FormField
+                          label="LMP"
+                          name="lmp"
+                          type="date"
+                          value={form.lmp}
+                          onChange={handleChange}
+                        />
 
-                  <div className="p-5 grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* LMP */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        LMP
-                      </label>
+                        <p className="mt-1 text-xs text-gray-500">
+                          Last Menstrual Period. Selecting this date
+                          automatically calculates EDC.
+                        </p>
+                      </div>
 
-                      <input
-                        type="date"
-                        name="lmp"
-                        value={form.lmp}
-                        onChange={handleChange}
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
-                      />
+                      <div>
+                        <FormField
+                          label="EDC"
+                          name="edc"
+                          type="date"
+                          value={form.edc}
+                          onChange={handleChange}
+                        />
 
-                      <p className="text-xs text-gray-500 mt-1">
-                        Last Menstrual Period. Selecting this date automatically
-                        calculates EDC.
-                      </p>
+                        <p className="mt-1 text-xs text-gray-500">
+                          Expected Date of Confinement. Calculated as nine
+                          calendar months after LMP; adjust if clinically
+                          confirmed otherwise.
+                        </p>
+                      </div>
                     </div>
+                  </FormSection>
 
-                    {/* EDC */}
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1">
-                        EDC
-                      </label>
+                  {/* ACTIONS */}
 
-                      <input
-                        type="date"
-                        name="edc"
-                        value={form.edc}
-                        onChange={handleChange}
-                        className="w-full px-3 py-2.5 border border-gray-200 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"
-                      />
+                  <div className="flex flex-wrap justify-end gap-3 border-t pt-4">
+                    <button
+                      type="button"
+                      onClick={closeForm}
+                      disabled={saving}
+                      className="rounded-lg border px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                    >
+                      Save Draft & Close
+                    </button>
 
-                      <p className="text-xs text-gray-500 mt-1">
-                        Expected Date of Confinement. Automatically calculated
-                        as 9 calendar months after LMP; adjust if clinically
-                        confirmed otherwise.
-                      </p>
-                    </div>
+                    <button
+                      type="submit"
+                      disabled={saving || !draftReady}
+                      className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-700 disabled:opacity-50"
+                    >
+                      <Save size={17} />
+
+                      {saving
+                        ? "Saving..."
+                        : editingRecord
+                          ? "Update Registration"
+                          : "Register Pregnancy"}
+                    </button>
                   </div>
-                </div>
-
-                {/* =================================================
-                    BUTTONS
-                ================================================= */}
-
-                <div className="flex justify-end gap-3 pt-3 border-t border-gray-200">
-                  <button
-                    type="button"
-                    onClick={() => setShowModal(false)}
-                    disabled={saving}
-                    className="
-                      px-4 py-2.5
-                      rounded-lg
-                      border border-gray-200
-                      text-gray-700
-                      hover:bg-gray-50
-                    "
-                  >
-                    Cancel
-                  </button>
-
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="
-                      inline-flex items-center gap-2
-                      px-4 py-2.5
-                      rounded-lg
-                      bg-teal-600
-                      hover:bg-teal-700
-                      text-white
-                      font-medium
-                      disabled:opacity-50
-                    "
-                  >
-                    <Save size={17} />
-
-                    {saving
-                      ? "Saving..."
-                      : editingRecord
-                        ? "Update Registration"
-                        : "Register Pregnancy"}
-                  </button>
-                </div>
-              </form>
+                </form>
+              )}
             </div>
           </div>
         )}
@@ -1218,19 +1404,15 @@ function BhwPregnantWomen() {
 
         {showViewModal && selectedRecord && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl max-h-[92vh] overflow-y-auto">
-              {/* HEADER */}
-
-              <div className="flex items-center justify-between px-6 py-5 border-b border-gray-200">
+            <div className="max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-2xl bg-white shadow-2xl">
+              <div className="flex items-center justify-between border-b px-6 py-5">
                 <div className="flex items-center gap-3">
-                  <div className="w-11 h-11 rounded-xl bg-pink-50 flex items-center justify-center">
+                  <div className="rounded-xl bg-pink-50 p-3">
                     <Baby size={22} className="text-pink-600" />
                   </div>
 
                   <div>
-                    <h3 className="text-lg font-semibold text-gray-800">
-                      Pregnancy Record
-                    </h3>
+                    <h3 className="text-lg font-semibold">Pregnancy Record</h3>
 
                     <p className="text-sm text-gray-500">
                       {getFullName(selectedRecord.resident)}
@@ -1239,239 +1421,130 @@ function BhwPregnantWomen() {
                 </div>
 
                 <button
+                  type="button"
                   onClick={() => {
                     setShowViewModal(false);
                     setSelectedRecord(null);
                   }}
-                  className="p-2 rounded-lg hover:bg-gray-100"
+                  className="rounded-lg p-2 hover:bg-gray-100"
                 >
                   <X size={20} />
                 </button>
               </div>
 
-              <div className="p-6 space-y-6">
-                {/* WOMAN */}
+              <div className="space-y-6 p-6">
+                <FormSection title="Woman Information">
+                  <div className="grid grid-cols-1 gap-5 sm:grid-cols-3">
+                    <DetailItem
+                      label="Name"
+                      value={getFullName(selectedRecord.resident)}
+                    />
 
-                <div className="border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
-                    <h4 className="font-semibold text-gray-800">
-                      Woman Information
-                    </h4>
+                    <DetailItem
+                      label="Date of Birth"
+                      value={formatDate(selectedRecord.resident?.birth_date)}
+                    />
+
+                    <DetailItem
+                      label="Age"
+                      value={calculateAge(selectedRecord.resident?.birth_date)}
+                    />
+
+                    <DetailItem
+                      label="Civil Status"
+                      value={selectedRecord.civil_status}
+                    />
+
+                    <DetailItem
+                      label="Husband"
+                      value={selectedRecord.husband_name}
+                    />
+
+                    <DetailItem
+                      label="Contact"
+                      value={selectedRecord.resident?.contact_number}
+                    />
+
+                    <DetailItem
+                      label="Household"
+                      value={
+                        selectedRecord.resident?.households?.household_code
+                      }
+                    />
+
+                    <DetailItem
+                      label="Address"
+                      value={selectedRecord.resident?.households?.address}
+                    />
+
+                    <DetailItem
+                      label="Purok / Sitio"
+                      value={
+                        selectedRecord.resident?.households?.local_areas?.name
+                      }
+                    />
+                  </div>
+                </FormSection>
+
+                <FormSection title="Pregnancy Information">
+                  <div className="grid grid-cols-2 gap-5 sm:grid-cols-3 lg:grid-cols-6">
+                    {numberFields.map((field) => (
+                      <DetailItem
+                        key={field}
+                        label={field.charAt(0).toUpperCase() + field.slice(1)}
+                        value={selectedRecord[field]}
+                      />
+                    ))}
                   </div>
 
-                  <div className="p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5">
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">Name</p>
+                  <div className="mt-5 grid grid-cols-1 gap-5 border-t pt-5 sm:grid-cols-2 lg:grid-cols-4">
+                    <DetailItem
+                      label="LMP"
+                      value={formatDate(selectedRecord.lmp)}
+                    />
 
-                      <p className="font-medium text-gray-800">
-                        {getFullName(selectedRecord.resident)}
-                      </p>
-                    </div>
+                    <DetailItem
+                      label="EDC"
+                      value={formatDate(selectedRecord.edc)}
+                    />
 
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">
-                        Date of Birth
-                      </p>
+                    <DetailItem
+                      label="Blood Type"
+                      value={selectedRecord.blood_type}
+                    />
 
-                      <p className="font-medium text-gray-800">
-                        {formatDate(selectedRecord.resident?.birth_date)}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">Age</p>
-
-                      <p className="font-medium text-gray-800">
-                        {calculateAge(selectedRecord.resident?.birth_date)}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">Civil Status</p>
-
-                      <p className="font-medium text-gray-800">
-                        {selectedRecord.civil_status || "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">Husband</p>
-
-                      <p className="font-medium text-gray-800">
-                        {selectedRecord.husband_name || "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">Contact</p>
-
-                      <p className="font-medium text-gray-800">
-                        {selectedRecord.resident?.contact_number || "—"}
-                      </p>
-                    </div>
-
-                    <div className="sm:col-span-2">
-                      <p className="text-xs text-gray-500 mb-1">Address</p>
-
-                      <p className="font-medium text-gray-800">
-                        {selectedRecord.resident?.households?.address || "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">
-                        Purok / Sitio
-                      </p>
-
-                      <p className="font-medium text-gray-800">
-                        {selectedRecord.resident?.households?.local_areas
-                          ?.name || "—"}
-                      </p>
-                    </div>
+                    <DetailItem
+                      label="PhilHealth No."
+                      value={selectedRecord.philhealth_no}
+                    />
                   </div>
-                </div>
+                </FormSection>
 
-                {/* PREGNANCY */}
+                <FormSection title="Facility">
+                  <DetailItem
+                    label="Name of Facility"
+                    value={selectedRecord.facility_name}
+                  />
+                </FormSection>
 
-                <div className="border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
-                    <h4 className="font-semibold text-gray-800">
-                      Pregnancy Information
-                    </h4>
-                  </div>
+                <div className="flex items-center gap-3 rounded-xl border border-teal-100 bg-teal-50 p-4">
+                  <CalendarDays size={20} className="text-teal-600" />
 
-                  <div className="p-5 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-5">
-                    <div>
-                      <p className="text-xs text-gray-500">Gravida</p>
-                      <p className="font-semibold text-gray-800 mt-1">
-                        {selectedRecord.gravida ?? "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500">Para</p>
-                      <p className="font-semibold text-gray-800 mt-1">
-                        {selectedRecord.para ?? "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500">Full Term</p>
-                      <p className="font-semibold text-gray-800 mt-1">
-                        {selectedRecord.term ?? "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500">Preterm</p>
-                      <p className="font-semibold text-gray-800 mt-1">
-                        {selectedRecord.preterm ?? "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500">Abortion</p>
-                      <p className="font-semibold text-gray-800 mt-1">
-                        {selectedRecord.abortion ?? "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500">Living</p>
-                      <p className="font-semibold text-gray-800 mt-1">
-                        {selectedRecord.living ?? "—"}
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="border-t border-gray-200 p-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">LMP</p>
-
-                      <p className="font-medium text-gray-800">
-                        {formatDate(selectedRecord.lmp)}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">EDC</p>
-
-                      <p className="font-medium text-gray-800">
-                        {formatDate(selectedRecord.edc)}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">Blood Type</p>
-
-                      <p className="font-medium text-gray-800">
-                        {selectedRecord.blood_type || "—"}
-                      </p>
-                    </div>
-
-                    <div>
-                      <p className="text-xs text-gray-500 mb-1">
-                        PhilHealth No.
-                      </p>
-
-                      <p className="font-medium text-gray-800">
-                        {selectedRecord.philhealth_no || "—"}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* FACILITY */}
-
-                <div className="border border-gray-200 rounded-xl overflow-hidden">
-                  <div className="px-5 py-4 bg-gray-50 border-b border-gray-200">
-                    <h4 className="font-semibold text-gray-800">Facility</h4>
-                  </div>
-
-                  <div className="p-5">
-                    <p className="text-xs text-gray-500 mb-1">
-                      Name of Facility
-                    </p>
-
-                    <p className="font-medium text-gray-800">
-                      {selectedRecord.facility_name || "—"}
-                    </p>
-                  </div>
-                </div>
-
-                {/* REGISTRATION */}
-
-                <div className="p-4 bg-teal-50 border border-teal-100 rounded-xl">
-                  <div className="flex items-center gap-3">
-                    <CalendarDays size={20} className="text-teal-600" />
-
-                    <div>
-                      <p className="text-xs text-gray-500">
-                        Date of Registration
-                      </p>
-
-                      <p className="font-medium text-gray-800">
-                        {formatDate(selectedRecord.date_of_registration)}
-                      </p>
-                    </div>
-                  </div>
+                  <DetailItem
+                    label="Date of Registration"
+                    value={formatDate(selectedRecord.date_of_registration)}
+                  />
                 </div>
               </div>
 
-              <div className="px-6 py-4 border-t border-gray-200 flex justify-end">
+              <div className="flex justify-end border-t px-6 py-4">
                 <button
+                  type="button"
                   onClick={() => {
                     setShowViewModal(false);
                     setSelectedRecord(null);
                   }}
-                  className="
-                    px-4 py-2.5
-                    rounded-lg
-                    bg-gray-100
-                    hover:bg-gray-200
-                    text-gray-700
-                    font-medium
-                  "
+                  className="rounded-lg bg-gray-100 px-4 py-2.5 font-medium text-gray-700 hover:bg-gray-200"
                 >
                   Close
                 </button>
@@ -1483,5 +1556,3 @@ function BhwPregnantWomen() {
     </DashboardLayout>
   );
 }
-
-export default BhwPregnantWomen;

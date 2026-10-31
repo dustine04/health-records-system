@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Baby,
@@ -23,6 +23,12 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import {
+  monitoringDraftKey,
+  readMonitoringDraft,
+  saveMonitoringDraft,
+  deleteMonitoringDraft,
+} from "../../lib/childMonitoringDrafts";
 import {
   cachedMonitoringChildren,
   refreshMonitoringChildren,
@@ -219,6 +225,172 @@ export default function ChildMonitoring() {
 
   const [form, setForm] = useState(emptyForms.monitoring);
   const [saving, setSaving] = useState(false);
+  const [draftKey, setDraftKey] = useState(null);
+  const [draftStatus, setDraftStatus] = useState("");
+  const [draftSavedAt, setDraftSavedAt] = useState(null);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const draftTimer = useRef(null);
+  const draftEpoch = useRef(0);
+  const draftQueue = useRef(Promise.resolve());
+  const draftFormRef = useRef(form);
+  const draftKeyRef = useRef(null);
+  const draftSavingRef = useRef(false);
+
+  function enqueueDraft(operation) {
+    const next = draftQueue.current.catch(() => {}).then(operation);
+    draftQueue.current = next.catch(() => {});
+    return next;
+  }
+
+  function stopDraftTimer() {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = null;
+  }
+
+  function resetDraftState() {
+    stopDraftTimer();
+    draftEpoch.current += 1;
+    draftKeyRef.current = null;
+    setDraftKey(null);
+    setDraftStatus("");
+    setDraftSavedAt(null);
+  }
+
+  async function prepareMonitoringDraft(section, record, initialForm) {
+    if (
+      !user?.id ||
+      !selectedChild?.health_record?.id ||
+      draftSavingRef.current
+    )
+      return false;
+    draftSavingRef.current = true;
+    setDraftBusy(true);
+    stopDraftTimer();
+    const epoch = ++draftEpoch.current;
+    const key = monitoringDraftKey(
+      user.id,
+      selectedChild.health_record.id,
+      section,
+      record?.id ?? "new",
+    );
+    try {
+      await draftQueue.current;
+      const existing = await readMonitoringDraft(key);
+      let values = { ...initialForm };
+      if (existing?.data) {
+        const restore = window.confirm(
+          `An unfinished ${sectionConfig[section].title} draft was found (saved ${new Date(existing.savedAt).toLocaleString()}).\n\nOK: Restore draft\nCancel: Start fresh`,
+        );
+        if (restore) {
+          values = { ...values, ...existing.data };
+          setDraftSavedAt(existing.savedAt);
+          setDraftStatus("Previous draft restored");
+        } else {
+          await enqueueDraft(() => deleteMonitoringDraft(key));
+          setDraftSavedAt(null);
+          setDraftStatus("Automatic draft saving enabled");
+        }
+      } else {
+        setDraftSavedAt(null);
+        setDraftStatus("Automatic draft saving enabled");
+      }
+      if (epoch !== draftEpoch.current) return false;
+      draftFormRef.current = values;
+      draftKeyRef.current = key;
+      setDraftKey(key);
+      setForm(values);
+      setActiveSection(section);
+      setEditingRecord(record);
+      setShowForm(true);
+      return true;
+    } catch (error) {
+      alert(`Unable to access local draft storage: ${error.message}`);
+      return false;
+    } finally {
+      draftSavingRef.current = false;
+      setDraftBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!showForm || !draftKey || !user?.id || draftSavingRef.current) return;
+    const epoch = draftEpoch.current;
+    const values = { ...form };
+    stopDraftTimer();
+    setDraftStatus("Saving draft...");
+    draftTimer.current = setTimeout(async () => {
+      if (
+        epoch !== draftEpoch.current ||
+        draftKeyRef.current !== draftKey ||
+        draftSavingRef.current
+      )
+        return;
+      try {
+        const savedAt = await enqueueDraft(() =>
+          saveMonitoringDraft(user.id, draftKey, values),
+        );
+        if (epoch === draftEpoch.current && draftKeyRef.current === draftKey) {
+          setDraftSavedAt(savedAt);
+          setDraftStatus("Draft saved on this device");
+        }
+      } catch (error) {
+        if (epoch === draftEpoch.current)
+          setDraftStatus(`Draft save failed: ${error.message}`);
+      }
+    }, 600);
+    return stopDraftTimer;
+  }, [form, showForm, draftKey, user?.id]);
+
+  async function saveDraftAndClose() {
+    if (draftSavingRef.current || saving) return;
+    draftSavingRef.current = true;
+    setDraftBusy(true);
+    stopDraftTimer();
+    try {
+      if (draftKeyRef.current) {
+        const savedAt = await enqueueDraft(() =>
+          saveMonitoringDraft(
+            user.id,
+            draftKeyRef.current,
+            draftFormRef.current,
+          ),
+        );
+        setDraftSavedAt(savedAt);
+      }
+      resetDraftState();
+      setShowForm(false);
+      setEditingRecord(null);
+    } catch (error) {
+      alert(`Could not save draft: ${error.message}`);
+    } finally {
+      draftSavingRef.current = false;
+      setDraftBusy(false);
+    }
+  }
+
+  async function discardDraft() {
+    if (
+      draftSavingRef.current ||
+      saving ||
+      !window.confirm("Discard this unfinished monitoring form?")
+    )
+      return;
+    draftSavingRef.current = true;
+    setDraftBusy(true);
+    stopDraftTimer();
+    try {
+      await enqueueDraft(() => deleteMonitoringDraft(draftKeyRef.current));
+      resetDraftState();
+      setShowForm(false);
+      setEditingRecord(null);
+    } catch (error) {
+      alert(`Could not discard draft: ${error.message}`);
+    } finally {
+      draftSavingRef.current = false;
+      setDraftBusy(false);
+    }
+  }
+
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
   const [syncing, setSyncing] = useState(false);
@@ -331,61 +503,42 @@ export default function ChildMonitoring() {
   }
 
   function closeChildModal() {
+    if (showForm) {
+      void saveDraftAndClose();
+      return;
+    }
     setShowChildModal(false);
     setSelectedChild(null);
-    setShowForm(false);
     setEditingRecord(null);
   }
 
-  function openAddForm(section) {
-    setActiveSection(section);
-    setEditingRecord(
-      section === "newborn" ? records.newborn?.[0] || null : null,
-    );
-    setForm(
-      section === "newborn" && records.newborn?.[0]
-        ? Object.fromEntries(
-            Object.keys(emptyForms.newborn).map((field) => [
-              field,
-              records.newborn[0][field] ?? "",
-            ]),
-          )
-        : { ...emptyForms[section] },
-    );
-    setShowForm(true);
+  async function openAddForm(section) {
+    const record = section === "newborn" ? records.newborn?.[0] || null : null;
+    const initial = { ...emptyForms[section] };
+    if (record)
+      Object.keys(initial).forEach((field) => {
+        initial[field] = record[field] ?? initial[field];
+      });
+    await prepareMonitoringDraft(section, record, initial);
   }
 
-  function openEditForm(section, record) {
-    setActiveSection(section);
-    setEditingRecord(record);
-
-    const newForm = {
-      ...emptyForms[section],
-    };
-
-    Object.keys(newForm).forEach((field) => {
-      newForm[field] = record[field] ?? "";
+  async function openEditForm(section, record) {
+    const initial = { ...emptyForms[section] };
+    Object.keys(initial).forEach((field) => {
+      initial[field] = record[field] ?? initial[field];
     });
-
-    setForm(newForm);
-    setShowForm(true);
+    await prepareMonitoringDraft(section, record, initial);
   }
 
   function closeForm() {
-    setShowForm(false);
-    setEditingRecord(null);
-    setForm({
-      ...emptyForms[activeSection],
-    });
+    void saveDraftAndClose();
   }
 
   function handleInputChange(e) {
     const { name, value } = e.target;
-
-    setForm((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+    const next = { ...draftFormRef.current, [name]: value };
+    draftFormRef.current = next;
+    setForm(next);
   }
 
   async function handleSave() {
@@ -394,6 +547,9 @@ export default function ChildMonitoring() {
       return;
     }
 
+    if (draftSavingRef.current || saving) return;
+    draftSavingRef.current = true;
+    stopDraftTimer();
     try {
       setSaving(true);
 
@@ -578,7 +734,15 @@ export default function ChildMonitoring() {
         editingRecord?.id,
         data,
       );
-      closeForm();
+      // Local submission succeeded. Remove the unfinished draft even when offline.
+      try {
+        await enqueueDraft(() => deleteMonitoringDraft(draftKeyRef.current));
+      } catch (cleanupError) {
+        console.warn("Saved record, but draft cleanup failed:", cleanupError);
+      }
+      resetDraftState();
+      setShowForm(false);
+      setEditingRecord(null);
       setRecords(await cachedMonitoringRecords(user.id, childHealthRecordId));
       await updatePending();
       if (navigator.onLine) await runSync();
@@ -587,6 +751,7 @@ export default function ChildMonitoring() {
       console.error("Error saving record:", error);
       alert(error.message || "Failed to save record.");
     } finally {
+      draftSavingRef.current = false;
       setSaving(false);
     }
   }
@@ -874,7 +1039,9 @@ export default function ChildMonitoring() {
                     return (
                       <button
                         key={key}
-                        onClick={() => setActiveSection(key)}
+                        onClick={() => {
+                          if (!showForm) setActiveSection(key);
+                        }}
                         className={`flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left text-sm transition ${
                           activeSection === key
                             ? "bg-blue-600 font-medium text-white shadow-sm"
@@ -941,6 +1108,7 @@ export default function ChildMonitoring() {
 
               <button
                 onClick={closeForm}
+                disabled={draftBusy || saving}
                 className="rounded-lg p-2 text-gray-400 hover:bg-gray-100"
               >
                 <X size={20} />
@@ -948,6 +1116,33 @@ export default function ChildMonitoring() {
             </div>
 
             <div className="p-5">
+              {draftKey && (
+                <div className="mb-5 rounded-xl border border-blue-200 bg-blue-50 p-3 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="font-semibold text-blue-800">
+                        {draftStatus}
+                      </p>
+                      {draftSavedAt && (
+                        <p className="text-xs text-blue-700">
+                          Last saved: {new Date(draftSavedAt).toLocaleString()}
+                        </p>
+                      )}
+                      <p className="mt-1 text-xs text-gray-600">
+                        Unsubmitted changes are stored on this device.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={discardDraft}
+                      disabled={draftBusy || saving}
+                      className="rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-medium text-red-600 disabled:opacity-50"
+                    >
+                      Discard Draft
+                    </button>
+                  </div>
+                </div>
+              )}
               <RecordForm
                 section={activeSection}
                 form={form}
@@ -960,12 +1155,12 @@ export default function ChildMonitoring() {
                   disabled={saving}
                   className="rounded-lg border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
                 >
-                  Cancel
+                  Save Draft & Close
                 </button>
 
                 <button
                   onClick={handleSave}
-                  disabled={saving}
+                  disabled={saving || draftBusy}
                   className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-60"
                 >
                   {saving ? (

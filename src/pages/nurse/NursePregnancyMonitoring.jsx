@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -19,10 +19,25 @@ import {
   UserRound,
   BookOpen,
   X,
+  Wifi,
+  WifiOff,
+  RefreshCw,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import {
+  readNursePregnancyDraft,
+  saveNursePregnancyDraft,
+  deleteNursePregnancyDraft,
+} from "../../lib/nursePregnancyDrafts";
 import { supabase } from "../../lib/supabase";
+import {
+  readPregnancyCache,
+  writePregnancyCache,
+  getPendingPregnancyActions,
+  queuePregnancyUpdate,
+  syncPregnancyActions,
+} from "../../lib/nursePregnancyOffline";
 
 /* =========================================================
    HELPERS
@@ -487,6 +502,16 @@ export default function NursePregnancyMonitoring() {
 
   const [outcomeModal, setOutcomeModal] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+  const [offlineNotice, setOfflineNotice] = useState("");
+  const [authorizedThisSession, setAuthorizedThisSession] = useState(false);
+
+  const [draftStatus, setDraftStatus] = useState("");
+  const [draftSession, setDraftSession] = useState(null);
+  const draftTimer = useRef(null);
+  const draftRevision = useRef(0);
 
   const [outcomeForm, setOutcomeForm] = useState({
     status: "active",
@@ -497,6 +522,118 @@ export default function NursePregnancyMonitoring() {
     facility_name: "",
     attended_by: "",
   });
+
+  // A draft is written only after its form has been initialized/restored.
+  // The key includes the Nurse, district, patient, form and visit/referral ID.
+  const beginDraft = async (kind, pregnancyId, recordId, defaults, apply) => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    const revision = ++draftRevision.current;
+    setDraftSession(null);
+    setDraftStatus("Checking for an unfinished draft...");
+    try {
+      const saved = await readNursePregnancyDraft(
+        user,
+        kind,
+        pregnancyId,
+        recordId,
+      );
+      if (revision !== draftRevision.current) return false;
+      apply(saved ? { ...defaults, ...saved.values } : defaults);
+      setDraftSession({ kind, pregnancyId, recordId, revision });
+      setDraftStatus(
+        saved
+          ? "Unfinished draft restored from this device."
+          : "Autosave enabled for this form.",
+      );
+      return true;
+    } catch (error) {
+      if (revision !== draftRevision.current) return false;
+      console.error("Draft restore failed:", error);
+      apply(defaults);
+      setDraftStatus("Draft storage unavailable. Do not leave without saving.");
+      return true;
+    }
+  };
+
+  const closeDraftForm = async (kind, values, close) => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    if (draftSession?.kind === kind) {
+      try {
+        await saveNursePregnancyDraft(
+          user,
+          kind,
+          draftSession.pregnancyId,
+          draftSession.recordId,
+          values,
+        );
+      } catch (error) {
+        alert(`Unable to preserve your draft: ${error.message}`);
+        return;
+      }
+    }
+    ++draftRevision.current;
+    setDraftSession(null);
+    setDraftStatus("");
+    close();
+  };
+
+  const completeDraft = async (kind) => {
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    if (draftSession?.kind === kind) {
+      try {
+        await deleteNursePregnancyDraft(
+          user,
+          kind,
+          draftSession.pregnancyId,
+          draftSession.recordId,
+        );
+      } catch (error) {
+        console.error("Could not clear completed draft:", error);
+      }
+    }
+    ++draftRevision.current;
+    setDraftSession(null);
+    setDraftStatus("");
+  };
+
+  useEffect(() => {
+    if (!draftSession || !hasNurseAuthorization) return;
+    const { kind, pregnancyId, recordId, revision } = draftSession;
+    const values =
+      kind === "anc"
+        ? ancForm
+        : kind === "referral"
+          ? { status: referralStatus, notes: referralNotes }
+          : outcomeForm;
+    setDraftStatus("Saving draft...");
+    draftTimer.current = setTimeout(async () => {
+      if (revision !== draftRevision.current) return;
+      try {
+        await saveNursePregnancyDraft(
+          user,
+          kind,
+          pregnancyId,
+          recordId,
+          values,
+        );
+        if (revision === draftRevision.current)
+          setDraftStatus("Draft saved on this device.");
+      } catch (error) {
+        console.error("Autosave failed:", error);
+        if (revision === draftRevision.current)
+          setDraftStatus("Draft autosave failed. Check device storage.");
+      }
+    }, 500);
+    return () => clearTimeout(draftTimer.current);
+  }, [
+    draftSession,
+    ancForm,
+    referralStatus,
+    referralNotes,
+    outcomeForm,
+    hasNurseAuthorization,
+    user,
+  ]);
 
   useEffect(() => {
     const savedUser = localStorage.getItem("user");
@@ -529,6 +666,7 @@ export default function NursePregnancyMonitoring() {
     setLoading(true);
     setAuthorizationChecked(false);
     setHasNurseAuthorization(false);
+    setAuthorizedThisSession(false);
     setNurseAccessError("");
     setPregnancies([]);
     setSelectedPregnancy(null);
@@ -554,6 +692,7 @@ export default function NursePregnancyMonitoring() {
 
       const authorized = Boolean(data?.length);
       setHasNurseAuthorization(authorized);
+      setAuthorizedThisSession(authorized);
       setAuthorizationChecked(true);
 
       if (authorized) {
@@ -568,6 +707,7 @@ export default function NursePregnancyMonitoring() {
         error.message || "Unable to verify your authorization.",
       );
       setHasNurseAuthorization(false);
+      setAuthorizedThisSession(false);
       setAuthorizationChecked(true);
       setPregnancies([]);
     } finally {
@@ -599,6 +739,17 @@ export default function NursePregnancyMonitoring() {
         setPregnancies([]);
         console.warn(
           "This Nurse has no assigned district. Assign a district to display pregnancy records.",
+        );
+        return;
+      }
+
+      if (!navigator.onLine) {
+        const cached = await readPregnancyCache(user, "directory");
+        setPregnancies(cached?.data || []);
+        setOfflineNotice(
+          cached
+            ? "Showing previously cached pregnancy records."
+            : "No cached pregnancy records. Open this page online first.",
         );
         return;
       }
@@ -721,10 +872,19 @@ export default function NursePregnancyMonitoring() {
       }));
 
       setPregnancies(combined);
+      await writePregnancyCache(user, "directory", combined);
+      setOfflineNotice("");
     } catch (error) {
       console.error("Error loading pregnancies:", error);
-      setPregnancies([]);
-      alert(error.message || "Failed to load pregnancy records.");
+      const cached = await readPregnancyCache(user, "directory").catch(
+        () => null,
+      );
+      setPregnancies(cached?.data || []);
+      setOfflineNotice(
+        cached
+          ? "Unable to refresh. Showing cached records."
+          : "Unable to refresh pregnancy records.",
+      );
     } finally {
       setLoading(false);
     }
@@ -820,8 +980,32 @@ export default function NursePregnancyMonitoring() {
     }
 
     try {
+      ++draftRevision.current;
+      setDraftSession(null);
+      setDraftStatus("");
       setSelectedPregnancy(pregnancy);
       setLoadingDetails(true);
+
+      if (!navigator.onLine) {
+        const cached = await readPregnancyCache(user, "details", pregnancy.id);
+        setHomeVisits(cached?.data?.homeVisits || []);
+        setAncVisits(cached?.data?.ancVisits || []);
+        setReferrals(cached?.data?.referrals || []);
+        setOutcomeForm({
+          status: pregnancy.status || "active",
+          pregnancy_outcome: pregnancy.pregnancy_outcome || "",
+          birth_status: pregnancy.birth_status || "",
+          date_of_delivery: pregnancy.date_of_delivery || "",
+          place_of_delivery: pregnancy.place_of_delivery || "",
+          facility_name: pregnancy.facility_name || "",
+          attended_by: pregnancy.attended_by || "",
+        });
+        if (!cached)
+          setOfflineNotice(
+            "No cached details for this pregnancy. Open it online first.",
+          );
+        return;
+      }
 
       const [homeResult, ancResult, referralResult] = await Promise.all([
         supabase
@@ -853,6 +1037,16 @@ export default function NursePregnancyMonitoring() {
       setHomeVisits(homeResult.data || []);
       setAncVisits(ancResult.data || []);
       setReferrals(referralResult.data || []);
+      await writePregnancyCache(
+        user,
+        "details",
+        {
+          homeVisits: homeResult.data || [],
+          ancVisits: ancResult.data || [],
+          referrals: referralResult.data || [],
+        },
+        pregnancy.id,
+      );
 
       setOutcomeForm({
         status: pregnancy.status || "active",
@@ -887,7 +1081,7 @@ export default function NursePregnancyMonitoring() {
     return ancVisits.length + 1;
   };
 
-  const openAddAnc = () => {
+  const openAddAnc = async () => {
     if (!hasNurseAuthorization) {
       alert(
         "You are not authorized by a Midwife to monitor pregnancy records.",
@@ -902,7 +1096,7 @@ export default function NursePregnancyMonitoring() {
     );
 
     setEditingAnc(null);
-    setAncForm({
+    const initialForm = {
       ...emptyAncForm,
       visit_number: getNextVisitNumber(),
       visit_date: visitDate,
@@ -910,11 +1104,20 @@ export default function NursePregnancyMonitoring() {
         gestationalAge && gestationalAge.totalDays >= 0
           ? String(gestationalAge.weeks)
           : "",
-    });
-    setAncModal(true);
+    };
+    if (
+      await beginDraft(
+        "anc",
+        selectedPregnancy.id,
+        "new",
+        initialForm,
+        setAncForm,
+      )
+    )
+      setAncModal(true);
   };
 
-  const openEditAnc = (visit) => {
+  const openEditAnc = async (visit) => {
     if (!hasNurseAuthorization) {
       alert(
         "You are not authorized by a Midwife to monitor pregnancy records.",
@@ -961,8 +1164,10 @@ export default function NursePregnancyMonitoring() {
         ? String(gestationalAge.weeks)
         : "";
 
-    setAncForm(form);
-    setAncModal(true);
+    if (
+      await beginDraft("anc", selectedPregnancy.id, visit.id, form, setAncForm)
+    )
+      setAncModal(true);
   };
 
   const handleAncChange = (field, value) => {
@@ -1039,6 +1244,29 @@ export default function NursePregnancyMonitoring() {
         payload.updated_at = new Date().toISOString();
       }
 
+      if (!navigator.onLine) {
+        if (!editingAnc)
+          throw new Error(
+            "Adding an ANC visit requires internet. Existing ANC visits can be edited offline.",
+          );
+        delete payload.pregnant_woman_id;
+        await queuePregnancyUpdate(
+          user,
+          "pregnant_woman_visits",
+          editingAnc.id,
+          payload,
+        );
+        setAncVisits((old) =>
+          old.map((v) => (v.id === editingAnc.id ? { ...v, ...payload } : v)),
+        );
+        await completeDraft("anc");
+        setAncModal(false);
+        setEditingAnc(null);
+        await refreshPendingOffline();
+        setOfflineNotice("ANC edit queued. It is not yet saved to Supabase.");
+        return;
+      }
+
       let result;
 
       if (editingAnc) {
@@ -1052,6 +1280,7 @@ export default function NursePregnancyMonitoring() {
 
       if (result.error) throw result.error;
 
+      await completeDraft("anc");
       setAncModal(false);
       setEditingAnc(null);
 
@@ -1078,6 +1307,10 @@ export default function NursePregnancyMonitoring() {
       );
       return;
     }
+    if (!navigator.onLine) {
+      alert("Deleting ANC visits requires an internet connection.");
+      return;
+    }
     if (!window.confirm(`Delete ANC Visit #${visit.visit_number}?`)) return;
 
     try {
@@ -1102,11 +1335,25 @@ export default function NursePregnancyMonitoring() {
      REFERRAL REVIEW
   ========================================================= */
 
-  const openReferral = (referral) => {
+  const openReferral = async (referral) => {
     setSelectedReferral(referral);
-    setReferralStatus(referral.status || "pending");
-    setReferralNotes(referral.midwife_notes || "");
-    setReferralModal(true);
+    const initial = {
+      status: referral.status || "pending",
+      notes: referral.midwife_notes || "",
+    };
+    if (
+      await beginDraft(
+        "referral",
+        selectedPregnancy.id,
+        referral.id,
+        initial,
+        (values) => {
+          setReferralStatus(values.status);
+          setReferralNotes(values.notes);
+        },
+      )
+    )
+      setReferralModal(true);
   };
 
   const saveReferralReview = async (event) => {
@@ -1122,6 +1369,34 @@ export default function NursePregnancyMonitoring() {
     try {
       setSaving(true);
 
+      if (!navigator.onLine) {
+        await queuePregnancyUpdate(
+          user,
+          "pregnancy_referrals",
+          selectedReferral.id,
+          {
+            status: referralStatus,
+            midwife_notes: referralNotes || null,
+            reviewed_by: user.id,
+            reviewed_at: new Date().toISOString(),
+          },
+        );
+        setReferrals((old) =>
+          old.map((r) =>
+            r.id === selectedReferral.id
+              ? { ...r, status: referralStatus, midwife_notes: referralNotes }
+              : r,
+          ),
+        );
+        await completeDraft("referral");
+        setReferralModal(false);
+        await refreshPendingOffline();
+        setOfflineNotice(
+          "Referral review queued. It is not yet saved to Supabase.",
+        );
+        return;
+      }
+
       const { error } = await supabase
         .from("pregnancy_referrals")
         .update({
@@ -1134,6 +1409,7 @@ export default function NursePregnancyMonitoring() {
 
       if (error) throw error;
 
+      await completeDraft("referral");
       setReferralModal(false);
       await openPregnancy(selectedPregnancy);
 
@@ -1164,6 +1440,37 @@ export default function NursePregnancyMonitoring() {
     try {
       setSaving(true);
 
+      if (!navigator.onLine) {
+        const changes = {
+          status: outcomeForm.status,
+          pregnancy_outcome: outcomeForm.pregnancy_outcome || null,
+          birth_status: outcomeForm.birth_status || null,
+          date_of_delivery: outcomeForm.date_of_delivery || null,
+          place_of_delivery: outcomeForm.place_of_delivery || null,
+          facility_name: outcomeForm.facility_name || null,
+          attended_by: outcomeForm.attended_by || null,
+        };
+        await queuePregnancyUpdate(
+          user,
+          "pregnant_women",
+          selectedPregnancy.id,
+          changes,
+        );
+        setSelectedPregnancy((prev) => ({ ...prev, ...changes }));
+        setPregnancies((old) =>
+          old.map((p) =>
+            p.id === selectedPregnancy.id ? { ...p, ...changes } : p,
+          ),
+        );
+        await completeDraft("outcome");
+        setOutcomeModal(false);
+        await refreshPendingOffline();
+        setOfflineNotice(
+          "Pregnancy outcome queued. It is not yet saved to Supabase.",
+        );
+        return;
+      }
+
       const { error } = await supabase
         .from("pregnant_women")
         .update({
@@ -1179,6 +1486,7 @@ export default function NursePregnancyMonitoring() {
 
       if (error) throw error;
 
+      await completeDraft("outcome");
       setOutcomeModal(false);
 
       const updatedPregnancy = {
@@ -1208,6 +1516,26 @@ export default function NursePregnancyMonitoring() {
     if (!selectedPregnancy) return;
 
     try {
+      if (!navigator.onLine) {
+        await queuePregnancyUpdate(
+          user,
+          "pregnant_women",
+          selectedPregnancy.id,
+          { status },
+        );
+        setSelectedPregnancy((prev) => ({ ...prev, status }));
+        setPregnancies((old) =>
+          old.map((p) =>
+            p.id === selectedPregnancy.id ? { ...p, status } : p,
+          ),
+        );
+        setOutcomeForm((prev) => ({ ...prev, status }));
+        await refreshPendingOffline();
+        setOfflineNotice(
+          "Pregnancy status queued. It is not yet saved to Supabase.",
+        );
+        return;
+      }
       const { error } = await supabase
         .from("pregnant_women")
         .update({ status })
@@ -1224,6 +1552,54 @@ export default function NursePregnancyMonitoring() {
       alert(error.message || "Failed to update status.");
     }
   };
+
+  const refreshPendingOffline = async () => {
+    if (!user?.id || !user?.district_id) return;
+    const actions = await getPendingPregnancyActions(user);
+    setPendingCount(actions.length);
+  };
+
+  const syncOfflineNow = async () => {
+    if (!navigator.onLine || !user?.id || syncing) return;
+    setSyncing(true);
+    try {
+      const count = await syncPregnancyActions(user);
+      await refreshPendingOffline();
+      if (hasNurseAuthorization) {
+        await loadPregnancies(true);
+        if (selectedPregnancy) await openPregnancy(selectedPregnancy);
+      }
+      setOfflineNotice(`${count} change(s) synchronized.`);
+    } catch (error) {
+      await refreshPendingOffline();
+      setOfflineNotice(`Sync stopped: ${error.message}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!user?.id || !user?.district_id || !authorizedThisSession) return;
+    refreshPendingOffline();
+    const onOnline = () => {
+      setOnline(true);
+      setOfflineNotice(
+        "Connection restored. Use Sync Now to submit pending changes.",
+      );
+    };
+    const onOffline = () => {
+      setOnline(false);
+      setOfflineNotice(
+        "Offline: displaying cached data and allowing supported edits.",
+      );
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, [user, authorizedThisSession]);
 
   /* =========================================================
      RENDER
@@ -1242,6 +1618,38 @@ export default function NursePregnancyMonitoring() {
             available only after your assigned Midwife grants access.
           </p>
         </div>
+
+        {authorizationChecked && hasNurseAuthorization && (
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-3 text-sm">
+            <span className={online ? "text-green-700" : "text-amber-700"}>
+              {online ? (
+                <Wifi size={16} className="mr-1 inline" />
+              ) : (
+                <WifiOff size={16} className="mr-1 inline" />
+              )}
+              {online ? "Online" : "Offline"}
+            </span>
+            <span className="text-amber-700">
+              {pendingCount} pending change(s)
+            </span>
+            <button
+              type="button"
+              onClick={syncOfflineNow}
+              disabled={!online || syncing || saving}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-white disabled:opacity-50"
+            >
+              <RefreshCw size={15} className={syncing ? "animate-spin" : ""} />
+              {syncing ? "Syncing..." : "Sync Now"}
+            </button>
+            {offlineNotice && (
+              <p className="w-full text-amber-800">{offlineNotice}</p>
+            )}
+            <p className="w-full text-xs text-gray-500">
+              Offline data is stored on this device. Add/delete ANC visits
+              require internet. Changes are not official until synced.
+            </p>
+          </div>
+        )}
 
         {String(user?.role || "").toLowerCase() === "nurse" &&
           authorizationChecked &&
@@ -1629,7 +2037,18 @@ export default function NursePregnancyMonitoring() {
                     </h3>
                   </div>
                   <button
-                    onClick={() => setOutcomeModal(true)}
+                    onClick={async () => {
+                      if (
+                        await beginDraft(
+                          "outcome",
+                          selectedPregnancy.id,
+                          "outcome",
+                          outcomeForm,
+                          setOutcomeForm,
+                        )
+                      )
+                        setOutcomeModal(true);
+                    }}
                     className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
                   >
                     <Edit size={14} /> Update Outcome
@@ -1924,10 +2343,15 @@ export default function NursePregnancyMonitoring() {
               ? `Edit ANC Visit #${editingAnc.visit_number}`
               : "Add ANC Visit"
           }
-          onClose={() => setAncModal(false)}
+          onClose={() =>
+            closeDraftForm("anc", ancForm, () => setAncModal(false))
+          }
           large
         >
           <form onSubmit={saveAnc} className="space-y-6">
+            <p role="status" className="text-xs text-blue-700">
+              {draftStatus}
+            </p>
             <FormSection title="ANC Visit Information" icon={CalendarDays}>
               <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                 <FormInput
@@ -2229,7 +2653,9 @@ export default function NursePregnancyMonitoring() {
             <div className="flex justify-end gap-3 border-t pt-5">
               <button
                 type="button"
-                onClick={() => setAncModal(false)}
+                onClick={() =>
+                  closeDraftForm("anc", ancForm, () => setAncModal(false))
+                }
                 className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
               >
                 Cancel
@@ -2255,7 +2681,13 @@ export default function NursePregnancyMonitoring() {
       {referralModal && selectedReferral && (
         <Modal
           title="Review Pregnancy Referral"
-          onClose={() => setReferralModal(false)}
+          onClose={() =>
+            closeDraftForm(
+              "referral",
+              { status: referralStatus, notes: referralNotes },
+              () => setReferralModal(false),
+            )
+          }
         >
           <form onSubmit={saveReferralReview} className="space-y-5">
             <div className="rounded-lg bg-gray-50 p-4">
@@ -2312,7 +2744,13 @@ export default function NursePregnancyMonitoring() {
             <div className="flex justify-end gap-3 border-t pt-4">
               <button
                 type="button"
-                onClick={() => setReferralModal(false)}
+                onClick={() =>
+                  closeDraftForm(
+                    "referral",
+                    { status: referralStatus, notes: referralNotes },
+                    () => setReferralModal(false),
+                  )
+                }
                 className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
               >
                 Cancel
@@ -2331,8 +2769,16 @@ export default function NursePregnancyMonitoring() {
 
       {/* OUTCOME MODAL */}
       {hasNurseAuthorization && outcomeModal && (
-        <Modal title="Pregnancy Outcome" onClose={() => setOutcomeModal(false)}>
+        <Modal
+          title="Pregnancy Outcome"
+          onClose={() =>
+            closeDraftForm("outcome", outcomeForm, () => setOutcomeModal(false))
+          }
+        >
           <form onSubmit={saveOutcome} className="space-y-5">
+            <p role="status" className="text-xs text-blue-700">
+              {draftStatus}
+            </p>
             <div>
               <label className="mb-1 block text-sm font-medium text-gray-700">
                 Pregnancy Status
@@ -2414,7 +2860,11 @@ export default function NursePregnancyMonitoring() {
             <div className="flex justify-end gap-3 border-t pt-4">
               <button
                 type="button"
-                onClick={() => setOutcomeModal(false)}
+                onClick={() =>
+                  closeDraftForm("outcome", outcomeForm, () =>
+                    setOutcomeModal(false),
+                  )
+                }
                 className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
               >
                 Cancel

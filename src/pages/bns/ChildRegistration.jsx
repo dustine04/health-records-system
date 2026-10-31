@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Baby,
   UserRound,
@@ -14,7 +14,15 @@ import {
   WifiOff,
   RefreshCw,
   CloudUpload,
+  Clock3,
 } from "lucide-react";
+
+import {
+  readChildDraft,
+  saveChildDraft,
+  deleteChildDraft,
+  childDraftKey,
+} from "../../lib/childRegistrationDrafts";
 
 import DashboardLayout from "../../components/DashboardLayout";
 import {
@@ -88,6 +96,192 @@ function ChildRegistration() {
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState("");
   const [cachedAt, setCachedAt] = useState(null);
+
+  // Drafts are separate from queued offline submissions.
+  const [draftKey, setDraftKey] = useState(null);
+  const [draftStatus, setDraftStatus] = useState("");
+  const [draftSavedAt, setDraftSavedAt] = useState(null);
+  const [draftBusy, setDraftBusy] = useState(false);
+  const draftKeyRef = useRef(null);
+  const draftValuesRef = useRef(null);
+  const draftTimerRef = useRef(null);
+  const draftSequenceRef = useRef(0);
+  const draftWriteRef = useRef(Promise.resolve());
+  const draftOpeningRef = useRef(false);
+  const draftSavingRef = useRef(false);
+
+  const enqueueDraft = (action) => {
+    const next = draftWriteRef.current.catch(() => {}).then(action);
+    draftWriteRef.current = next.catch(() => {});
+    return next;
+  };
+
+  const cancelDraftTimer = () => {
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = null;
+  };
+
+  const openWithDraft = async (
+    key,
+    initialForm,
+    initialHousehold,
+    newMode,
+    record,
+  ) => {
+    if (!user?.id || draftOpeningRef.current || draftSavingRef.current) return;
+    draftOpeningRef.current = true;
+    setDraftBusy(true);
+    cancelDraftTimer();
+    const sequence = ++draftSequenceRef.current;
+    try {
+      await draftWriteRef.current;
+      const existing = await readChildDraft(key);
+      let values = {
+        form: initialForm,
+        newHousehold: initialHousehold,
+        newChildMode: newMode,
+      };
+      if (existing) {
+        const restore = window.confirm(
+          `An unfinished child registration draft was found.\nLast saved: ${new Date(existing.savedAt).toLocaleString()}\n\nPress OK to restore it, or Cancel to start over.`,
+        );
+        if (restore) {
+          values = {
+            form: { ...initialForm, ...existing.data?.form },
+            newHousehold: {
+              ...initialHousehold,
+              ...existing.data?.newHousehold,
+            },
+            newChildMode: newMode,
+          };
+        } else {
+          await enqueueDraft(() => deleteChildDraft(key));
+        }
+      }
+      if (sequence !== draftSequenceRef.current) return;
+      draftValuesRef.current = values;
+      draftKeyRef.current = key;
+      setDraftKey(key);
+      setNewChildMode(newMode);
+      setNewHousehold(values.newHousehold);
+      setForm(values.form);
+      setEditingRecord(record);
+      setDraftSavedAt(
+        existing && existing.data && values.form !== initialForm
+          ? existing.savedAt
+          : null,
+      );
+      setDraftStatus(
+        existing && values.form !== initialForm
+          ? "Draft restored"
+          : "Autosave enabled",
+      );
+      setShowModal(true);
+    } catch (error) {
+      alert(`Could not open local draft storage: ${error.message}`);
+    } finally {
+      draftOpeningRef.current = false;
+      setDraftBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!showModal || !draftKey || draftBusy || saving) return;
+    const values = { form, newHousehold, newChildMode };
+    draftValuesRef.current = values;
+    const sequence = draftSequenceRef.current;
+    cancelDraftTimer();
+    setDraftStatus("Saving draft...");
+    draftTimerRef.current = setTimeout(async () => {
+      if (sequence !== draftSequenceRef.current || draftSavingRef.current)
+        return;
+      try {
+        await enqueueDraft(() => saveChildDraft(user.id, draftKey, values));
+        if (sequence === draftSequenceRef.current) {
+          setDraftSavedAt(new Date().toISOString());
+          setDraftStatus("Draft saved on this device");
+        }
+      } catch (error) {
+        if (sequence === draftSequenceRef.current)
+          setDraftStatus(`Draft save failed: ${error.message}`);
+      }
+    }, 600);
+    return cancelDraftTimer;
+  }, [
+    form,
+    newHousehold,
+    newChildMode,
+    showModal,
+    draftKey,
+    draftBusy,
+    saving,
+  ]);
+
+  const closeAndKeepDraft = async () => {
+    if (draftOpeningRef.current || draftSavingRef.current || saving) return;
+    setDraftBusy(true);
+    cancelDraftTimer();
+    const key = draftKeyRef.current;
+    try {
+      if (key) {
+        const values = draftValuesRef.current || {
+          form,
+          newHousehold,
+          newChildMode,
+        };
+        await enqueueDraft(() => saveChildDraft(user.id, key, values));
+      }
+      ++draftSequenceRef.current;
+      draftKeyRef.current = null;
+      draftValuesRef.current = null;
+      setDraftKey(null);
+      setShowModal(false);
+      resetForm();
+    } catch (error) {
+      alert(`Unable to save draft: ${error.message}`);
+    } finally {
+      setDraftBusy(false);
+    }
+  };
+
+  const discardDraft = async () => {
+    if (draftSavingRef.current || saving || draftBusy) return;
+    if (!window.confirm("Discard this unfinished child registration draft?"))
+      return;
+    setDraftBusy(true);
+    cancelDraftTimer();
+    try {
+      if (draftKeyRef.current) {
+        await enqueueDraft(() => deleteChildDraft(draftKeyRef.current));
+      }
+      ++draftSequenceRef.current;
+      draftKeyRef.current = null;
+      draftValuesRef.current = null;
+      setDraftKey(null);
+      setShowModal(false);
+      resetForm();
+    } catch (error) {
+      alert(`Could not discard draft: ${error.message}`);
+    } finally {
+      setDraftBusy(false);
+    }
+  };
+
+  const clearSubmittedDraft = async () => {
+    cancelDraftTimer();
+    const key = draftKeyRef.current;
+    ++draftSequenceRef.current;
+    draftKeyRef.current = null;
+    draftValuesRef.current = null;
+    setDraftKey(null);
+    if (key) {
+      try {
+        await enqueueDraft(() => deleteChildDraft(key));
+      } catch (error) {
+        console.error("Submitted locally but could not clear draft", error);
+      }
+    }
+  };
 
   const showLocal = async () => {
     const local = await getCachedChildren(user.id);
@@ -209,14 +403,10 @@ function ChildRegistration() {
   };
 
   const openAddModal = (child) => {
-    setNewChildMode(false);
     const fullName = [child.first_name, child.middle_name, child.last_name]
       .filter(Boolean)
       .join(" ");
-
-    setEditingRecord(null);
-
-    setForm({
+    const initialForm = {
       resident_id: child.id,
 
       date_of_registration: new Date().toISOString().split("T")[0],
@@ -245,15 +435,27 @@ function ChildRegistration() {
 
       referred_health_facility: "",
       referral_result: "",
-    });
-
-    setShowModal(true);
+    };
+    void openWithDraft(
+      childDraftKey(user.id, "register", child.id),
+      initialForm,
+      {
+        household_code: "",
+        household_head: "",
+        local_area_id: "",
+        first_name: "",
+        middle_name: "",
+        last_name: "",
+        sex: "",
+        birth_date: "",
+      },
+      false,
+      null,
+    );
   };
 
   const openNewChildModal = () => {
-    setEditingRecord(null);
-    setNewChildMode(true);
-    setNewHousehold({
+    const initialHousehold = {
       household_code: "",
       household_head: "",
       local_area_id: assignedAreas[0] ? String(assignedAreas[0].id) : "",
@@ -262,8 +464,8 @@ function ChildRegistration() {
       last_name: "",
       sex: "",
       birth_date: "",
-    });
-    setForm({
+    };
+    const initialForm = {
       resident_id: "",
       date_of_registration: new Date().toISOString().split("T")[0],
       document_record_no: "",
@@ -283,14 +485,25 @@ function ChildRegistration() {
       complete_address: "",
       referred_health_facility: "",
       referral_result: "",
-    });
-    setShowModal(true);
+    };
+    void openWithDraft(
+      childDraftKey(user.id, "new-child", "new"),
+      initialForm,
+      initialHousehold,
+      true,
+      null,
+    );
   };
 
   const handleNewHouseholdChange = (e) => {
     const { name, value } = e.target;
     const next = { ...newHousehold, [name]: value };
     setNewHousehold(next);
+    if (draftValuesRef.current)
+      draftValuesRef.current = {
+        ...draftValuesRef.current,
+        newHousehold: next,
+      };
 
     if (["first_name", "middle_name", "last_name"].includes(name)) {
       setForm((current) => ({
@@ -307,17 +520,9 @@ function ChildRegistration() {
   };
 
   const openEditModal = (child) => {
-    setNewChildMode(false);
     const record = child.health_record;
-
-    if (!record) {
-      openAddModal(child);
-      return;
-    }
-
-    setEditingRecord(record);
-
-    setForm({
+    if (!record) return openAddModal(child);
+    const initialForm = {
       resident_id: record.resident_id,
 
       date_of_registration: record.date_of_registration || "",
@@ -355,18 +560,34 @@ function ChildRegistration() {
       referred_health_facility: record.referred_health_facility || "",
 
       referral_result: record.referral_result || "",
-    });
-
-    setShowModal(true);
+    };
+    void openWithDraft(
+      childDraftKey(user.id, "edit", child.id, record.id),
+      initialForm,
+      {
+        household_code: "",
+        household_head: "",
+        local_area_id: "",
+        first_name: "",
+        middle_name: "",
+        last_name: "",
+        sex: "",
+        birth_date: "",
+      },
+      false,
+      record,
+    );
   };
 
   const handleChange = (e) => {
     const { name, value } = e.target;
 
-    setForm((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+    setForm((prev) => {
+      const next = { ...prev, [name]: value };
+      if (draftValuesRef.current)
+        draftValuesRef.current = { ...draftValuesRef.current, form: next };
+      return next;
+    });
   };
 
   // =====================================================
@@ -404,6 +625,9 @@ function ChildRegistration() {
       }
     }
 
+    if (draftSavingRef.current || draftBusy) return;
+    draftSavingRef.current = true;
+    cancelDraftTimer();
     try {
       setSaving(true);
       const childData = {
@@ -460,6 +684,7 @@ function ChildRegistration() {
           childData,
         );
       }
+      await clearSubmittedDraft();
       setShowModal(false);
       resetForm();
       await showLocal();
@@ -471,6 +696,7 @@ function ChildRegistration() {
       console.error(error);
       alert(error.message || "Could not save child health record locally.");
     } finally {
+      draftSavingRef.current = false;
       setSaving(false);
     }
   };
@@ -856,10 +1082,7 @@ function ChildRegistration() {
                 </div>
 
                 <button
-                  onClick={() => {
-                    setShowModal(false);
-                    resetForm();
-                  }}
+                  onClick={() => void closeAndKeepDraft()}
                   className="p-2 rounded-lg hover:bg-gray-100"
                 >
                   <X size={20} />
@@ -867,6 +1090,25 @@ function ChildRegistration() {
               </div>
 
               <form onSubmit={handleSubmit} className="flex flex-col">
+                <div className="mx-5 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-teal-200 bg-teal-50 p-3 text-sm">
+                  <div className="flex items-center gap-2 text-teal-800">
+                    <Clock3 size={17} />
+                    <span>{draftStatus || "Automatic local draft saving"}</span>
+                    {draftSavedAt && (
+                      <span className="text-xs text-teal-700">
+                        ({new Date(draftSavedAt).toLocaleString()})
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={saving || draftBusy}
+                    onClick={() => void discardDraft()}
+                    className="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-700 disabled:opacity-50"
+                  >
+                    Discard Draft
+                  </button>
+                </div>
                 {/* =========================================================
       FORM CONTENT
   ========================================================= */}
@@ -1523,10 +1765,7 @@ function ChildRegistration() {
                     <div className="flex justify-end gap-3">
                       <button
                         type="button"
-                        onClick={() => {
-                          setShowModal(false);
-                          resetForm();
-                        }}
+                        onClick={() => void closeAndKeepDraft()}
                         className="
             px-5 py-2.5
             rounded-xl
@@ -1537,12 +1776,12 @@ function ChildRegistration() {
             transition
           "
                       >
-                        Cancel
+                        Save Draft & Close
                       </button>
 
                       <button
                         type="submit"
-                        disabled={saving}
+                        disabled={saving || draftBusy}
                         className="
             inline-flex items-center justify-center gap-2
             px-5 py-2.5

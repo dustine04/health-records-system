@@ -13,10 +13,28 @@ import {
   MapPin,
   Building2,
   AlertCircle,
+  Wifi,
+  WifiOff,
+  RefreshCw,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
+import {
+  getStaffCache,
+  saveStaffCache,
+  pendingStaffActions,
+  queueStaffAction,
+  syncStaffActions,
+} from "../../lib/adminStaffOffline";
+
+const getAdmin = () => {
+  try {
+    return JSON.parse(localStorage.getItem("user") || "null");
+  } catch {
+    return null;
+  }
+};
 
 const INITIAL_FORM = {
   first_name: "",
@@ -58,11 +76,71 @@ function Users() {
   const [form, setForm] = useState(INITIAL_FORM);
 
   const [errorMessage, setErrorMessage] = useState("");
+  const [online, setOnline] = useState(navigator.onLine);
+  const [syncing, setSyncing] = useState(false);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [notice, setNotice] = useState("");
+  const [cacheReady, setCacheReady] = useState(false);
+  const refreshPending = async () => {
+    try {
+      setPendingCount((await pendingStaffActions(getAdmin())).length);
+    } catch (error) {
+      console.error(error);
+    }
+  };
+  const refreshCache = async (nextUsers, nextDistricts) => {
+    const admin = getAdmin();
+    const previous = await getStaffCache(admin);
+    await saveStaffCache(
+      admin,
+      nextUsers ?? previous?.users ?? [],
+      nextDistricts ?? previous?.districts ?? [],
+    );
+  };
+  const loadCache = async () => {
+    try {
+      const cached = await getStaffCache(getAdmin());
+      if (cached) {
+        setUsers(cached.users || []);
+        setDistricts(cached.districts || []);
+        setNotice(
+          `Cached staff directory from ${new Date(cached.cachedAt).toLocaleString()}.`,
+        );
+      }
+    } catch (error) {
+      setErrorMessage(error.message);
+    } finally {
+      setCacheReady(true);
+    }
+  };
+  const syncNow = async () => {
+    if (!navigator.onLine || syncing) return;
+    setSyncing(true);
+    try {
+      const count = await syncStaffActions(getAdmin());
+      await refreshPending();
+      await fetchUsers();
+      await fetchDistricts();
+      setNotice(
+        count
+          ? `${count} staff change(s) synchronized.`
+          : "Staff directory refreshed.",
+      );
+    } catch (error) {
+      setErrorMessage(
+        `Sync stopped: ${error.message}. Remaining changes are still queued.`,
+      );
+      await refreshPending();
+    } finally {
+      setSyncing(false);
+    }
+  };
 
   const fetchUsers = async () => {
     setLoading(true);
 
     try {
+      if (!navigator.onLine) return;
       const { data, error } = await supabase
         .from("users")
         .select("*")
@@ -71,7 +149,11 @@ function Users() {
 
       if (error) throw error;
 
-      setUsers(data || []);
+      setUsers((data || []).map(({ password, ...rest }) => rest));
+      await refreshCache(
+        (data || []).map(({ password, ...rest }) => rest),
+        null,
+      );
     } catch (error) {
       console.error("Error fetching users:", error);
       setErrorMessage(`Failed to load users: ${error.message}`);
@@ -84,15 +166,16 @@ function Users() {
     setDistrictsLoading(true);
 
     try {
+      if (!navigator.onLine) return;
       const { data, error } = await supabase.from("districts").select("*");
 
       if (error) throw error;
 
-      setDistricts(
-        (data || []).sort((a, b) =>
-          getDistrictName(a).localeCompare(getDistrictName(b)),
-        ),
+      const sorted = (data || []).sort((a, b) =>
+        getDistrictName(a).localeCompare(getDistrictName(b)),
       );
+      setDistricts(sorted);
+      await refreshCache(null, sorted);
     } catch (error) {
       console.error("Error fetching districts:", error);
       setErrorMessage(
@@ -104,8 +187,29 @@ function Users() {
   };
 
   useEffect(() => {
-    fetchUsers();
-    fetchDistricts();
+    let mounted = true;
+    (async () => {
+      await loadCache();
+      if (!mounted) return;
+      await fetchUsers();
+      await fetchDistricts();
+      await refreshPending();
+    })();
+    const onOnline = () => {
+      setOnline(true);
+      syncNow();
+    };
+    const onOffline = () => {
+      setOnline(false);
+      setNotice("Offline mode: account changes are pending until synced.");
+    };
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      mounted = false;
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
   }, []);
 
   const districtMap = useMemo(() => {
@@ -234,6 +338,37 @@ function Users() {
         userData.password = form.password;
       }
 
+      if (!navigator.onLine) {
+        if (!editingUser)
+          throw new Error("Creating accounts requires an internet connection.");
+        if (form.password.trim())
+          throw new Error("Password changes require an internet connection.");
+        const expected = Object.fromEntries(
+          ["first_name", "last_name", "email", "username", "district_id"].map(
+            (k) => [k, editingUser[k]],
+          ),
+        );
+        await queueStaffAction(getAdmin(), {
+          type: "edit",
+          userId: editingUser.id,
+          changes: {
+            first_name: userData.first_name,
+            last_name: userData.last_name,
+            email: userData.email,
+            username: userData.username,
+            district_id: userData.district_id,
+          },
+          expected,
+        });
+        await refreshPending();
+        setNotice(
+          "Staff edit queued offline. It is not applied until sync succeeds.",
+        );
+        setShowModal(false);
+        setEditingUser(null);
+        setForm({ ...INITIAL_FORM });
+        return;
+      }
       if (editingUser) {
         const { error } = await supabase
           .from("users")
@@ -277,11 +412,27 @@ function Users() {
     setSaving(true);
 
     try {
+      if (!navigator.onLine) {
+        await queueStaffAction(getAdmin(), {
+          type: "status",
+          userId: user.id,
+          active: nextStatus,
+          expectedActive: user.is_active !== false,
+        });
+        await refreshPending();
+        setNotice(
+          "Account status change queued offline; it is not active until synchronization.",
+        );
+        setStatusChangeUser(null);
+        return;
+      }
       const { data, error } = await supabase
         .from("users")
         .update({ is_active: nextStatus })
         .eq("id", user.id)
-        .select("*")
+        .select(
+          "id,first_name,last_name,email,username,role,district_id,is_active,created_at",
+        )
         .single();
 
       if (error) throw error;
@@ -343,16 +494,40 @@ function Users() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={openAddModal}
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700"
-          >
-            <Plus size={18} />
-            Add Staff
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1 rounded-lg bg-gray-100 px-3 py-2 text-sm">
+              {online ? <Wifi size={16} /> : <WifiOff size={16} />}{" "}
+              {online ? "Online" : "Offline"}
+            </span>
+            <span className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {pendingCount} pending
+            </span>
+            <button
+              type="button"
+              onClick={syncNow}
+              disabled={!online || syncing}
+              className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+              Sync Now
+            </button>
+            <button
+              type="button"
+              disabled={!online}
+              onClick={openAddModal}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-blue-700"
+            >
+              <Plus size={18} />
+              Add Staff
+            </button>
+          </div>
         </div>
 
+        {notice && (
+          <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800">
+            {notice}
+          </div>
+        )}
         {/* Error message */}
         {errorMessage && !showModal && (
           <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
@@ -411,7 +586,7 @@ function Users() {
             </div>
           </div>
 
-          {loading || districtsLoading ? (
+          {(loading || districtsLoading) && !cacheReady ? (
             <div className="py-16 text-center">
               <Loader2
                 size={30}
