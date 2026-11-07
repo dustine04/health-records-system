@@ -25,6 +25,7 @@ import {
 } from "../../lib/childRegistrationDrafts";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import { supabase } from "../../lib/supabase";
 import {
   getCachedChildren,
   queueChildMutation,
@@ -35,9 +36,102 @@ import {
   childOfflineDB,
 } from "../../lib/childOffline";
 
+// Offline audit events are distinct from server-confirmed database changes.
+const CHILD_AUDIT_PREFIX = "mchms_child_registration_audit_v1_";
+const auditFlushInProgress = new Set();
+
+function childAuditKey(userId) {
+  return `${CHILD_AUDIT_PREFIX}${userId}`;
+}
+
+function readChildAuditEvents(userId) {
+  try {
+    const stored = JSON.parse(
+      localStorage.getItem(childAuditKey(userId)) || "[]",
+    );
+    return Array.isArray(stored) ? stored : [];
+  } catch (error) {
+    console.warn("Unable to read child registration audit queue", error);
+    return [];
+  }
+}
+
+function queueChildAuditEvent(
+  userId,
+  action,
+  status = "success",
+  entityId = null,
+  details = {},
+) {
+  if (!userId) return;
+  try {
+    const event = {
+      event_id:
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      actor_id: Number(userId),
+      action,
+      entity_type: "child_health_records",
+      entity_id: entityId == null ? null : String(entityId),
+      status,
+      details: {
+        module: "bns_child_registration",
+        event_recorded_at: new Date().toISOString(),
+        ...details,
+      },
+    };
+    const queued = readChildAuditEvents(userId);
+    queued.push(event);
+    localStorage.setItem(childAuditKey(userId), JSON.stringify(queued));
+  } catch (error) {
+    console.error("Unable to queue child registration audit event", error);
+  }
+}
+
+async function flushChildAuditEvents(userId) {
+  if (!userId || !navigator.onLine) return;
+  const key = childAuditKey(userId);
+  if (auditFlushInProgress.has(key)) return;
+  auditFlushInProgress.add(key);
+  try {
+    const queued = readChildAuditEvents(userId);
+    if (!queued.length) return;
+    // Send one at a time to retain failed events and avoid losing newly queued events.
+    for (const event of queued) {
+      const { event_id, ...payload } = event;
+      const { error } = await supabase.from("it_audit_logs").insert(payload);
+      if (error) {
+        console.warn("Child registration audit upload failed", error);
+        break;
+      }
+      const latest = readChildAuditEvents(userId);
+      localStorage.setItem(
+        key,
+        JSON.stringify(latest.filter((item) => item.event_id !== event_id)),
+      );
+    }
+  } catch (error) {
+    console.warn("Child registration audit flush failed", error);
+  } finally {
+    auditFlushInProgress.delete(key);
+  }
+}
+
 function ChildRegistration() {
   const storedUser = localStorage.getItem("user");
   const user = storedUser ? JSON.parse(storedUser) : null;
+
+  const recordAudit = (
+    action,
+    status = "success",
+    entityId = null,
+    details = {},
+  ) => {
+    if (!user?.id) return;
+    queueChildAuditEvent(user.id, action, status, entityId, details);
+    if (navigator.onLine) void flushChildAuditEvents(user.id);
+  };
 
   const [children, setChildren] = useState([]);
   const [assignedAreas, setAssignedAreas] = useState([]);
@@ -146,6 +240,11 @@ function ChildRegistration() {
           `An unfinished child registration draft was found.\nLast saved: ${new Date(existing.savedAt).toLocaleString()}\n\nPress OK to restore it, or Cancel to start over.`,
         );
         if (restore) {
+          recordAudit(
+            "bns_child_registration_draft_restored",
+            "success",
+            record?.id ?? null,
+          );
           values = {
             form: { ...initialForm, ...existing.data?.form },
             newHousehold: {
@@ -317,13 +416,21 @@ function ChildRegistration() {
     setSyncing(true);
     try {
       const result = await syncChildMutations(user.id);
-      if (result?.error) setSyncError(result.error);
-      else setSyncError("");
+      if (result?.error) {
+        setSyncError(result.error);
+        recordAudit("bns_child_registration_sync_failed", "failed", null, {
+          error: String(result.error).slice(0, 300),
+        });
+      } else setSyncError("");
       // Refresh only after successful uploads. If it fails, keep the local queue.
       await refreshChildSnapshot(user.id);
       await showLocal();
+      await flushChildAuditEvents(user.id);
     } catch (error) {
       setSyncError(error.message);
+      recordAudit("bns_child_registration_sync_failed", "failed", null, {
+        error: String(error.message).slice(0, 300),
+      });
       await showLocal();
     } finally {
       setSyncing(false);
@@ -337,6 +444,7 @@ function ChildRegistration() {
       if (active) {
         setOnline(true);
         synchronize();
+        void flushChildAuditEvents(user.id);
       }
     };
     const onOffline = () => {
@@ -347,6 +455,7 @@ function ChildRegistration() {
     fetchChildren().then(() => {
       if (active && navigator.onLine) synchronize();
     });
+    if (navigator.onLine) void flushChildAuditEvents(user.id);
     return () => {
       active = false;
       window.removeEventListener("online", onOnline);
@@ -652,6 +761,11 @@ function ChildRegistration() {
         recorded_by: user.id,
         updated_at: new Date().toISOString(),
       };
+      const auditAction = newChildMode
+        ? "bns_child_registration_new_child_queued"
+        : editingRecord
+          ? "bns_child_registration_update_queued"
+          : "bns_child_registration_create_queued";
       if (newChildMode) {
         await queueChildMutation(user.id, {
           kind: "create-child",
@@ -684,6 +798,19 @@ function ChildRegistration() {
           childData,
         );
       }
+      recordAudit(
+        auditAction,
+        "success",
+        editingRecord?.id ?? (form.resident_id || null),
+        {
+          operation: newChildMode
+            ? "create_child_and_household"
+            : editingRecord
+              ? "update"
+              : "create",
+          resident_id: newChildMode ? null : String(form.resident_id),
+        },
+      );
       await clearSubmittedDraft();
       setShowModal(false);
       resetForm();
@@ -694,6 +821,19 @@ function ChildRegistration() {
       );
     } catch (error) {
       console.error(error);
+      recordAudit(
+        "bns_child_registration_save_queue_failed",
+        "failed",
+        editingRecord?.id ?? (form.resident_id || null),
+        {
+          operation: newChildMode
+            ? "create_child_and_household"
+            : editingRecord
+              ? "update"
+              : "create",
+          error: String(error.message || error).slice(0, 300),
+        },
+      );
       alert(error.message || "Could not save child health record locally.");
     } finally {
       draftSavingRef.current = false;
@@ -720,9 +860,26 @@ function ChildRegistration() {
       } else {
         await queueRecordDeletion(user.id, child.id, child.health_record.id);
       }
+      recordAudit(
+        String(child.id).startsWith("local:")
+          ? "bns_child_registration_local_creation_cancelled"
+          : "bns_child_registration_delete_queued",
+        "success",
+        child.health_record.id,
+        { resident_id: String(child.id) },
+      );
       await showLocal();
       if (navigator.onLine) await synchronize();
     } catch (error) {
+      recordAudit(
+        "bns_child_registration_delete_queue_failed",
+        "failed",
+        child.health_record.id,
+        {
+          resident_id: String(child.id),
+          error: String(error.message || error).slice(0, 300),
+        },
+      );
       alert(error.message || "Could not queue deletion.");
     }
   };
@@ -732,6 +889,14 @@ function ChildRegistration() {
   // =====================================================
 
   const openViewModal = (child) => {
+    recordAudit(
+      "bns_child_registration_viewed",
+      "success",
+      child.health_record?.id ?? null,
+      {
+        resident_id: String(child.id),
+      },
+    );
     setSelectedChild(child);
     setShowViewModal(true);
   };

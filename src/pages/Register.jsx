@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
-  Activity,
   ArrowLeft,
   CheckCircle2,
   Eye,
   EyeOff,
   HeartPulse,
+  Stethoscope,
+  Baby,
   LockKeyhole,
-  ShieldCheck,
   UserRound,
   MapPin,
   LoaderCircle,
@@ -33,6 +33,9 @@ function Register() {
   const navigate = useNavigate();
 
   const [form, setForm] = useState(initialForm);
+
+  const isCommunityWorker = ["bns", "bhw"].includes(form.role);
+
   const [districts, setDistricts] = useState([]);
   const [barangays, setBarangays] = useState([]);
   const [loadingLocations, setLoadingLocations] = useState(true);
@@ -132,12 +135,16 @@ function Register() {
       return;
     }
 
-    if (!form.district_id || !form.barangay_id) {
-      setError("Please select your district and barangay.");
+    if (!form.district_id || (isCommunityWorker && !form.barangay_id)) {
+      setError(
+        isCommunityWorker
+          ? "Please select your district and barangay."
+          : "Please select your district.",
+      );
       return;
     }
 
-    if (!["bns", "bhw"].includes(form.role)) {
+    if (!["bns", "bhw", "nurse", "midwife"].includes(form.role)) {
       setError("Please select a valid registration role.");
       return;
     }
@@ -157,20 +164,28 @@ function Register() {
     setSuccess("");
 
     try {
+      const functionName = isCommunityWorker
+        ? "register_community_health_worker"
+        : "register_health_staff";
+
+      const params = {
+        p_role: form.role,
+        p_first_name: firstName,
+        p_middle_name: middleName || null,
+        p_last_name: lastName,
+        p_email: form.email.trim() || null,
+        p_contact_number: form.contact_number.trim() || null,
+        p_username: username,
+        p_password: form.password,
+        p_district_id: Number(form.district_id),
+        ...(isCommunityWorker
+          ? { p_barangay_id: Number(form.barangay_id) }
+          : {}),
+      };
+
       const { data, error: registrationError } = await supabase.rpc(
-        "register_community_health_worker",
-        {
-          p_role: form.role,
-          p_first_name: firstName,
-          p_middle_name: middleName || null,
-          p_last_name: lastName,
-          p_email: form.email.trim() || null,
-          p_contact_number: form.contact_number.trim() || null,
-          p_username: username,
-          p_password: form.password,
-          p_district_id: Number(form.district_id),
-          p_barangay_id: Number(form.barangay_id),
-        },
+        functionName,
+        params,
       );
 
       if (registrationError) throw registrationError;
@@ -180,7 +195,9 @@ function Register() {
       }
 
       setSuccess(
-        "Registration submitted successfully. Your account is pending activation by an authorized health office staff member.",
+        isCommunityWorker
+          ? "Registration submitted. Your account is inactive until an authorized health office staff member activates it."
+          : "Registration submitted. Your Nurse or Midwife account is awaiting CHO approval.",
       );
       setForm(initialForm);
       setBarangays([]);
@@ -200,11 +217,12 @@ function Register() {
         );
       } else if (
         message.includes("register_community_health_worker") ||
+        message.includes("register_health_staff") ||
         message.includes("function") ||
         message.includes("permission denied")
       ) {
         setError(
-          "The registration service is not configured yet. Please apply the SQL setup below and check your Supabase permissions.",
+          "The registration service is unavailable. Check that the corresponding Supabase registration function exists and is permitted.",
         );
       } else {
         setError(err?.message || "Registration failed. Please try again.");
@@ -241,12 +259,12 @@ function Register() {
             </p>
 
             <h1 className="text-3xl font-bold tracking-tight">
-              Community Health Worker Registration
+              Health Personnel Registration
             </h1>
 
             <p className="mt-3 max-w-xl text-sm leading-6 text-blue-50">
-              Register as a Barangay Nutrition Scholar or Barangay Health Worker
-              to request access to MCHMS.
+              Register as a BNS, BHW, Nurse, or Midwife to request access to
+              MCHMS. New accounts require activation before login.
             </p>
           </div>
 
@@ -298,6 +316,16 @@ function Register() {
                       value: "bhw",
                       title: "BHW",
                       description: "Barangay Health Worker",
+                    },
+                    {
+                      value: "nurse",
+                      title: "Nurse",
+                      description: "District Nurse · CHO approval",
+                    },
+                    {
+                      value: "midwife",
+                      title: "Midwife",
+                      description: "District Midwife · CHO approval",
                     },
                   ].map((option) => (
                     <button
@@ -437,9 +465,9 @@ function Register() {
                 </h2>
 
                 <p className="mb-4 text-sm leading-6 text-slate-500">
-                  Select the district and barangay where you serve. Your
-                  location and worker assignment should be verified before
-                  access is activated.
+                  {isCommunityWorker
+                    ? "Select your district and barangay. Your assignment must be verified before activation."
+                    : "Select your district. The CHO will review your registration before activation."}
                 </p>
 
                 <div className="grid gap-4 sm:grid-cols-2">
@@ -470,28 +498,30 @@ function Register() {
                     </select>
                   </div>
 
-                  <div>
-                    <label className={labelClass} htmlFor="barangay_id">
-                      Barangay *
-                    </label>
-                    <select
-                      id="barangay_id"
-                      className={inputClass}
-                      value={form.barangay_id}
-                      onChange={(e) =>
-                        updateField("barangay_id", e.target.value)
-                      }
-                      required
-                      disabled={loading || !form.district_id}
-                    >
-                      <option value="">Select barangay</option>
-                      {barangays.map((barangay) => (
-                        <option key={barangay.id} value={barangay.id}>
-                          {barangay.name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
+                  {isCommunityWorker && (
+                    <div>
+                      <label className={labelClass} htmlFor="barangay_id">
+                        Barangay *
+                      </label>
+                      <select
+                        id="barangay_id"
+                        className={inputClass}
+                        value={form.barangay_id}
+                        onChange={(e) =>
+                          updateField("barangay_id", e.target.value)
+                        }
+                        required
+                        disabled={loading || !form.district_id}
+                      >
+                        <option value="">Select barangay</option>
+                        {barangays.map((barangay) => (
+                          <option key={barangay.id} value={barangay.id}>
+                            {barangay.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
               </section>
 

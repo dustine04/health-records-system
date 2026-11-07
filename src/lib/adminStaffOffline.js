@@ -8,9 +8,16 @@ import { supabase } from "./supabase";
 
 const db = new Dexie("mchms-admin-staff-v1");
 
+// Version 2 keeps the existing records and adds
+// an index for tracking synchronization status.
 db.version(1).stores({
   snapshots: "adminId",
   queue: "++id,adminId,createdAt",
+});
+
+db.version(2).stores({
+  snapshots: "adminId",
+  queue: "++id,adminId,createdAt,syncStatus",
 });
 
 const key = (admin) => String(admin?.id ?? "");
@@ -31,6 +38,43 @@ const stripPassword = (row) => {
   return safe;
 };
 
+const allowedFields = [
+  "first_name",
+  "last_name",
+  "email",
+  "username",
+  "district_id",
+];
+
+/* =========================================================
+   AUDIT LOGGING
+========================================================= */
+
+async function recordStaffAudit(admin, action, current, details) {
+  const { error } = await supabase
+    .from("it_audit_logs")
+    .insert({
+      actor_id: admin.id,
+      action,
+      entity_type: "users",
+      entity_id: String(current.id),
+      details: {
+        module: "Staff Management",
+        source: "offline_sync",
+        target_username: current.username,
+        target_role: current.role,
+        ...details,
+      },
+      status: "success",
+    });
+
+  if (error) {
+    throw new Error(
+      `Staff update synchronized, but audit logging failed: ${error.message}`
+    );
+  }
+}
+
 /* =========================================================
    GET CACHED STAFF AND DISTRICTS
 ========================================================= */
@@ -50,8 +94,8 @@ export async function saveStaffCache(admin, users, districts) {
 
   await db.snapshots.put({
     adminId: key(admin),
-    users: users.map(stripPassword),
-    districts,
+    users: (users || []).map(stripPassword),
+    districts: districts || [],
     cachedAt: Date.now(),
   });
 }
@@ -80,22 +124,26 @@ export async function queueStaffAction(admin, action) {
     throw new Error("Unsupported offline action.");
   }
 
+  if (!action.userId) {
+    throw new Error("Staff ID is required.");
+  }
+
   if (action.type === "edit") {
-    const allowed = [
-      "first_name",
-      "last_name",
-      "email",
-      "username",
-      "district_id",
-    ];
+    const changes = action.changes || {};
 
     if (
-      Object.keys(action.changes || {}).some(
-        (k) => !allowed.includes(k)
+      Object.keys(changes).some(
+        (field) => !allowedFields.includes(field)
       )
     ) {
       throw new Error(
         "Passwords and roles cannot be queued offline."
+      );
+    }
+
+    if (!action.expected) {
+      throw new Error(
+        "Original staff values are required for conflict detection."
       );
     }
   }
@@ -104,7 +152,7 @@ export async function queueStaffAction(admin, action) {
     action.type === "status" &&
     typeof action.active !== "boolean"
   ) {
-    throw new Error("Invalid status.");
+    throw new Error("Invalid account status.");
   }
 
   // Prevent multiple pending changes for the same staff member.
@@ -112,7 +160,8 @@ export async function queueStaffAction(admin, action) {
 
   if (
     pending.some(
-      (x) => String(x.userId) === String(action.userId)
+      (item) =>
+        String(item.userId) === String(action.userId)
     )
   ) {
     throw new Error(
@@ -123,6 +172,7 @@ export async function queueStaffAction(admin, action) {
   await db.queue.add({
     adminId: key(admin),
     ...action,
+    syncStatus: "pending",
     createdAt: Date.now(),
   });
 }
@@ -150,7 +200,34 @@ export async function syncStaffActions(admin) {
     const actions = await pendingStaffActions(admin);
 
     for (const action of actions) {
-      // Always fetch the latest staff record before updating.
+      /* ---------------------------------------------------
+         ALREADY APPLIED, AUDIT STILL PENDING
+      --------------------------------------------------- */
+
+      if (action.syncStatus === "audit_pending") {
+        if (!action.auditPayload) {
+          throw new Error(
+            "Audit information is missing for a synchronized staff action."
+          );
+        }
+
+        await recordStaffAudit(
+          admin,
+          action.auditPayload.action,
+          action.auditPayload.current,
+          action.auditPayload.details
+        );
+
+        await db.queue.delete(action.id);
+
+        count++;
+        continue;
+      }
+
+      /* ---------------------------------------------------
+         FETCH CURRENT STAFF RECORD
+      --------------------------------------------------- */
+
       const { data: current, error: readError } =
         await supabase
           .from("users")
@@ -173,17 +250,28 @@ export async function syncStaffActions(admin) {
         );
       }
 
+      let auditPayload = null;
+
       /* ---------------------------------------------------
          SYNC STAFF PROFILE EDITS
       --------------------------------------------------- */
 
       if (action.type === "edit") {
-        const keys = Object.keys(action.changes);
+        const changes = action.changes || {};
+        const keys = Object.keys(changes);
 
-        // Detect edits made from another device.
+        if (!keys.length) {
+          await db.queue.delete(action.id);
+          count++;
+          continue;
+        }
+
+        // Detect changes made from another device.
         if (
           keys.some(
-            (k) => current[k] !== action.expected[k]
+            (field) =>
+              String(current[field] ?? "") !==
+              String(action.expected?.[field] ?? "")
           )
         ) {
           throw new Error(
@@ -191,12 +279,26 @@ export async function syncStaffActions(admin) {
           );
         }
 
+        const changedFields = keys.filter(
+          (field) =>
+            String(current[field] ?? "") !==
+            String(changes[field] ?? "")
+        );
+
+        if (!changedFields.length) {
+          await db.queue.delete(action.id);
+          count++;
+          continue;
+        }
+
         const { data, error } = await supabase
           .from("users")
-          .update(action.changes)
+          .update(changes)
           .eq("id", current.id)
           .eq("role", current.role)
-          .select("id")
+          .select(
+            "id,role,username,district_id"
+          )
           .maybeSingle();
 
         if (error) {
@@ -208,47 +310,131 @@ export async function syncStaffActions(admin) {
             "Server did not confirm staff update."
           );
         }
+
+        auditPayload = {
+          action: "account_updated",
+
+          current: {
+            id: current.id,
+            username: current.username,
+            role: current.role,
+          },
+
+          details: {
+            changed_fields: changedFields,
+
+            previous_district_id:
+              current.district_id,
+
+            new_district_id:
+              data.district_id,
+
+            message:
+              `Offline staff changes synchronized for ${current.username}.`,
+          },
+        };
       }
 
       /* ---------------------------------------------------
          SYNC ACCOUNT ACTIVATION / DEACTIVATION
       --------------------------------------------------- */
 
-      else {
-        const currentlyActive = current.is_active !== false;
+      else if (action.type === "status") {
+        const currentlyActive =
+          current.is_active === true;
 
-        if (currentlyActive !== action.active) {
-          if (
-            currentlyActive !== action.expectedActive
-          ) {
-            throw new Error(
-              "Account status changed on another device."
-            );
-          }
-
-          const { data, error } = await supabase
-            .from("users")
-            .update({
-              is_active: action.active,
-            })
-            .eq("id", current.id)
-            .eq("role", current.role)
-            .select("id")
-            .maybeSingle();
-
-          if (error) {
-            throw error;
-          }
-
-          if (!data) {
-            throw new Error(
-              "Server did not confirm status change."
-            );
-          }
+        if (currentlyActive === action.active) {
+          // Desired status already exists.
+          await db.queue.delete(action.id);
+          count++;
+          continue;
         }
+
+        if (
+          currentlyActive !== action.expectedActive
+        ) {
+          throw new Error(
+            "Account status changed on another device."
+          );
+        }
+
+        const { data, error } = await supabase
+          .from("users")
+          .update({
+            is_active: action.active,
+          })
+          .eq("id", current.id)
+          .eq("role", current.role)
+          .select(
+            "id,role,username,district_id,is_active"
+          )
+          .maybeSingle();
+
+        if (error) {
+          throw error;
+        }
+
+        if (!data) {
+          throw new Error(
+            "Server did not confirm status change."
+          );
+        }
+
+        auditPayload = {
+          action: action.active
+            ? "account_activated"
+            : "account_deactivated",
+
+          current: {
+            id: current.id,
+            username: current.username,
+            role: current.role,
+          },
+
+          details: {
+            previous_status: currentlyActive,
+            new_status: data.is_active,
+
+            district_id: data.district_id,
+
+            message:
+              `${current.role} account ${
+                action.active
+                  ? "activated"
+                  : "deactivated"
+              } during offline synchronization: ${current.username}`,
+          },
+        };
       }
 
-      // Remove the queued action only after successful sync.
+      /* ---------------------------------------------------
+         MARK DATABASE UPDATE AS COMPLETED
+      --------------------------------------------------- */
+
+      if (auditPayload) {
+        // Save the audit information before attempting
+        // to insert the audit record.
+        await db.queue.update(action.id, {
+          syncStatus: "audit_pending",
+          auditPayload,
+        });
+
+        /* ---------------------------------------------------
+           INSERT AUDIT LOG
+        --------------------------------------------------- */
+
+        await recordStaffAudit(
+          admin,
+          auditPayload.action,
+          auditPayload.current,
+          auditPayload.details
+        );
+      }
+
+      /* ---------------------------------------------------
+         REMOVE SUCCESSFULLY SYNCHRONIZED ACTION
+      --------------------------------------------------- */
+
       await db.queue.delete(action.id);
 
       count++;

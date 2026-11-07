@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import { supabase } from "../../lib/supabase";
 import { queuePregnancySave } from "../../lib/bhwPregnancyOffline";
 import {
   bhwMonitoringDraftKey,
@@ -44,9 +45,75 @@ import { Wifi, WifiOff, RefreshCw } from "lucide-react";
 
 const safeText = (value) => (value == null ? "" : String(value));
 
+// Offline audit outbox stores only IDs and action metadata, never clinical values.
+const auditOutboxKey = (actorId) => `bhw-monitoring-audit:${actorId}`;
+
+function getAuditOutbox(actorId) {
+  try {
+    return JSON.parse(localStorage.getItem(auditOutboxKey(actorId)) || "[]");
+  } catch {
+    return [];
+  }
+}
+
+async function flushBhwMonitoringAudit(actorId) {
+  if (!actorId || !navigator.onLine) return;
+  const key = auditOutboxKey(actorId);
+  const entries = getAuditOutbox(actorId);
+  for (const entry of entries) {
+    const { error } = await supabase.from("it_audit_logs").insert(entry);
+    if (error) {
+      console.error("BHW monitoring audit upload failed:", error);
+      return;
+    }
+    // Remove each confirmed item immediately; failed items remain queued.
+    const remaining = getAuditOutbox(actorId);
+    const index = remaining.findIndex(
+      (item) =>
+        item.details?.client_event_id === entry.details?.client_event_id,
+    );
+    if (index >= 0) remaining.splice(index, 1);
+    localStorage.setItem(key, JSON.stringify(remaining));
+  }
+}
+
 function BhwPregnantMonitoring() {
   const storedUser = localStorage.getItem("user");
   const user = storedUser ? JSON.parse(storedUser) : null;
+
+  const auditMonitoring = async (
+    action,
+    entityType,
+    entityId,
+    details = {},
+    auditStatus = "success",
+  ) => {
+    if (!user?.id) return;
+    const entry = {
+      actor_id: Number(user.id),
+      action,
+      entity_type: entityType,
+      entity_id: entityId == null ? null : String(entityId),
+      status: auditStatus,
+      details: {
+        module: "BHW Pregnancy Monitoring",
+        actor_role: "bhw",
+        pregnancy_id: selectedWoman?.pregnancy?.id ?? null,
+        client_event_id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        ...details,
+      },
+    };
+    try {
+      const key = auditOutboxKey(user.id);
+      localStorage.setItem(
+        key,
+        JSON.stringify([...getAuditOutbox(user.id), entry]),
+      );
+      if (navigator.onLine) await flushBhwMonitoringAudit(user.id);
+    } catch (error) {
+      console.error("Unable to queue monitoring audit:", error);
+    }
+  };
 
   const [pregnantWomen, setPregnantWomen] = useState([]);
   const [online, setOnline] = useState(navigator.onLine);
@@ -389,6 +456,7 @@ function BhwPregnantMonitoring() {
     setSyncing(true);
     try {
       await syncMonitoringQueue(user.id);
+      await flushBhwMonitoringAudit(user.id);
       await fetchPregnantWomen();
       if (selectedWoman?.pregnancy?.id) {
         const data = await refreshMonitoringVisits(
@@ -446,6 +514,12 @@ function BhwPregnantMonitoring() {
   const openWoman = async (woman) => {
     setSelectedWoman(woman);
     setShowDetailsModal(true);
+    void auditMonitoring(
+      "bhw_pregnancy_monitoring_viewed",
+      "pregnant_women",
+      woman.pregnancy.id,
+      { pregnancy_id: woman.pregnancy.id },
+    );
 
     await Promise.all([
       fetchVisits(woman.pregnancy.id),
@@ -587,6 +661,12 @@ function BhwPregnantMonitoring() {
 
       cancelDraftTimer();
       await queuePregnancySave(user.id, selectedWoman.pregnancy, data);
+      await auditMonitoring(
+        "bhw_pregnancy_info_queued",
+        "pregnant_women",
+        selectedWoman.pregnancy.id,
+        { changed_fields: Object.keys(data), queue_state: "local_pending" },
+      );
       try {
         await deleteBhwMonitoringDraft(draft.key);
       } catch (error) {
@@ -610,6 +690,13 @@ function BhwPregnantMonitoring() {
       );
     } catch (error) {
       console.error("Error updating pregnancy information:", error);
+      await auditMonitoring(
+        "bhw_pregnancy_info_queue_failed",
+        "pregnant_women",
+        selectedWoman?.pregnancy?.id,
+        { error_code: error.code || "queue_failed" },
+        "failed",
+      );
       alert(error.message || "Failed to update pregnancy information.");
     } finally {
       setSavingPregnancyInfo(false);
@@ -877,6 +964,14 @@ function BhwPregnantMonitoring() {
         editingHomeVisit,
         data,
       );
+      await auditMonitoring(
+        editingHomeVisit
+          ? "bhw_home_visit_update_queued"
+          : "bhw_home_visit_create_queued",
+        "pregnant_woman_home_visits",
+        editingHomeVisit?.id,
+        { visit_number: data.visit_number, queue_state: "local_pending" },
+      );
       cancelDraftTimer();
       try {
         await deleteBhwMonitoringDraft(draft.key);
@@ -891,6 +986,13 @@ function BhwPregnantMonitoring() {
       setShowHomeVisitModal(false);
       alert("Home visit saved offline-first. Use Sync Now when connected.");
     } catch (error) {
+      await auditMonitoring(
+        "bhw_home_visit_save_queue_failed",
+        "pregnant_woman_home_visits",
+        editingHomeVisit?.id,
+        { error_code: error.code || "queue_failed" },
+        "failed",
+      );
       alert(error.message || "Could not save home visit");
     } finally {
       setSavingHomeVisit(false);
@@ -906,11 +1008,24 @@ function BhwPregnantMonitoring() {
         "homes",
         visit,
       );
+      await auditMonitoring(
+        "bhw_home_visit_delete_queued",
+        "pregnant_woman_home_visits",
+        visit.id,
+        { visit_number: visit.visit_number, queue_state: "local_pending" },
+      );
       setHomeVisits(
         await cachedHomeVisits(user.id, selectedWoman.pregnancy.id),
       );
       setPending(await pendingMonitoringCount(user.id));
     } catch (error) {
+      await auditMonitoring(
+        "bhw_home_visit_delete_queue_failed",
+        "pregnant_woman_home_visits",
+        visit.id,
+        { error_code: error.code || "queue_failed" },
+        "failed",
+      );
       alert(error.message || "Could not delete home visit");
     }
   };

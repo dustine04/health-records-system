@@ -474,6 +474,37 @@ const fullName = (person) => {
 };
 
 /* =========================================================
+   AUDIT LOGGING — do not include clinical values or notes
+========================================================= */
+
+async function recordPregnancyAudit(actor, event) {
+  const { error } = await supabase.from("it_audit_logs").insert({
+    actor_id: actor.id,
+    action: event.action,
+    entity_type: event.entityType,
+    entity_id: String(event.entityId),
+    status: "success",
+    details: {
+      module: "Pregnancy Monitoring",
+      actor_role: actor.role,
+      district_id: actor.district_id ?? null,
+      ...event.details,
+    },
+  });
+  if (error) {
+    console.error("Pregnancy monitoring audit failed:", error);
+    return false;
+  }
+  return true;
+}
+
+function notifyAuditFailure() {
+  window.alert(
+    "The record was saved, but its audit log could not be recorded. Please notify your administrator.",
+  );
+}
+
+/* =========================================================
    MAIN COMPONENT
 ========================================================= */
 
@@ -658,18 +689,37 @@ export default function PregnancyMonitoring() {
           .eq("id", existing.id)
           .eq("midwife_id", user.id)
           .eq("nurse_id", nurse.id)
-          .eq("district_id", user.district_id);
+          .eq("district_id", user.district_id)
+          .select("id")
+          .single();
       } else {
-        result = await supabase.from("pregnancy_monitoring_access").insert({
-          midwife_id: user.id,
-          nurse_id: nurse.id,
-          district_id: user.district_id,
-          is_active: true,
-          granted_by: user.id,
-          granted_at: new Date().toISOString(),
-        });
+        result = await supabase
+          .from("pregnancy_monitoring_access")
+          .insert({
+            midwife_id: user.id,
+            nurse_id: nurse.id,
+            district_id: user.district_id,
+            is_active: true,
+            granted_by: user.id,
+            granted_at: new Date().toISOString(),
+          })
+          .select("id")
+          .single();
       }
       if (result.error) throw result.error;
+      if (!result.data?.id)
+        throw new Error("Authorization change was not confirmed.");
+      const audited = await recordPregnancyAudit(user, {
+        action: shouldEnable ? "nurse_access_granted" : "nurse_access_revoked",
+        entityType: "pregnancy_monitoring_access",
+        entityId: result.data.id,
+        details: {
+          nurse_id: nurse.id,
+          previous_access: Boolean(existing?.is_active),
+          new_access: shouldEnable,
+        },
+      });
+      if (!audited) notifyAuditFailure();
       await loadNursesAndAccess();
       alert(
         shouldEnable
@@ -1301,12 +1351,37 @@ export default function PregnancyMonitoring() {
         result = await supabase
           .from("pregnant_woman_visits")
           .update(payload)
-          .eq("id", editingAnc.id);
+          .eq("id", editingAnc.id)
+          .select("id")
+          .single();
       } else {
-        result = await supabase.from("pregnant_woman_visits").insert(payload);
+        result = await supabase
+          .from("pregnant_woman_visits")
+          .insert(payload)
+          .select("id")
+          .single();
       }
 
       if (result.error) throw result.error;
+      if (!result.data?.id) throw new Error("ANC save was not confirmed.");
+      const audited = await recordPregnancyAudit(user, {
+        action: editingAnc ? "anc_visit_updated" : "anc_visit_created",
+        entityType: "pregnant_woman_visits",
+        entityId: result.data.id,
+        details: {
+          pregnant_woman_id: selectedPregnancy.id,
+          visit_number: Number(payload.visit_number),
+          changed_fields: editingAnc
+            ? Object.keys(payload).filter(
+                (field) =>
+                  field !== "pregnant_woman_id" &&
+                  String(editingAnc[field] ?? "") !==
+                    String(payload[field] ?? ""),
+              )
+            : undefined,
+        },
+      });
+      if (!audited) notifyAuditFailure();
 
       await clearSavedDraft();
       setAncModal(false);
@@ -1335,9 +1410,21 @@ export default function PregnancyMonitoring() {
       const { error } = await supabase
         .from("pregnant_woman_visits")
         .delete()
-        .eq("id", visit.id);
+        .eq("id", visit.id)
+        .select("id")
+        .single();
 
       if (error) throw error;
+      const audited = await recordPregnancyAudit(user, {
+        action: "anc_visit_deleted",
+        entityType: "pregnant_woman_visits",
+        entityId: visit.id,
+        details: {
+          pregnant_woman_id: selectedPregnancy.id,
+          visit_number: visit.visit_number,
+        },
+      });
+      if (!audited) notifyAuditFailure();
 
       await openPregnancy(selectedPregnancy);
       await loadPregnancies();
@@ -1387,9 +1474,25 @@ export default function PregnancyMonitoring() {
           reviewed_by: user?.id,
           reviewed_at: new Date().toISOString(),
         })
-        .eq("id", selectedReferral.id);
+        .eq("id", selectedReferral.id)
+        .select("id")
+        .single();
 
       if (error) throw error;
+      const audited = await recordPregnancyAudit(user, {
+        action: "pregnancy_referral_reviewed",
+        entityType: "pregnancy_referrals",
+        entityId: selectedReferral.id,
+        details: {
+          pregnant_woman_id: selectedPregnancy?.id,
+          previous_status: selectedReferral.status,
+          new_status: referralStatus,
+          notes_updated:
+            String(selectedReferral.midwife_notes ?? "") !==
+            String(referralNotes ?? ""),
+        },
+      });
+      if (!audited) notifyAuditFailure();
 
       await clearSavedDraft();
       setReferralModal(false);
@@ -1447,9 +1550,35 @@ export default function PregnancyMonitoring() {
           facility_name: outcomeForm.facility_name || null,
           attended_by: outcomeForm.attended_by || null,
         })
-        .eq("id", selectedPregnancy.id);
+        .eq("id", selectedPregnancy.id)
+        .select("id")
+        .single();
 
       if (error) throw error;
+      const outcomeFields = [
+        "status",
+        "pregnancy_outcome",
+        "birth_status",
+        "date_of_delivery",
+        "place_of_delivery",
+        "facility_name",
+        "attended_by",
+      ];
+      const audited = await recordPregnancyAudit(user, {
+        action: "pregnancy_outcome_updated",
+        entityType: "pregnant_women",
+        entityId: selectedPregnancy.id,
+        details: {
+          previous_status: selectedPregnancy.status,
+          new_status: outcomeForm.status,
+          changed_fields: outcomeFields.filter(
+            (field) =>
+              String(selectedPregnancy[field] ?? "") !==
+              String(outcomeForm[field] ?? ""),
+          ),
+        },
+      });
+      if (!audited) notifyAuditFailure();
 
       await clearSavedDraft();
       setOutcomeModal(false);
@@ -1478,9 +1607,23 @@ export default function PregnancyMonitoring() {
       const { error } = await supabase
         .from("pregnant_women")
         .update({ status })
-        .eq("id", selectedPregnancy.id);
+        .eq("id", selectedPregnancy.id)
+        .select("id")
+        .single();
 
       if (error) throw error;
+      if (selectedPregnancy.status !== status) {
+        const audited = await recordPregnancyAudit(user, {
+          action: "pregnancy_status_updated",
+          entityType: "pregnant_women",
+          entityId: selectedPregnancy.id,
+          details: {
+            previous_status: selectedPregnancy.status,
+            new_status: status,
+          },
+        });
+        if (!audited) notifyAuditFailure();
+      }
 
       setSelectedPregnancy((prev) => ({ ...prev, status }));
       await loadPregnancies();

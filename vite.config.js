@@ -46,6 +46,10 @@ export default defineConfig({
       workbox: {
         navigateFallback: "/index.html",
 
+        // Allow caching files up to 5 MiB.
+        // Fixes the build error caused by the 2.4 MB JS bundle.
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+
         globPatterns: [
           "**/*.{js,css,html,ico,png,svg,woff2}",
         ],

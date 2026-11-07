@@ -16,10 +16,42 @@ import {
 
 import { supabase } from "../lib/supabase";
 
+// Best-effort client audit trail. For tamper-resistant security logging,
+// write authentication events from a server-side RPC/Edge Function instead.
+export async function logAuthEvent({
+  actorId = null,
+  action,
+  status = "success",
+  details = {},
+}) {
+  try {
+    const { error } = await supabase.from("it_audit_logs").insert({
+      actor_id: actorId ?? null,
+      action,
+      entity_type: "authentication",
+      entity_id: actorId == null ? null : String(actorId),
+      status,
+      details: { module: "Authentication", ...details },
+    });
+    if (error) {
+      console.warn(
+        "Authentication audit log could not be saved:",
+        error.message,
+      );
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.warn("Authentication audit log could not be saved:", error);
+    return false;
+  }
+}
+
 const SAVED_USERNAME_KEY = "mchms_saved_username";
 
 const ROLE_ROUTES = {
   cho_admin: "/dashboard/admin",
+  it_admin: "/dashboard/it-admin",
   nurse: "/dashboard/nurse",
   midwife: "/dashboard/midwife",
   bns: "/dashboard/bns",
@@ -67,45 +99,67 @@ function Login() {
     setSuccess("");
 
     try {
-      const { data, error: loginError } = await supabase
-        .from("users")
-        .select(
-          `
-            id,
-            username,
-            first_name,
-            middle_name,
-            last_name,
-            role,
-            district_id,
-            barangay_id,
-            is_active
-          `,
-        )
-        .eq("username", cleanUsername)
-        .eq("password", password)
-        .eq("is_active", true)
-        .maybeSingle();
+      // Server-side verification supports legacy plaintext and hashed passwords and avoids
+      // querying the users table with a password from the browser.
+      const { data, error: loginError } = await supabase.rpc("mchms_login", {
+        p_username: cleanUsername,
+        p_password: password,
+      });
 
       if (loginError) {
         console.error("Login query failed:", loginError);
+        await logAuthEvent({
+          action: "user_login_error",
+          status: "failed",
+          details: { reason: "authentication_service_error" },
+        });
         setError("Unable to sign in right now. Please try again.");
         return;
       }
 
       if (!data) {
+        await logAuthEvent({
+          action: "user_login_failed",
+          status: "failed",
+          details: { reason: "invalid_credentials_or_inactive_account" },
+        });
         setError("Invalid username or password, or your account is inactive.");
         return;
       }
 
-      const destination = ROLE_ROUTES[data.role];
+      // Normalize RPC results: a JSON object is expected, but some
+      // database functions return an array or wrap the user in a field.
+      const account = Array.isArray(data)
+        ? data[0]
+        : (data?.user ?? data?.account ?? data);
+
+      const normalizedRole = String(account?.role ?? "")
+        .trim()
+        .toLowerCase();
+
+      const destination = ROLE_ROUTES[normalizedRole];
 
       if (!destination) {
+        console.error("Unrecognized login role returned by Supabase:", {
+          role: account?.role,
+          responseShape: Array.isArray(data) ? "array" : typeof data,
+        });
+        await logAuthEvent({
+          actorId: account?.id ?? null,
+          action: "user_login_failed",
+          status: "failed",
+          details: { reason: "unrecognized_role" },
+        });
         setError(
           "Your account has an unrecognized role. Please contact your administrator.",
         );
         return;
       }
+
+      const authenticatedUser = {
+        ...account,
+        role: normalizedRole,
+      };
 
       // Remember the username only, never the password.
       try {
@@ -115,18 +169,37 @@ function Login() {
           localStorage.removeItem(SAVED_USERNAME_KEY);
         }
 
-        localStorage.setItem("user", JSON.stringify(data));
+        localStorage.setItem("user", JSON.stringify(authenticatedUser));
       } catch {
+        await logAuthEvent({
+          actorId: authenticatedUser.id,
+          action: "user_login_failed",
+          status: "failed",
+          details: {
+            reason: "session_storage_unavailable",
+            role: normalizedRole,
+          },
+        });
         setError(
           "Your browser could not save the login session. Please enable site storage and try again.",
         );
         return;
       }
 
+      await logAuthEvent({
+        actorId: authenticatedUser.id,
+        action: "user_login",
+        details: { role: normalizedRole, destination },
+      });
       setSuccess("Login successful. Opening your dashboard...");
       navigate(destination, { replace: true });
     } catch (err) {
       console.error("Unexpected login error:", err);
+      await logAuthEvent({
+        action: "user_login_error",
+        status: "failed",
+        details: { reason: "unexpected_authentication_error" },
+      });
       setError(
         "Something went wrong. Please check your connection and try again.",
       );
@@ -411,7 +484,7 @@ function Login() {
             </button>
           </form>
 
-          {/* BNS/BHW registration link */}
+          {/* BNS / BHW / Nurse / Midwife Registration Link */}
           <div className="mt-6 rounded-xl border border-blue-100 bg-blue-50/70 p-4">
             <div className="flex items-start gap-3">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-white text-blue-600 shadow-sm">
@@ -420,11 +493,19 @@ function Login() {
 
               <div className="flex-1">
                 <p className="text-sm font-semibold text-slate-800">
-                  New community health worker?
+                  New health personnel?
                 </p>
+
                 <p className="mt-1 text-xs leading-5 text-slate-500">
-                  BNS and BHW applicants can register for an MCHMS account.
-                  Account activation is required before signing in.
+                  Barangay Nutrition Scholars (BNS), Barangay Health Workers
+                  (BHW), Nurses, and Midwives can register for an MCHMS account.
+                </p>
+
+                <p className="mt-2 text-xs leading-5 text-slate-500">
+                  All new accounts require approval before signing in. BNS and
+                  BHW accounts are activated by their assigned Midwife, while
+                  Nurse and Midwife accounts require City Health Office (CHO)
+                  approval.
                 </p>
 
                 <button
@@ -432,7 +513,7 @@ function Login() {
                   onClick={() => navigate("/register")}
                   className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-blue-700 transition hover:text-blue-900 hover:underline"
                 >
-                  Register as BNS or BHW
+                  Register as BNS, BHW, Nurse, or Midwife
                   <ArrowRight size={16} />
                 </button>
               </div>

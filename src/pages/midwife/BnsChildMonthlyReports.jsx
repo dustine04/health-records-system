@@ -14,11 +14,14 @@ import {
   Search,
   X,
   AlertCircle,
+  Download,
+  Loader2,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
 
 import { supabase } from "../../lib/supabase";
+import { downloadBnsChildMonthlyReportPdf } from "../../utils/bnsChildMonthlyReportPdf";
 
 /* =========================================================
 
@@ -351,6 +354,8 @@ export default function BnsChildMonthlyReports() {
   const [reviewNotes, setReviewNotes] = useState("");
 
   const [savingReview, setSavingReview] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState("");
 
   // Load the current month's monitoring records when a report is opened.
   // The BNS may have entered monitoring records after the monthly report was
@@ -722,7 +727,7 @@ export default function BnsChildMonthlyReports() {
     loadReports();
   }, [user]);
 
-  async function loadReports(currentUser = user, isCancelled = () => false) {
+  async function loadReports(isolatedUser = user, isCancelled = () => false) {
     try {
       setLoading(true);
 
@@ -1245,6 +1250,39 @@ export default function BnsChildMonthlyReports() {
     return years.sort((a, b) => b - a);
   }, [scopedReports]);
 
+  // Best-effort client audit trail. For tamper-resistant auditing, use a
+  // verified server-side session and a database function/trigger instead.
+  async function writeAuditLog(action, report, status = "success", extra = {}) {
+    if (!user?.id || !report?.id) return false;
+
+    const payload = {
+      actor_id: user.id,
+      action,
+      entity_type: "bns_child_monthly_reports",
+      entity_id: String(report.id),
+      status,
+      details: {
+        module: "BNS Child Monitoring Reports",
+        actor_role: "midwife",
+        district_id: user.district_id ?? null,
+        barangay_id: report.barangay_id ?? null,
+        bns_id: report.bns_id ?? null,
+        report_month: report.report_month ?? null,
+        report_year: report.report_year ?? null,
+        ...extra,
+      },
+    };
+
+    try {
+      const { error } = await supabase.from("it_audit_logs").insert(payload);
+      if (error) throw error;
+      return true;
+    } catch (auditError) {
+      console.error("Unable to save BNS report audit log:", auditError);
+      return false;
+    }
+  }
+
   /* =======================================================
 
      OPEN REPORT
@@ -1252,9 +1290,11 @@ export default function BnsChildMonthlyReports() {
   ======================================================= */
 
   function openReport(report) {
+    void writeAuditLog("bns_child_report_viewed", report);
     setSelectedReport(report);
 
     setReviewNotes(report.review_notes || "");
+    setPdfError("");
   }
 
   /* =======================================================
@@ -1264,7 +1304,7 @@ export default function BnsChildMonthlyReports() {
   ======================================================= */
 
   function closeReport() {
-    if (savingReview) return;
+    if (savingReview || downloadingPdf) return;
 
     setSelectedReport(null);
 
@@ -1276,6 +1316,91 @@ export default function BnsChildMonthlyReports() {
      UPDATE REPORT STATUS
 
   ======================================================= */
+
+  async function handleDownloadPdf() {
+    if (!selectedReport) {
+      setErrorMessage("Please open a report first.");
+      return;
+    }
+
+    try {
+      setDownloadingPdf(true);
+      setErrorMessage("");
+      setPdfError("");
+
+      // Use the BNS who submitted the report,
+      // not the logged-in Midwife.
+      const bns = selectedReport.bns || bnsUsers[String(selectedReport.bns_id)];
+
+      if (!bns?.id) {
+        throw new Error("Unable to identify the submitting BNS.");
+      }
+
+      // Get the barangay directly from the selected report.
+      const barangayId =
+        selectedReport.barangay_id ??
+        selectedReport.barangay?.id ??
+        bns.barangay_id;
+
+      if (
+        barangayId === null ||
+        barangayId === undefined ||
+        String(barangayId).trim() === ""
+      ) {
+        throw new Error(
+          "The selected report does not have a valid barangay ID.",
+        );
+      }
+
+      // Use live monitoring only when it belongs to
+      // the report currently being reviewed.
+      const currentMonitoring =
+        liveMonitoring?.reportId === selectedReport.id
+          ? liveMonitoring.data
+          : selectedReport.report_data?.child_monitoring || {};
+
+      await downloadBnsChildMonthlyReportPdf({
+        user: bns,
+
+        reportData: selectedReport.report_data || {},
+
+        displayData: normalizeReportData(selectedReport.report_data),
+
+        monitoringData: currentMonitoring,
+
+        reportMonth: Number(selectedReport.report_month),
+
+        reportYear: Number(selectedReport.report_year),
+
+        // IMPORTANT: Match the PDF generator parameter name.
+        selectedBarangayId: barangayId,
+
+        status: selectedReport.status || "submitted",
+      });
+
+      const auditSaved = await writeAuditLog(
+        "bns_child_report_pdf_downloaded",
+        selectedReport,
+      );
+      if (!auditSaved) {
+        setPdfError("PDF generated, but its audit event could not be saved.");
+      }
+    } catch (error) {
+      await writeAuditLog(
+        "bns_child_report_pdf_download_failed",
+        selectedReport,
+        "failed",
+        {
+          error_code: error?.code || "pdf_generation_error",
+        },
+      );
+      console.error("BNS PDF export failed:", error);
+
+      setErrorMessage(error?.message || "Unable to generate the PDF report.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  }
 
   async function updateReportStatus(nextStatus) {
     if (!selectedReport) {
@@ -1375,12 +1500,43 @@ export default function BnsChildMonthlyReports() {
         ),
       );
 
+      const auditSaved = await writeAuditLog(
+        nextStatus === "approved"
+          ? "bns_child_report_approved"
+          : "bns_child_report_returned",
+        updatedReport,
+        "success",
+        {
+          previous_status: selectedReport.status,
+          new_status: nextStatus,
+          review_notes_provided: Boolean(reviewNotes.trim()),
+        },
+      );
+
       if (nextStatus === "approved") {
-        alert("The BNS child monitoring report has been approved.");
+        alert(
+          "The BNS child monitoring report has been approved." +
+            (auditSaved ? "" : " Warning: the audit log could not be saved."),
+        );
       } else {
-        alert("The report has been returned to the BNS for correction.");
+        alert(
+          "The report has been returned to the BNS for correction." +
+            (auditSaved ? "" : " Warning: the audit log could not be saved."),
+        );
       }
     } catch (error) {
+      await writeAuditLog(
+        nextStatus === "approved"
+          ? "bns_child_report_approval_failed"
+          : "bns_child_report_return_failed",
+        selectedReport,
+        "failed",
+        {
+          previous_status: selectedReport.status,
+          attempted_status: nextStatus,
+          error_code: error?.code || "update_error",
+        },
+      );
       console.error("Error updating report status:", error);
 
       setErrorMessage(error.message || "Unable to update the report.");
@@ -1879,36 +2035,66 @@ export default function BnsChildMonthlyReports() {
               Close
             </button>
 
-            {canReview && (
-              <div className="flex flex-col gap-3 sm:flex-row">
-                <button
-                  type="button"
-                  onClick={() => updateReportStatus("returned")}
-                  disabled={savingReview}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-orange-200 bg-orange-50 px-5 py-3 text-sm font-semibold text-orange-700 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <RotateCcw size={18} />
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <button
+                type="button"
+                onClick={handleDownloadPdf}
+                disabled={
+                  downloadingPdf || savingReview || liveMonitoringLoading
+                }
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {downloadingPdf ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : (
+                  <Download size={18} />
+                )}
+                {downloadingPdf ? "Generating PDF..." : "Download PDF"}
+              </button>
 
-                  {savingReview ? "Processing..." : "Return to BNS"}
-                </button>
+              {canReview && (
+                <div className="flex flex-col gap-3 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={() => updateReportStatus("returned")}
+                    disabled={savingReview}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-orange-200 bg-orange-50 px-5 py-3 text-sm font-semibold text-orange-700 transition hover:bg-orange-100 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RotateCcw size={18} />
 
-                <button
-                  type="button"
-                  onClick={() => updateReportStatus("approved")}
-                  disabled={savingReview}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-green-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <CheckCircle2 size={18} />
+                    {savingReview ? "Processing..." : "Return to BNS"}
+                  </button>
 
-                  {savingReview ? "Processing..." : "Approve Report"}
-                </button>
-              </div>
-            )}
+                  <button
+                    type="button"
+                    onClick={() => updateReportStatus("approved")}
+                    disabled={savingReview}
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-green-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <CheckCircle2 size={18} />
+
+                    {savingReview ? "Processing..." : "Approve Report"}
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
+          {pdfError && (
+            <p
+              role="alert"
+              className="border-t border-red-100 bg-red-50 px-5 py-3 text-sm text-red-700"
+            >
+              PDF download failed: {pdfError}
+            </p>
+          )}
         </div>
       </div>
     );
   }
+
+  /* =======================================================
+
+      MAIN RENDER
 
   /* =======================================================
 

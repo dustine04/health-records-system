@@ -18,6 +18,29 @@ import {
 import DashboardLayout from "../components/DashboardLayout";
 import { supabase } from "../lib/supabase";
 
+/** Best-effort audit trail. Never log passwords or profile field values. */
+async function writeProfileAudit(
+  actorId,
+  action,
+  status = "success",
+  details = {},
+) {
+  if (!actorId) return;
+  try {
+    const { error } = await supabase.from("it_audit_logs").insert({
+      actor_id: actorId,
+      action,
+      entity_type: "users",
+      entity_id: String(actorId),
+      status,
+      details: { module: "My Profile", ...details },
+    });
+    if (error) console.warn("Profile audit logging failed:", error.message);
+  } catch (error) {
+    console.warn("Profile audit logging unavailable:", error);
+  }
+}
+
 const roleNames = {
   cho_admin: "CHO Administrator",
   nurse: "Nurse",
@@ -201,6 +224,16 @@ export default function Profile() {
       if (error) throw error;
 
       if (data) {
+        const changedFields = [
+          "first_name",
+          "middle_name",
+          "last_name",
+          "email",
+          "contact_number",
+        ].filter((field) => (profile[field] ?? "") !== (data[field] ?? ""));
+        await writeProfileAudit(profile.id, "user_profile_updated", "success", {
+          changed_fields: changedFields,
+        });
         setProfile(data);
 
         // Update localStorage user session
@@ -218,6 +251,14 @@ export default function Profile() {
       alert("Profile updated successfully.");
     } catch (error) {
       console.error("Error updating profile:", error);
+      await writeProfileAudit(
+        profile.id,
+        "user_profile_update_failed",
+        "failed",
+        {
+          error_code: error?.code ?? null,
+        },
+      );
       alert(error.message || "Failed to update profile.");
     } finally {
       setSaving(false);
@@ -295,6 +336,14 @@ export default function Profile() {
       if (verifyError) throw verifyError;
 
       if (!currentUser) {
+        await writeProfileAudit(
+          profile.id,
+          "user_password_change_failed",
+          "failed",
+          {
+            reason: "incorrect_current_password",
+          },
+        );
         alert("Current password is incorrect.");
         return;
       }
@@ -309,11 +358,22 @@ export default function Profile() {
 
       if (updateError) throw updateError;
 
+      await writeProfileAudit(profile.id, "user_password_changed", "success", {
+        method: "self_service_profile",
+      });
       alert("Password changed successfully.");
 
       handleCancelPassword();
     } catch (error) {
       console.error("Error changing password:", error);
+      await writeProfileAudit(
+        profile.id,
+        "user_password_change_error",
+        "failed",
+        {
+          error_code: error?.code ?? null,
+        },
+      );
       alert(error.message || "Failed to change password.");
     } finally {
       setSavingPassword(false);

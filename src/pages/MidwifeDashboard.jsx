@@ -906,7 +906,7 @@ function MidwifeDashboard() {
     <DashboardLayout>
       <div className="space-y-6 pb-8">
         {/* HEADER */}
-        <section className="overflow-hidden rounded-2xl bg-gradient-to-br from-teal-700 via-teal-600 to-cyan-700 p-6 text-white shadow-sm sm:p-8">
+        <section className="relative z-30 overflow-visible rounded-2xl bg-gradient-to-br from-teal-700 via-teal-600 to-cyan-700 p-6 text-white shadow-sm sm:p-8">
           <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
             <div className="max-w-2xl">
               <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-semibold">
@@ -986,7 +986,7 @@ function MidwifeDashboard() {
                   <div
                     role="dialog"
                     aria-label="Missed check-up notifications"
-                    className="absolute right-0 z-50 mt-3 w-[min(22rem,calc(100vw-2.5rem))] overflow-hidden rounded-2xl border border-gray-200 bg-white text-left text-gray-800 shadow-xl"
+                    className="absolute right-0 top-full z-[100] mt-3 w-[min(22rem,calc(100vw-2.5rem))] max-h-[min(75vh,32rem)] overflow-y-auto rounded-2xl border border-gray-200 bg-white text-left text-gray-800 shadow-2xl"
                   >
                     <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
                       <div>

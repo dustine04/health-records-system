@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import { supabase } from "../../lib/supabase";
 import {
   monitoringDraftKey,
   readMonitoringDraft,
@@ -39,6 +40,77 @@ import {
   syncMonitoring,
   pendingMonitoringCount,
 } from "../../lib/monitoringOffline";
+
+// Offline-capable, best-effort BNS monitoring audit outbox.
+// Logs queue acceptance; confirmed server operations belong in monitoringOffline.js.
+const monitoringAuditKey = (userId) => `bns-child-monitoring-audit:${userId}`;
+const auditFlushes = new Map();
+
+function enqueueMonitoringAudit(userId, event) {
+  if (!userId) return;
+  try {
+    const storageKey = monitoringAuditKey(userId);
+    const entries = JSON.parse(localStorage.getItem(storageKey) || "[]");
+    entries.push({
+      ...event,
+      event_id: crypto.randomUUID(),
+      occurred_at: new Date().toISOString(),
+    });
+    localStorage.setItem(storageKey, JSON.stringify(entries));
+  } catch (error) {
+    console.warn("Could not queue child monitoring audit:", error);
+  }
+}
+
+async function flushMonitoringAudit(userId) {
+  if (!userId || !navigator.onLine) return;
+  const storageKey = monitoringAuditKey(userId);
+  if (auditFlushes.has(storageKey)) return auditFlushes.get(storageKey);
+  const task = (async () => {
+    try {
+      while (navigator.onLine) {
+        const entries = JSON.parse(localStorage.getItem(storageKey) || "[]");
+        if (!entries.length) break;
+        const entry = entries[0];
+        const { error } = await supabase.from("it_audit_logs").insert({
+          actor_id: Number(userId),
+          action: entry.action,
+          entity_type: entry.entity_type,
+          entity_id: entry.entity_id == null ? null : String(entry.entity_id),
+          status: entry.status || "success",
+          details: {
+            module: "BNS Child Monitoring",
+            section: entry.section || null,
+            child_health_record_id:
+              entry.child_health_record_id == null
+                ? null
+                : String(entry.child_health_record_id),
+            event_id: entry.event_id,
+            occurred_at: entry.occurred_at,
+            source: "client_offline_queue",
+          },
+        });
+        if (error) throw error;
+        // Remove only the entry just uploaded, preserving newly queued entries.
+        const latest = JSON.parse(localStorage.getItem(storageKey) || "[]");
+        localStorage.setItem(
+          storageKey,
+          JSON.stringify(
+            latest.filter((item) => item.event_id !== entry.event_id),
+          ),
+        );
+      }
+    } catch (error) {
+      console.warn("Child monitoring audit upload pending:", error);
+    }
+  })();
+  auditFlushes.set(storageKey, task);
+  try {
+    await task;
+  } finally {
+    auditFlushes.delete(storageKey);
+  }
+}
 
 const emptyForms = {
   newborn: {
@@ -197,6 +269,29 @@ function getFullName(resident) {
 
 export default function ChildMonitoring() {
   const [user, setUser] = useState(null);
+
+  function audit(
+    action,
+    section,
+    recordId = null,
+    status = "success",
+    childId = null,
+  ) {
+    if (!user?.id) return;
+    enqueueMonitoringAudit(user.id, {
+      action,
+      entity_type: section
+        ? sectionConfig[section]?.table || "child_health_records"
+        : "child_health_records",
+      entity_id:
+        recordId ?? childId ?? selectedChild?.health_record?.id ?? null,
+      child_health_record_id:
+        childId ?? selectedChild?.health_record?.id ?? null,
+      section,
+      status,
+    });
+    if (navigator.onLine) void flushMonitoringAudit(user.id);
+  }
 
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -357,6 +452,11 @@ export default function ChildMonitoring() {
         );
         setDraftSavedAt(savedAt);
       }
+      audit(
+        "bns_child_monitoring_draft_saved",
+        activeSection,
+        editingRecord?.id,
+      );
       resetDraftState();
       setShowForm(false);
       setEditingRecord(null);
@@ -380,6 +480,11 @@ export default function ChildMonitoring() {
     stopDraftTimer();
     try {
       await enqueueDraft(() => deleteMonitoringDraft(draftKeyRef.current));
+      audit(
+        "bns_child_monitoring_draft_discarded",
+        activeSection,
+        editingRecord?.id,
+      );
       resetDraftState();
       setShowForm(false);
       setEditingRecord(null);
@@ -404,6 +509,7 @@ export default function ChildMonitoring() {
     setSyncError("");
     try {
       const result = await syncMonitoring(user.id);
+      await flushMonitoringAudit(user.id);
       if (result.error) setSyncError(result.error);
       if (!result.error) {
         await fetchChildren();
@@ -411,6 +517,7 @@ export default function ChildMonitoring() {
       }
     } catch (e) {
       setSyncError(e.message);
+      audit("bns_child_monitoring_sync_failed", null, null, "failed");
     } finally {
       await updatePending();
       setSyncing(false);
@@ -495,6 +602,13 @@ export default function ChildMonitoring() {
       return;
     }
 
+    audit(
+      "bns_child_monitoring_viewed",
+      null,
+      child.health_record.id,
+      "success",
+      child.health_record.id,
+    );
     setSelectedChild(child);
     setActiveSection("monitoring");
     setShowChildModal(true);
@@ -727,12 +841,20 @@ export default function ChildMonitoring() {
         };
       }
 
-      await saveMonitoringLocal(
+      const wasEditing = Boolean(editingRecord?.id);
+      const queuedId = await saveMonitoringLocal(
         user.id,
         childHealthRecordId,
         activeSection,
         editingRecord?.id,
         data,
+      );
+      audit(
+        wasEditing
+          ? "bns_child_monitoring_update_queued"
+          : "bns_child_monitoring_create_queued",
+        activeSection,
+        queuedId ?? editingRecord?.id,
       );
       // Local submission succeeded. Remove the unfinished draft even when offline.
       try {
@@ -749,6 +871,12 @@ export default function ChildMonitoring() {
       else setSyncError("");
     } catch (error) {
       console.error("Error saving record:", error);
+      audit(
+        "bns_child_monitoring_save_queue_failed",
+        activeSection,
+        editingRecord?.id,
+        "failed",
+      );
       alert(error.message || "Failed to save record.");
     } finally {
       draftSavingRef.current = false;
@@ -765,6 +893,7 @@ export default function ChildMonitoring() {
         section,
         record.id,
       );
+      audit("bns_child_monitoring_delete_queued", section, record.id);
       setRecords(
         await cachedMonitoringRecords(user.id, selectedChild.health_record.id),
       );
@@ -772,6 +901,12 @@ export default function ChildMonitoring() {
       if (navigator.onLine) await runSync();
     } catch (error) {
       console.error(error);
+      audit(
+        "bns_child_monitoring_delete_queue_failed",
+        section,
+        record.id,
+        "failed",
+      );
       alert(error.message || "Could not queue deletion.");
     }
   }

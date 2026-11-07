@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import { supabase } from "../../lib/supabase";
 
 import {
   getPregnancyCache,
@@ -210,6 +211,83 @@ function FormSection({ title, description, children }) {
 }
 
 // =========================================================
+// BHW PREGNANCY REGISTRATION AUDIT TRAIL (OFFLINE-AWARE)
+// =========================================================
+// Only IDs and action metadata are logged. Never include patient names,
+// clinical values, dates of pregnancy, PhilHealth numbers, or form payloads.
+// Events ending in "_queued" mean LOCAL queue acceptance, not server success.
+// This client-side queue is best-effort; use trusted server-side logging for
+// authoritative audit trails of completed database operations.
+const AUDIT_STORAGE_PREFIX = "mchms_bhw_pregnancy_audit_v1_";
+const auditKeyFor = (actorId) => `${AUDIT_STORAGE_PREFIX}${actorId}`;
+
+function readPregnancyAuditQueue(actorId) {
+  try {
+    const value = JSON.parse(
+      localStorage.getItem(auditKeyFor(actorId)) || "[]",
+    );
+    return Array.isArray(value) ? value : [];
+  } catch (error) {
+    console.warn("Unable to read pregnancy audit queue:", error);
+    return [];
+  }
+}
+
+function queuePregnancyAudit(
+  actorId,
+  action,
+  status = "success",
+  entityId = null,
+  details = {},
+) {
+  if (!actorId) return;
+  try {
+    const queued = readPregnancyAuditQueue(actorId);
+    queued.push({
+      actor_id: actorId,
+      action,
+      entity_type: "pregnant_women",
+      entity_id: entityId == null ? null : String(entityId),
+      status,
+      details: {
+        module: "BHW Pregnancy Registration",
+        actor_role: "bhw",
+        event_recorded_at: new Date().toISOString(),
+        ...details,
+      },
+    });
+    // Do not silently evict pending audit events.
+    localStorage.setItem(auditKeyFor(actorId), JSON.stringify(queued));
+  } catch (error) {
+    console.warn("Unable to queue pregnancy audit event:", error);
+  }
+}
+
+const auditFlushLocks = new Set();
+async function flushPregnancyAuditQueue(actorId) {
+  if (!actorId || !navigator.onLine || auditFlushLocks.has(String(actorId)))
+    return;
+  auditFlushLocks.add(String(actorId));
+  try {
+    let queued = readPregnancyAuditQueue(actorId);
+    while (queued.length && navigator.onLine) {
+      const event = queued[0];
+      const { error } = await supabase.from("it_audit_logs").insert(event);
+      if (error) throw error;
+      // Remove only the event just uploaded, preserving newer queued events.
+      const latest = readPregnancyAuditQueue(actorId);
+      latest.shift();
+      localStorage.setItem(auditKeyFor(actorId), JSON.stringify(latest));
+      queued = latest;
+    }
+  } catch (error) {
+    console.warn("Pregnancy audit events will retry on next sync:", error);
+  } finally {
+    auditFlushLocks.delete(String(actorId));
+  }
+}
+
+// =========================================================
 // MAIN COMPONENT
 // =========================================================
 
@@ -241,6 +319,15 @@ export default function BhwPregnantWomen() {
 
   const [showViewModal, setShowViewModal] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState(null);
+
+  const recordAudit = useCallback(
+    (action, status = "success", entityId = null, details = {}) => {
+      if (!user?.id) return;
+      queuePregnancyAudit(user.id, action, status, entityId, details);
+      if (navigator.onLine) void flushPregnancyAuditQueue(user.id);
+    },
+    [user?.id],
+  );
 
   // =========================================================
   // AUTO-SAVE STATES
@@ -304,10 +391,14 @@ export default function BhwPregnantWomen() {
 
     try {
       await syncPregnancyQueue(user.id);
+      await flushPregnancyAuditQueue(user.id);
 
       const updated = await refreshPregnancyCache(user.id);
       applyCache(updated);
     } catch (error) {
+      recordAudit("bhw_pregnancy_sync_failed", "failed", null, {
+        error_code: error?.code || "sync_error",
+      });
       console.error("Pregnancy synchronization failed:", error);
 
       setOfflineError(`Synchronization stopped: ${error.message}`);
@@ -320,14 +411,16 @@ export default function BhwPregnantWomen() {
     } finally {
       setSyncing(false);
     }
-  }, [user?.id, syncing, applyCache]);
+  }, [user?.id, syncing, applyCache, recordAudit]);
 
   useEffect(() => {
     if (!user?.id) return;
 
     loadData();
+    if (navigator.onLine) void flushPregnancyAuditQueue(user.id);
 
     const handleOnline = () => {
+      void flushPregnancyAuditQueue(user.id);
       setOnline(true);
     };
 
@@ -721,6 +814,17 @@ export default function BhwPregnantWomen() {
       // Queueing is the submission point.
       // The queue itself persists the submitted record locally.
       await queuePregnancySave(user.id, editingRecord, payload);
+      recordAudit(
+        editingRecord
+          ? "bhw_pregnancy_registration_update_queued"
+          : "bhw_pregnancy_registration_create_queued",
+        "success",
+        editingRecord?.id ?? null,
+        {
+          operation: editingRecord ? "update" : "create",
+          resident_id: payload.resident_id,
+        },
+      );
 
       // Delete the unfinished draft only after queueing succeeds.
       if (draftKey) {
@@ -756,6 +860,17 @@ export default function BhwPregnantWomen() {
         await syncNow();
       }
     } catch (error) {
+      recordAudit(
+        editingRecord
+          ? "bhw_pregnancy_registration_update_queue_failed"
+          : "bhw_pregnancy_registration_create_queue_failed",
+        "failed",
+        editingRecord?.id ?? null,
+        {
+          operation: editingRecord ? "update" : "create",
+          error_code: error?.code || "queue_error",
+        },
+      );
       console.error("Error saving pregnancy:", error);
 
       alert(error.message || "Failed to save pregnancy registration.");
@@ -782,6 +897,11 @@ export default function BhwPregnantWomen() {
 
     try {
       await queuePregnancyDelete(user.id, record);
+      recordAudit(
+        "bhw_pregnancy_registration_delete_queued",
+        "success",
+        record.id,
+      );
 
       applyCache(await getPregnancyCache(user.id));
 
@@ -789,6 +909,14 @@ export default function BhwPregnantWomen() {
         await syncNow();
       }
     } catch (error) {
+      recordAudit(
+        "bhw_pregnancy_registration_delete_queue_failed",
+        "failed",
+        record.id,
+        {
+          error_code: error?.code || "queue_error",
+        },
+      );
       console.error(error);
       alert(error.message || "Failed to queue deletion.");
     }

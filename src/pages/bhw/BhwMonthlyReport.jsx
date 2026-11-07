@@ -19,7 +19,8 @@ import {
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
-
+import { Download } from "lucide-react";
+import { downloadBhwMonthlyReportPdf } from "../../utils/bhwMonthlyReportPdf";
 const MONTHS = [
   "January",
   "February",
@@ -989,6 +990,46 @@ export default function BhwMonthlyReport() {
   const [expandedWomen, setExpandedWomen] = useState({});
 
   /* =======================================================
+     AUDIT LOGGING
+  ======================================================= */
+
+  async function writeAuditLog(action, options = {}) {
+    if (!user?.id) return false;
+
+    const {
+      id = reportId,
+      auditStatus = "success",
+      previousStatus = status,
+      nextStatus = status,
+      errorCode = null,
+    } = options;
+
+    const { error: auditError } = await supabase.from("it_audit_logs").insert({
+      actor_id: Number(user.id),
+      action,
+      entity_type: "bhw_monthly_reports",
+      entity_id: id == null ? null : String(id),
+      status: auditStatus,
+      details: {
+        module: "BHW Monthly Pregnancy Report",
+        actor_role: "bhw",
+        bhw_id: user.id,
+        report_month: month,
+        report_year: year,
+        previous_status: previousStatus,
+        new_status: nextStatus,
+        ...(errorCode ? { error_code: String(errorCode) } : {}),
+      },
+    });
+
+    if (auditError) {
+      console.error("Audit logging failed:", auditError);
+      return false;
+    }
+    return true;
+  }
+
+  /* =======================================================
      LOAD REPORT
   ======================================================= */
 
@@ -1790,33 +1831,22 @@ export default function BhwMonthlyReport() {
       return;
     }
 
-    /* REVIEWED = FINAL */
-
     if (status === "reviewed") {
       setError(
         "This report has already been reviewed and accepted by the Midwife. It cannot be edited or submitted again.",
       );
       return;
     }
-
-    /* SUBMITTED = WAITING FOR REVIEW */
-
     if (status === "submitted") {
       setError(
         "This report has already been submitted and is currently under Midwife review.",
       );
       return;
     }
-
-    /* ONLY DRAFT / RETURNED CAN BE EDITED */
-
-    if (!canEditReport(status)) {
-      setError("This report cannot be edited in its current status.");
-      return;
-    }
-
-    if (submit && !canSubmitReport(status)) {
-      setError("This report cannot be submitted in its current status.");
+    if (!canEditReport(status) || (submit && !canSubmitReport(status))) {
+      setError(
+        "This report cannot be edited or submitted in its current status.",
+      );
       return;
     }
 
@@ -1824,56 +1854,41 @@ export default function BhwMonthlyReport() {
     setError("");
     setMessage("");
 
+    const previousStatus = status;
+    const action = submit
+      ? status === "returned"
+        ? "bhw_monthly_report_resubmitted"
+        : "bhw_monthly_report_submitted"
+      : reportId
+        ? "bhw_monthly_report_draft_updated"
+        : "bhw_monthly_report_draft_created";
+
     try {
       const now = new Date().toISOString();
-
       const reportData = {
         ...report,
-
         generated_for_month: month,
-
         generated_for_year: year,
-
         area_ids: assignedAreas
           .map((item) => item.local_area_id)
           .filter(Boolean),
-
         saved_at: now,
       };
-
       const payload = {
         bhw_id: user.id,
-
         month,
-
         year,
-
         status: submit ? "submitted" : status,
-
         report_data: reportData,
-
         updated_at: now,
       };
 
-      /* =====================================================
-         UPDATE EXISTING REPORT
-      ===================================================== */
-
+      let saved;
       if (reportId) {
         const updatePayload = {
           ...payload,
+          ...(submit ? { submitted_at: now } : {}),
         };
-
-        /*
-          Only change submitted_at when actually submitting.
-          This preserves the original submission timestamp
-          while the report is being edited after return.
-        */
-
-        if (submit) {
-          updatePayload.submitted_at = now;
-        }
-
         const { data, error: updateError } = await supabase
           .from("bhw_monthly_reports")
           .update(updatePayload)
@@ -1881,70 +1896,65 @@ export default function BhwMonthlyReport() {
           .in("status", ["draft", "returned"])
           .select()
           .maybeSingle();
-
-        if (updateError) {
-          throw updateError;
-        }
-
-        /*
-          If no row was returned, the database row
-          was probably already submitted/reviewed.
-        */
-
-        if (!data) {
+        if (updateError) throw updateError;
+        if (!data)
           throw new Error(
             "The report could not be updated. It may already have been submitted or reviewed.",
           );
-        }
-
-        setReportId(data.id);
-
-        setStatus(data.status);
-
-        setMessage(
-          submit
-            ? "Monthly pregnancy report has been submitted to the Midwife for review."
-            : data.status === "returned"
-              ? "Corrections saved. The report is still marked as returned until you resubmit it."
-              : "Monthly pregnancy report saved as draft.",
-        );
-
-        return;
+        saved = data;
+      } else {
+        const { data, error: insertError } = await supabase
+          .from("bhw_monthly_reports")
+          .insert({
+            ...payload,
+            status: submit ? "submitted" : "draft",
+            submitted_at: submit ? now : null,
+          })
+          .select()
+          .single();
+        if (insertError) throw insertError;
+        saved = data;
       }
 
-      /* =====================================================
-         CREATE NEW REPORT
-      ===================================================== */
-
-      const { data, error: insertError } = await supabase
-        .from("bhw_monthly_reports")
-        .insert({
-          ...payload,
-
-          status: submit ? "submitted" : "draft",
-
-          submitted_at: submit ? now : null,
-        })
-        .select()
-        .single();
-
-      if (insertError) {
-        throw insertError;
-      }
-
-      setReportId(data.id);
-
-      setStatus(data.status);
-
+      setReportId(saved.id);
+      setStatus(saved.status);
       setMessage(
         submit
           ? "Monthly pregnancy report has been submitted to the Midwife for review."
-          : "Monthly pregnancy report saved as draft.",
+          : saved.status === "returned"
+            ? "Corrections saved. The report is still marked as returned until you resubmit it."
+            : "Monthly pregnancy report saved as draft.",
       );
+
+      try {
+        const logged = await writeAuditLog(action, {
+          id: saved.id,
+          previousStatus,
+          nextStatus: saved.status,
+        });
+        if (!logged)
+          setError(
+            "Report saved successfully, but its audit event could not be recorded.",
+          );
+      } catch (auditError) {
+        console.error("Audit logging failed:", auditError);
+        setError(
+          "Report saved successfully, but its audit event could not be recorded.",
+        );
+      }
     } catch (err) {
       console.error("Error saving monthly report:", err);
-
       setError(err.message || "Unable to save monthly report.");
+      try {
+        await writeAuditLog("bhw_monthly_report_save_failed", {
+          auditStatus: "failed",
+          previousStatus,
+          nextStatus: submit ? "submitted" : previousStatus,
+          errorCode: err.code || "operation_failed",
+        });
+      } catch (auditError) {
+        console.error("Failed to record audit failure:", auditError);
+      }
     } finally {
       setSaving(false);
     }
@@ -2018,7 +2028,41 @@ export default function BhwMonthlyReport() {
         .join(", "),
     [assignedAreas],
   );
-
+  async function handleDownloadPdf() {
+    if (!user?.id) {
+      setError("BHW user session was not found.");
+      return;
+    }
+    try {
+      setError("");
+      await downloadBhwMonthlyReportPdf({
+        report,
+        user,
+        month,
+        year,
+        assignedAreas,
+      });
+      try {
+        const logged = await writeAuditLog("bhw_monthly_report_pdf_downloaded");
+        if (!logged)
+          setError("PDF generated, but its audit event could not be recorded.");
+      } catch (auditError) {
+        console.error("PDF audit logging failed:", auditError);
+        setError("PDF generated, but its audit event could not be recorded.");
+      }
+    } catch (err) {
+      console.error("PDF download failed:", err);
+      setError(err.message || "Unable to generate the monthly report PDF.");
+      try {
+        await writeAuditLog("bhw_monthly_report_pdf_download_failed", {
+          auditStatus: "failed",
+          errorCode: err.code || "pdf_generation_failed",
+        });
+      } catch (auditError) {
+        console.error("Failed to audit PDF error:", auditError);
+      }
+    }
+  }
   /* =======================================================
      LOADING
   ======================================================= */
@@ -2096,7 +2140,16 @@ export default function BhwMonthlyReport() {
 
           <div className="flex flex-wrap gap-2">
             {/* REFRESH */}
-
+            {/* DOWNLOAD PDF */}
+            <button
+              type="button"
+              onClick={handleDownloadPdf}
+              disabled={loading || saving}
+              className="flex items-center gap-2 rounded-lg border border-green-600 bg-green-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Download size={17} />
+              Download PDF
+            </button>
             <button
               type="button"
               onClick={refreshReport}

@@ -8,6 +8,7 @@ import {
   ChevronRight,
   ClipboardList,
   FileText,
+  Download,
   HeartPulse,
   LoaderCircle,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
+import { downloadMidwifeNurseFhsisPdf } from "../../utils/midwifeNurseFhsisPdf";
 
 const MONTHS = [
   "January",
@@ -261,6 +263,31 @@ const getUser = () => {
   }
 };
 
+// Best-effort audit trail. Never include patient data or report snapshots.
+// For tamper-resistant logs, move writes to a trusted database RPC/trigger.
+const writeFhsisAudit = async (
+  actor,
+  action,
+  status,
+  details = {},
+  reportId = null,
+) => {
+  if (!actor?.id) return;
+  try {
+    const { error } = await supabase.from("it_audit_logs").insert({
+      actor_id: actor.id,
+      action,
+      entity_type: "midwife_nurse_fhsis_reports",
+      entity_id: reportId == null ? null : String(reportId),
+      status,
+      details: { module: "Midwife to Nurse FHSIS", ...details },
+    });
+    if (error) throw error;
+  } catch (auditError) {
+    console.warn("Unable to record FHSIS audit event:", auditError);
+  }
+};
+
 const displayName = (user) =>
   [user?.first_name, user?.middle_name, user?.last_name]
     .filter(Boolean)
@@ -404,6 +431,7 @@ export default function MidwifeNurseFhsisReport() {
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
@@ -1145,7 +1173,11 @@ export default function MidwifeNurseFhsisReport() {
         updated_at: new Date().toISOString(),
       };
 
+      let savedReportId = null;
+      let submissionType = "new";
+
       if (existingDraft) {
+        submissionType = "draft_submission";
         const { data, error: updateError } = await supabase
           .from("midwife_nurse_fhsis_reports")
           .update(payload)
@@ -1162,7 +1194,9 @@ export default function MidwifeNurseFhsisReport() {
             "The draft could not be updated. It may have changed; refresh and try again.",
           );
         }
+        savedReportId = data.id;
       } else if (existingReturned) {
+        submissionType = "returned_resubmission";
         // Resubmission updates the returned report rather than creating
         // another report for the same period and nurse.
         const { data, error: updateError } = await supabase
@@ -1181,13 +1215,42 @@ export default function MidwifeNurseFhsisReport() {
             "The returned report could not be updated. Refresh and try again.",
           );
         }
+        savedReportId = data.id;
       } else {
-        const { error: insertError } = await supabase
+        const { data, error: insertError } = await supabase
           .from("midwife_nurse_fhsis_reports")
-          .insert(payload);
+          .insert(payload)
+          .select("id")
+          .single();
 
         if (insertError) throw insertError;
+        savedReportId = data.id;
       }
+
+      await writeFhsisAudit(
+        currentUser,
+        submissionType === "returned_resubmission"
+          ? "fhsis_report_resubmitted"
+          : "fhsis_report_submitted",
+        "success",
+        {
+          district_id: districtId,
+          nurse_id: selectedNurse.id,
+          reporting_month: month,
+          reporting_year: year,
+          submission_type: submissionType,
+          previous_status:
+            submissionType === "returned_resubmission"
+              ? "returned"
+              : submissionType === "draft_submission"
+                ? "draft"
+                : null,
+          new_status: "submitted",
+          bns_source_count: bnsReports.length,
+          bhw_source_count: bhwReports.length,
+        },
+        savedReportId,
+      );
 
       setNotice(
         `The ${MONTHS[month - 1]} ${year} report was submitted to ${displayName(selectedNurse)}.`,
@@ -1196,9 +1259,72 @@ export default function MidwifeNurseFhsisReport() {
       setRefreshKey((value) => value + 1);
     } catch (err) {
       console.error("FHSIS submission failed:", err);
+      await writeFhsisAudit(
+        currentUser,
+        "fhsis_report_submission_failed",
+        "failed",
+        {
+          district_id: districtId,
+          nurse_id: selectedNurse?.id ?? null,
+          reporting_month: month,
+          reporting_year: year,
+          error_message: String(err?.message || "Unknown error").slice(0, 250),
+        },
+      );
       setError(err?.message || "The report could not be submitted.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleDownloadPdf = async () => {
+    try {
+      setError("");
+      setDownloadingPdf(true);
+      if (!district?.name)
+        throw new Error("District information is not loaded yet.");
+      if (!hasSourceReports)
+        throw new Error("No eligible source reports to download.");
+      await downloadMidwifeNurseFhsisPdf({
+        month,
+        year,
+        districtName: district.name,
+        midwifeName: displayName(currentUser),
+        nurseName: selectedNurse ? displayName(selectedNurse) : "Not selected",
+        bnsTotals,
+        bhwTotals,
+        bnsCount: bnsReports.length,
+        bhwCount: bhwReports.length,
+      });
+      await writeFhsisAudit(
+        currentUser,
+        "fhsis_report_pdf_downloaded",
+        "success",
+        {
+          district_id: districtId,
+          nurse_id: selectedNurse?.id ?? null,
+          reporting_month: month,
+          reporting_year: year,
+          bns_source_count: bnsReports.length,
+          bhw_source_count: bhwReports.length,
+        },
+      );
+    } catch (err) {
+      console.error("FHSIS PDF download failed:", err);
+      await writeFhsisAudit(
+        currentUser,
+        "fhsis_report_pdf_download_failed",
+        "failed",
+        {
+          district_id: districtId,
+          reporting_month: month,
+          reporting_year: year,
+          error_message: String(err?.message || "Unknown error").slice(0, 250),
+        },
+      );
+      setError(err?.message || "Unable to download FHSIS PDF.");
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -1354,15 +1480,32 @@ export default function MidwifeNurseFhsisReport() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setRefreshKey((value) => value + 1)}
-            disabled={loading || submitting}
-            className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm disabled:opacity-50"
-          >
-            <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
-            Refresh reports
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleDownloadPdf}
+              disabled={
+                loading || submitting || downloadingPdf || !hasSourceReports
+              }
+              className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {downloadingPdf ? (
+                <LoaderCircle size={16} className="animate-spin" />
+              ) : (
+                <Download size={16} />
+              )}
+              {downloadingPdf ? "Generating PDF..." : "Download PDF"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setRefreshKey((value) => value + 1)}
+              disabled={loading || submitting}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
+              Refresh reports
+            </button>
+          </div>
         </div>
 
         {error && (

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import { supabase } from "../../lib/supabase";
 
 import {
   getHouseholdCache,
@@ -39,6 +40,58 @@ const draftDB = new Dexie("mchms-bns-household-drafts-v1");
 draftDB.version(1).stores({
   drafts: "key,owner,updatedAt",
 });
+
+// Version 2 retains existing drafts and adds a durable offline audit outbox.
+draftDB.version(2).stores({
+  drafts: "key,owner,updatedAt",
+  auditQueue: "++id,actor_id,createdAt",
+});
+
+// These events describe local actions, not confirmed Supabase mutations.
+// Confirmed create/update/delete events belong in householdOffline.js sync.
+const queueBnsAudit = async (
+  actorId,
+  action,
+  entityType,
+  entityId,
+  details = {},
+) => {
+  if (!actorId) return;
+  await draftDB.auditQueue.add({
+    actor_id: actorId,
+    action,
+    entity_type: entityType,
+    entity_id: entityId == null ? null : String(entityId),
+    details: { module: "BNS Household Management", ...details },
+    status: "success",
+    createdAt: Date.now(),
+  });
+};
+
+let flushingBnsAudits = false;
+const flushBnsAudits = async () => {
+  if (flushingBnsAudits || !navigator.onLine) return;
+  flushingBnsAudits = true;
+  try {
+    const entries = await draftDB.auditQueue.orderBy("id").toArray();
+    for (const entry of entries) {
+      const { error } = await supabase.from("it_audit_logs").insert({
+        actor_id: entry.actor_id,
+        action: entry.action,
+        entity_type: entry.entity_type,
+        entity_id: entry.entity_id,
+        details: entry.details,
+        status: entry.status,
+      });
+      if (error) throw error;
+      await draftDB.auditQueue.delete(entry.id);
+    }
+  } catch (error) {
+    console.warn("BNS audit upload pending:", error);
+  } finally {
+    flushingBnsAudits = false;
+  }
+};
 
 const getDraftKey = (userId, kind, householdId = "new", recordId = "new") =>
   ["bns", userId, kind, householdId, recordId]
@@ -164,6 +217,26 @@ function Modal({
 function BnsHousehold() {
   const [user] = useState(getUser);
   const userId = user?.id;
+
+  const auditLocalAction = useCallback(
+    async (action, entityType, entityId, details = {}) => {
+      try {
+        await queueBnsAudit(userId, action, entityType, entityId, details);
+        void flushBnsAudits();
+      } catch (error) {
+        console.warn("Unable to queue BNS audit event:", error);
+      }
+    },
+    [userId],
+  );
+
+  useEffect(() => {
+    if (!userId) return;
+    void flushBnsAudits();
+    const flush = () => void flushBnsAudits();
+    window.addEventListener("online", flush);
+    return () => window.removeEventListener("online", flush);
+  }, [userId]);
 
   /* =====================================================
      HOUSEHOLD DATA
@@ -440,6 +513,12 @@ function BnsHousehold() {
         );
       }
 
+      await auditLocalAction(
+        "bns_household_draft_saved",
+        kind === "household" ? "households" : "residents",
+        null,
+        { draft_kind: kind, storage: "device" },
+      );
       resetDraft();
 
       if (kind === "household") {
@@ -482,6 +561,12 @@ function BnsHousehold() {
 
     try {
       await enqueueDraftOperation(() => removeDraft(draft.key));
+      await auditLocalAction(
+        "bns_household_draft_discarded",
+        kind === "household" ? "households" : "residents",
+        null,
+        { draft_kind: kind, storage: "device" },
+      );
 
       resetDraft();
 
@@ -808,6 +893,14 @@ function BnsHousehold() {
       });
 
       savedLocally = true;
+      await auditLocalAction(
+        editingHousehold
+          ? "bns_household_update_queued"
+          : "bns_household_create_queued",
+        "households",
+        editingHousehold?.id ?? null,
+        { sync_state: "pending", local_area_id: Number(form.local_area_id) },
+      );
 
       await clearSavedDraft("household");
 
@@ -845,6 +938,9 @@ function BnsHousehold() {
 
     try {
       await deleteHouseholdLocal(userId, id);
+      await auditLocalAction("bns_household_delete_queued", "households", id, {
+        sync_state: "pending",
+      });
       await updateLocal();
     } catch (error) {
       alert(error.message);
@@ -860,6 +956,7 @@ function BnsHousehold() {
     setShowDetailsModal(true);
 
     await fetchResidents(household.id);
+    await auditLocalAction("bns_household_viewed", "households", household.id);
   };
 
   const closeDetails = () => {
@@ -971,6 +1068,14 @@ function BnsHousehold() {
       );
 
       savedLocally = true;
+      await auditLocalAction(
+        editingResident
+          ? "bns_resident_update_queued"
+          : "bns_resident_create_queued",
+        "residents",
+        editingResident?.id ?? null,
+        { sync_state: "pending", household_id: String(householdId) },
+      );
 
       await clearSavedDraft("resident");
 
@@ -1011,6 +1116,15 @@ function BnsHousehold() {
       const householdId = selectedHousehold.id;
 
       await deleteResidentLocal(userId, householdId, resident.id);
+      await auditLocalAction(
+        "bns_resident_delete_queued",
+        "residents",
+        resident.id,
+        {
+          sync_state: "pending",
+          household_id: String(householdId),
+        },
+      );
 
       await updateLocal(householdId);
       await refreshSelectedHousehold(householdId);

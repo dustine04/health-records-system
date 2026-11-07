@@ -263,6 +263,38 @@ const readUser = () => {
   }
 };
 
+/** Best-effort audit logging. Never include report contents or review notes. */
+async function writeNurseFhsisAudit(
+  actor,
+  action,
+  report,
+  status = "success",
+  extra = {},
+) {
+  if (!actor?.id) return;
+  try {
+    const { error } = await supabase.from("it_audit_logs").insert({
+      actor_id: actor.id,
+      action,
+      entity_type: "midwife_nurse_fhsis_reports",
+      entity_id: report?.id == null ? null : String(report.id),
+      status,
+      details: {
+        module: "Nurse FHSIS Reports",
+        actor_role: "nurse",
+        district_id: actor.district_id ?? null,
+        reporting_month: report?.reporting_month ?? null,
+        reporting_year: report?.reporting_year ?? null,
+        previous_status: report?.status ?? null,
+        ...extra,
+      },
+    });
+    if (error) console.warn("Nurse FHSIS audit insert failed:", error);
+  } catch (error) {
+    console.warn("Nurse FHSIS audit unavailable:", error);
+  }
+}
+
 function StatusBadge({ status }) {
   const config = STATUS[status] || {
     label: formatLabel(status || "unknown"),
@@ -518,7 +550,13 @@ function BhwRecordTable({ data }) {
 /*                           PRINTABLE FHSIS REPORT                           */
 /* -------------------------------------------------------------------------- */
 
-function FhsisReportDocument({ report, midwife, nurse, districtName }) {
+function FhsisReportDocument({
+  report,
+  midwife,
+  nurse,
+  districtName,
+  onPrint,
+}) {
   const data = isObject(report.report_data) ? report.report_data : {};
 
   const sourceSnapshot = isObject(report.source_snapshot)
@@ -600,7 +638,10 @@ function FhsisReportDocument({ report, midwife, nurse, districtName }) {
 
         <button
           type="button"
-          onClick={() => window.print()}
+          onClick={() => {
+            onPrint?.();
+            window.print();
+          }}
           className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800"
         >
           <Printer size={17} />
@@ -769,6 +810,7 @@ function ReportDetailsModal({
   onReturn,
   onForward,
   actionLoading,
+  onPrint,
 }) {
   const [returnNotes, setReturnNotes] = useState("");
   const [showReturnForm, setShowReturnForm] = useState(false);
@@ -861,6 +903,7 @@ function ReportDetailsModal({
             midwife={midwife}
             nurse={nurse}
             districtName={districtName}
+            onPrint={onPrint}
           />
 
           {showReturnForm && canProcess && (
@@ -1140,6 +1183,23 @@ export default function NurseFhsisReports() {
     };
   }, [loadReports]);
 
+  const openReport = (report) => {
+    setSelectedReport(report);
+    void writeNurseFhsisAudit(user, "nurse_fhsis_report_viewed", report);
+  };
+
+  const printReport = (report) => {
+    void writeNurseFhsisAudit(
+      user,
+      "nurse_fhsis_report_print_requested",
+      report,
+      "success",
+      {
+        output: "browser_print_or_save_pdf",
+      },
+    );
+  };
+
   const refreshReports = async () => {
     if (!user) return;
 
@@ -1247,6 +1307,17 @@ export default function NurseFhsisReports() {
         );
       }
 
+      const action =
+        nextStatus === "reviewed"
+          ? "nurse_fhsis_report_approved"
+          : nextStatus === "returned"
+            ? "nurse_fhsis_report_returned"
+            : "nurse_fhsis_report_forwarded_to_cho";
+      await writeNurseFhsisAudit(user, action, selectedReport, "success", {
+        new_status: nextStatus,
+        notes_provided: Boolean(notes.trim()),
+      });
+
       setNotice(
         nextStatus === "reviewed"
           ? "The report has been approved. You can now forward it to the CHO for final review."
@@ -1258,6 +1329,16 @@ export default function NurseFhsisReports() {
       await loadReports(user);
     } catch (err) {
       console.error("Failed to process FHSIS report:", err);
+      await writeNurseFhsisAudit(
+        user,
+        "nurse_fhsis_report_action_failed",
+        selectedReport,
+        "failed",
+        {
+          attempted_status: nextStatus,
+          error_code: err?.code ?? null,
+        },
+      );
       setError(err.message || "Unable to process the report.");
     } finally {
       setActionLoading(false);
@@ -1622,7 +1703,7 @@ export default function NurseFhsisReports() {
                             <td className="px-5 py-4 text-right">
                               <button
                                 type="button"
-                                onClick={() => setSelectedReport(report)}
+                                onClick={() => openReport(report)}
                                 className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"
                               >
                                 {report.status === "submitted"
@@ -1678,7 +1759,7 @@ export default function NurseFhsisReports() {
 
                         <button
                           type="button"
-                          onClick={() => setSelectedReport(report)}
+                          onClick={() => openReport(report)}
                           className="flex w-full items-center justify-center gap-2 rounded-lg bg-blue-600 px-3 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
                         >
                           {report.status === "submitted"
@@ -1721,6 +1802,7 @@ export default function NurseFhsisReports() {
           onReview={() => processReport("reviewed")}
           onReturn={(notes) => processReport("returned", notes)}
           onForward={() => processReport("forwarded_to_cho")}
+          onPrint={() => printReport(selectedReport)}
           actionLoading={actionLoading}
         />
       )}

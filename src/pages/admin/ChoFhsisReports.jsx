@@ -9,7 +9,7 @@ import {
   FileText,
   LoaderCircle,
   MessageSquare,
-  Printer,
+  Download,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -18,6 +18,7 @@ import {
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
+import { downloadMidwifeNurseFhsisPdf } from "../../utils/midwifeNurseFhsisPdf";
 
 const MONTHS = [
   "January",
@@ -529,7 +530,14 @@ function BhwRecordTable({ data }) {
 /*                           PRINTABLE FHSIS REPORT                           */
 /* -------------------------------------------------------------------------- */
 
-function ReportDocument({ report, midwife, nurse, districtName }) {
+function ReportDocument({
+  report,
+  midwife,
+  nurse,
+  districtName,
+  onDownloadPdf,
+  downloadingPdf,
+}) {
   const data = isObject(report.report_data) ? report.report_data : {};
 
   const sourceSnapshot = isObject(report.source_snapshot)
@@ -605,17 +613,22 @@ function ReportDocument({ report, midwife, nurse, districtName }) {
         <div>
           <h3 className="font-bold text-slate-900">FHSIS Report Preview</h3>
           <p className="text-sm text-slate-500">
-            Print this formatted report or save it as a PDF.
+            Download this consolidated report as a PDF.
           </p>
         </div>
 
         <button
           type="button"
-          onClick={() => window.print()}
+          onClick={onDownloadPdf}
+          disabled={downloadingPdf}
           className="inline-flex items-center gap-2 rounded-lg bg-blue-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-800"
         >
-          <Printer size={17} />
-          Print / Save as PDF
+          {downloadingPdf ? (
+            <LoaderCircle size={17} className="animate-spin" />
+          ) : (
+            <Download size={17} />
+          )}
+          {downloadingPdf ? "Generating PDF..." : "Download PDF"}
         </button>
       </div>
 
@@ -824,6 +837,68 @@ function ReportModal({
 }) {
   const [showReturnForm, setShowReturnForm] = useState(false);
   const [notes, setNotes] = useState("");
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState("");
+
+  const handleDownloadPdf = async () => {
+    if (downloadingPdf) return;
+    setDownloadingPdf(true);
+    setPdfError("");
+    try {
+      const data = isObject(report.report_data) ? report.report_data : {};
+      const snapshot = isObject(report.source_snapshot)
+        ? report.source_snapshot
+        : {};
+      const sourceCounts = isObject(data.source_counts)
+        ? data.source_counts
+        : {};
+      const bnsCount =
+        sourceCounts.bns_child_monthly_reports ??
+        sourceCounts.bns ??
+        (Array.isArray(snapshot.bns_child_monthly_reports)
+          ? snapshot.bns_child_monthly_reports.length
+          : Array.isArray(snapshot.bns_reports)
+            ? snapshot.bns_reports.length
+            : 0);
+      const bhwCount =
+        sourceCounts.bhw_monthly_reports ??
+        sourceCounts.bhw ??
+        (Array.isArray(snapshot.bhw_monthly_reports)
+          ? snapshot.bhw_monthly_reports.length
+          : Array.isArray(snapshot.bhw_reports)
+            ? snapshot.bhw_reports.length
+            : 0);
+
+      await downloadMidwifeNurseFhsisPdf({
+        month: Number(report.reporting_month),
+        year: Number(report.reporting_year),
+        districtName:
+          districtName ||
+          (typeof data.district === "string" ? data.district : "District"),
+        midwifeName:
+          typeof data.prepared_by === "string" && data.prepared_by.trim()
+            ? data.prepared_by
+            : midwife
+              ? displayName(midwife)
+              : `Midwife #${report.midwife_id}`,
+        nurseName: nurse ? displayName(nurse) : `Nurse #${report.nurse_id}`,
+        bnsTotals: isObject(data.bns_child_indicators)
+          ? data.bns_child_indicators
+          : {},
+        bhwTotals: isObject(data.bhw_maternal_community_indicators)
+          ? data.bhw_maternal_community_indicators
+          : {},
+        bnsCount: Number(bnsCount) || 0,
+        bhwCount: Number(bhwCount) || 0,
+      });
+    } catch (err) {
+      console.error("CHO FHSIS PDF export failed:", err);
+      setPdfError(err?.message || "Unable to download this report as PDF.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
   const canReview = report.status === "forwarded_to_cho";
 
   return (
@@ -886,7 +961,18 @@ function ReportModal({
             midwife={midwife}
             nurse={nurse}
             districtName={districtName}
+            onDownloadPdf={handleDownloadPdf}
+            downloadingPdf={downloadingPdf}
           />
+
+          {pdfError && (
+            <div
+              role="alert"
+              className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-700"
+            >
+              {pdfError}
+            </div>
+          )}
 
           {canReview ? (
             <div className="space-y-4 border-t border-slate-200 pt-5 print:hidden">
@@ -935,11 +1021,16 @@ function ReportModal({
                 </button>
                 <button
                   type="button"
-                  onClick={() => window.print()}
+                  onClick={handleDownloadPdf}
+                  disabled={downloadingPdf}
                   className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold"
                 >
-                  <Printer size={17} />
-                  Print / Save PDF
+                  {downloadingPdf ? (
+                    <LoaderCircle size={17} className="animate-spin" />
+                  ) : (
+                    <Download size={17} />
+                  )}
+                  {downloadingPdf ? "Generating PDF..." : "Download PDF"}
                 </button>
                 <button
                   type="button"
@@ -1218,71 +1309,6 @@ export default function ChoFhsisReports() {
 
   return (
     <DashboardLayout>
-      <style>{`
-        @media print {
-          @page { size: A4 landscape; margin: 10mm; }
-
-          /* Hide the application UI completely to prevent blank print pages. */
-          body * { display: none !important; }
-
-          /* Keep only the ancestor chain needed to reach the printable report. */
-          body *:has(#cho-fhsis-print-area) {
-            display: block !important;
-            position: static !important;
-            inset: auto !important;
-            width: auto !important;
-            max-width: none !important;
-            height: auto !important;
-            min-height: 0 !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: visible !important;
-            transform: none !important;
-            box-shadow: none !important;
-            border-radius: 0 !important;
-            background: #fff !important;
-          }
-
-          #cho-fhsis-print-area,
-          #cho-fhsis-print-area * {
-            display: revert !important;
-            visibility: visible !important;
-            color: #000 !important;
-            box-shadow: none !important;
-            text-shadow: none !important;
-          }
-
-          #cho-fhsis-print-area {
-            position: static !important;
-            width: 100% !important;
-            max-width: none !important;
-            margin: 0 !important;
-            padding: 0 !important;
-            overflow: visible !important;
-            background: #fff !important;
-            font-size: 9pt !important;
-          }
-
-          .print\:hidden { display: none !important; }
-
-          #cho-fhsis-print-area table {
-            width: 100% !important;
-            border-collapse: collapse !important;
-            font-size: 8pt !important;
-          }
-
-          #cho-fhsis-print-area th,
-          #cho-fhsis-print-area td {
-            border: 1px solid #999 !important;
-            padding: 3px 5px !important;
-            vertical-align: top !important;
-          }
-
-          #cho-fhsis-print-area section,
-          #cho-fhsis-print-area tr { break-inside: avoid; }
-        }
-      `}</style>
-
       <div className="min-h-screen bg-slate-50 p-4 sm:p-6 lg:p-8">
         <div className="mx-auto max-w-7xl space-y-6">
           <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">

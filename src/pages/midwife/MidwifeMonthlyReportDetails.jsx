@@ -10,6 +10,7 @@ import {
   ChevronUp,
   ClipboardCheck,
   Clock3,
+  Download,
   FileCheck2,
   HeartPulse,
   Home,
@@ -26,6 +27,7 @@ import {
 
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
+import { downloadBhwMonthlyReportPdf } from "../../utils/bhwMonthlyReportPdf";
 
 /* ============================================================
    HELPERS
@@ -846,6 +848,7 @@ export default function MidwifeMonthlyReportDetails() {
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
 
   const [error, setError] = useState("");
 
@@ -854,6 +857,57 @@ export default function MidwifeMonthlyReportDetails() {
   const [reviewNotes, setReviewNotes] = useState("");
 
   const [currentUser, setCurrentUser] = useState(null);
+
+  // Audit metadata only: never copy report_data, pregnancy details, or notes.
+  // Browser-side logs are best-effort; a trusted backend is needed for
+  // tamper-resistant audit records and verified actor identity.
+  async function recordAudit(
+    action,
+    status = "success",
+    extra = {},
+    sourceReport = report,
+  ) {
+    let actorId = currentUser?.id ?? null;
+    if (!actorId) {
+      try {
+        actorId =
+          JSON.parse(localStorage.getItem("user") || "null")?.id ?? null;
+      } catch {
+        actorId = null;
+      }
+    }
+
+    try {
+      const { error: auditError } = await supabase
+        .from("it_audit_logs")
+        .insert({
+          actor_id: actorId,
+          action,
+          entity_type: "bhw_monthly_reports",
+          entity_id: String(sourceReport?.id ?? id),
+          status,
+          details: {
+            module: "Midwife BHW Monthly Reports",
+            bhw_id: sourceReport?.bhw_id ?? null,
+            reporting_month: sourceReport?.month ?? null,
+            reporting_year: sourceReport?.year ?? null,
+            ...extra,
+          },
+        });
+
+      if (auditError) {
+        console.error(
+          "Unable to save BHW monthly report audit event:",
+          auditError,
+        );
+        return false;
+      }
+      return true;
+    } catch (auditException) {
+      console.error("BHW audit request failed:", auditException);
+      return false;
+    }
+  }
 
   /* ==========================================================
      CURRENT USER
@@ -916,6 +970,9 @@ export default function MidwifeMonthlyReportDetails() {
       }
 
       setReport(reportData);
+      // Log only after the requested report has been successfully retrieved.
+      // React StrictMode may trigger duplicate view events in development.
+      await recordAudit("bhw_monthly_report_viewed", "success", {}, reportData);
 
       /* ------------------------------------------------------
          Get BHW
@@ -993,6 +1050,52 @@ export default function MidwifeMonthlyReportDetails() {
   }, [pregnantWomen]);
 
   /* ==========================================================
+     DOWNLOAD THE SUBMITTED BHW REPORT AS PDF
+  ========================================================== */
+
+  async function handleDownloadPdf() {
+    if (!report?.report_data) {
+      setError("The report data is unavailable for PDF export.");
+      return;
+    }
+
+    if (!bhw?.id) {
+      setError(
+        "The submitting BHW could not be loaded. Please refresh the report.",
+      );
+      return;
+    }
+
+    try {
+      setDownloadingPdf(true);
+      setError("");
+
+      // The shared PDF generator looks up active area assignments,
+      // district, and household count using this BHW's ID.
+      await downloadBhwMonthlyReportPdf({
+        report: report.report_data,
+        user: bhw,
+        month: Number(report.month),
+        year: Number(report.year),
+      });
+      const audited = await recordAudit("bhw_monthly_report_pdf_downloaded");
+      if (!audited) {
+        setError(
+          "PDF generated, but audit logging failed. Please notify your administrator.",
+        );
+      }
+    } catch (err) {
+      await recordAudit("bhw_monthly_report_pdf_download_failed", "failed", {
+        error_code: err?.code ?? null,
+      });
+      console.error("Unable to download BHW monthly report PDF:", err);
+      setError(err?.message || "Unable to generate the monthly report PDF.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  }
+
+  /* ==========================================================
      ACCEPT REPORT
   ========================================================== */
 
@@ -1034,6 +1137,7 @@ export default function MidwifeMonthlyReportDetails() {
         .from("bhw_monthly_reports")
         .update(updateData)
         .eq("id", report.id)
+        .eq("status", "submitted")
         .select()
         .single();
 
@@ -1042,13 +1146,30 @@ export default function MidwifeMonthlyReportDetails() {
       }
 
       setReport(data);
+      const audited = await recordAudit(
+        "bhw_monthly_report_reviewed",
+        "success",
+        {
+          previous_status: report.status,
+          new_status: data.status,
+          review_notes_provided: Boolean(reviewNotes.trim()),
+        },
+        data,
+      );
 
-      alert("Monthly pregnancy report has been marked as reviewed.");
+      alert(
+        audited
+          ? "Monthly pregnancy report has been marked as reviewed."
+          : "Report reviewed successfully, but audit logging failed. Please notify your administrator.",
+      );
 
       navigate("/dashboard/midwife/monthly-reports");
     } catch (err) {
       console.error("Error accepting report:", err);
-
+      await recordAudit("bhw_monthly_report_review_failed", "failed", {
+        attempted_status: "reviewed",
+        error_code: err?.code ?? null,
+      });
       setError(err?.message || "Unable to mark the report as reviewed.");
     } finally {
       setSaving(false);
@@ -1089,6 +1210,7 @@ export default function MidwifeMonthlyReportDetails() {
         .from("bhw_monthly_reports")
         .update(updateData)
         .eq("id", report.id)
+        .eq("status", "submitted")
         .select()
         .single();
 
@@ -1098,13 +1220,30 @@ export default function MidwifeMonthlyReportDetails() {
 
       setReport(data);
       setShowReturnModal(false);
+      const audited = await recordAudit(
+        "bhw_monthly_report_returned",
+        "success",
+        {
+          previous_status: report.status,
+          new_status: data.status,
+          review_notes_provided: true,
+        },
+        data,
+      );
 
-      alert("Monthly pregnancy report has been returned to the BHW.");
+      alert(
+        audited
+          ? "Monthly pregnancy report has been returned to the BHW."
+          : "Report returned successfully, but audit logging failed. Please notify your administrator.",
+      );
 
       navigate("/dashboard/midwife/monthly-reports");
     } catch (err) {
       console.error("Error returning report:", err);
-
+      await recordAudit("bhw_monthly_report_return_failed", "failed", {
+        attempted_status: "returned",
+        error_code: err?.code ?? null,
+      });
       setError(err?.message || "Unable to return the report.");
     } finally {
       setSaving(false);
@@ -1253,23 +1392,38 @@ export default function MidwifeMonthlyReportDetails() {
                 </div>
               </div>
 
-              {/* BHW */}
+              {/* PDF export and submitting BHW */}
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <button
+                  type="button"
+                  onClick={handleDownloadPdf}
+                  disabled={downloadingPdf || saving || !bhw?.id}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {downloadingPdf ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  {downloadingPdf ? "Generating PDF..." : "Download PDF"}
+                </button>
 
-              <div className="flex items-center gap-3 rounded-xl bg-gray-50 p-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-orange-100">
-                  <UserRound className="h-5 w-5 text-orange-600" />
-                </div>
+                <div className="flex items-center gap-3 rounded-xl bg-gray-50 p-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-full bg-orange-100">
+                    <UserRound className="h-5 w-5 text-orange-600" />
+                  </div>
 
-                <div>
-                  <p className="text-xs text-gray-500">Submitted by</p>
+                  <div>
+                    <p className="text-xs text-gray-500">Submitted by</p>
 
-                  <p className="font-semibold text-gray-900">
-                    {getFullName(bhw)}
-                  </p>
+                    <p className="font-semibold text-gray-900">
+                      {getFullName(bhw)}
+                    </p>
 
-                  <p className="text-xs text-gray-500">
-                    {bhw?.username || "Barangay Health Worker"}
-                  </p>
+                    <p className="text-xs text-gray-500">
+                      {bhw?.username || "Barangay Health Worker"}
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>

@@ -12,21 +12,59 @@ import {
   HeartPulse,
   Building2,
   UserRound,
-  Menu,
   FileCheck2,
   Baby,
   MapPin,
-  AlertCircle,
   X,
   ChevronRight,
   ChevronLeft,
   ShieldCheck,
-  Stethoscope,
-  Sparkles,
+  ScrollText,
+  Download,
 } from "lucide-react";
+
+import { supabase } from "../lib/supabase";
+
+/* =========================================================
+   AUDIT LOGGING
+========================================================= */
+
+async function logLogoutAudit(user) {
+  if (!user?.id) return false;
+
+  try {
+    const { error } = await supabase.from("it_audit_logs").insert({
+      actor_id: user.id,
+      action: "user_logout",
+      entity_type: "authentication",
+      entity_id: String(user.id),
+      status: "success",
+      details: {
+        module: "Authentication",
+        role: user.role,
+        method: "manual_sign_out",
+      },
+    });
+
+    if (error) {
+      console.warn("Unable to save logout audit log:", error.message);
+      return false;
+    }
+
+    return true;
+  } catch (error) {
+    console.warn("Logout audit logging failed:", error);
+    return false;
+  }
+}
+
+/* =========================================================
+   ROLE CONFIGURATION
+========================================================= */
 
 const ROLE_NAMES = {
   cho_admin: "CHO Administrator",
+  it_admin: "IT Administrator",
   nurse: "Nurse",
   midwife: "Midwife",
   bns: "Barangay Nutrition Scholar",
@@ -35,14 +73,30 @@ const ROLE_NAMES = {
 
 const PROFILE_ROUTES = {
   cho_admin: "/dashboard/admin/profile",
+  it_admin: "/dashboard/it-admin/profile",
   nurse: "/dashboard/nurse/profile",
   midwife: "/dashboard/midwife/profile",
   bns: "/dashboard/bns/profile",
   bhw: "/dashboard/bhw/profile",
 };
 
-// Each role gets its own accent color.
 const ROLE_THEMES = {
+  it_admin: {
+    name: "Slate",
+    accent: "bg-slate-700",
+    accentHover: "hover:bg-slate-800",
+    accentText: "text-slate-700",
+    light: "bg-slate-100",
+    lightHover: "hover:bg-slate-200",
+    border: "border-slate-300",
+    ring: "focus-visible:ring-slate-500",
+    active: "bg-slate-100 text-slate-900 shadow-sm ring-1 ring-slate-200",
+    logo: "bg-gradient-to-br from-slate-600 to-slate-900",
+    avatar: "bg-gradient-to-br from-slate-200 to-slate-300 text-slate-800",
+    dot: "bg-slate-600",
+    badge: "bg-slate-100 text-slate-800",
+  },
+
   cho_admin: {
     name: "Indigo",
     accent: "bg-indigo-600",
@@ -124,7 +178,34 @@ const ROLE_THEMES = {
   },
 };
 
+/* =========================================================
+   SIDEBAR MENUS
+========================================================= */
+
 const MENUS = {
+  it_admin: [
+    {
+      name: "IT Dashboard",
+      path: "/dashboard/it-admin",
+      icon: LayoutDashboard,
+    },
+    {
+      name: "User Management",
+      path: "/dashboard/it-admin/users",
+      icon: Users,
+    },
+    {
+      name: "Data Exports",
+      path: "/dashboard/it-admin/exports",
+      icon: Download,
+    },
+    {
+      name: "Audit Logs",
+      path: "/dashboard/it-admin/audit-logs",
+      icon: ScrollText,
+    },
+  ],
+
   cho_admin: [
     {
       name: "Dashboard",
@@ -169,7 +250,6 @@ const MENUS = {
       path: "/dashboard/nurse/fhsis-reports",
       icon: BarChart3,
     },
-
     {
       name: "District Coverage",
       path: "/dashboard/nurse/district-coverage",
@@ -267,13 +347,17 @@ const MENUS = {
   ],
 };
 
+/* =========================================================
+   MAIN SIDEBAR COMPONENT
+========================================================= */
+
 function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
   const navigate = useNavigate();
   const location = useLocation();
 
   const [showLogoutModal, setShowLogoutModal] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
-  // Safely read the current account.
   let user = null;
 
   try {
@@ -300,6 +384,10 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
   const initials =
     `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase() || "U";
 
+  /* =========================================================
+     NAVIGATION
+  ========================================================= */
+
   const navigateTo = (path) => {
     navigate(path);
     setMobileOpen(false);
@@ -313,16 +401,38 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
     }
   };
 
-  const handleLogout = () => {
-    setShowLogoutModal(false);
-    setMobileOpen(false);
+  /* =========================================================
+     LOGOUT WITH AUDIT LOGGING
+  ========================================================= */
 
-    localStorage.removeItem("user");
-    navigate("/", { replace: true });
+  const handleLogout = async () => {
+    if (loggingOut) return;
+
+    setLoggingOut(true);
+
+    try {
+      // Record logout while the user identity is available.
+      // A failed audit insert must not prevent sign-out.
+      await logLogoutAudit(user);
+    } finally {
+      try {
+        localStorage.removeItem("user");
+      } catch (error) {
+        console.warn("Unable to clear local session:", error);
+      }
+
+      setShowLogoutModal(false);
+      setMobileOpen(false);
+      setLoggingOut(false);
+
+      navigate("/", { replace: true });
+    }
   };
 
-  // Dashboard remains active for its nested routes only when
-  // there is no more specific menu entry matching the URL.
+  /* =========================================================
+     ACTIVE NAVIGATION
+  ========================================================= */
+
   const activeMenuPath = [...menuItems]
     .filter(
       (item) =>
@@ -374,8 +484,8 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             type="button"
             onClick={() => navigateTo(MENUS[role]?.[0]?.path || "/")}
             className={`
-              group flex min-w-0 items-center gap-3 rounded-xl
-              text-left outline-none
+              group flex min-w-0 items-center gap-3
+              rounded-xl text-left outline-none
               focus-visible:ring-2 ${theme.ring}
               ${collapsed ? "lg:justify-center" : ""}
             `}
@@ -391,6 +501,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               `}
             >
               <HeartPulse size={25} strokeWidth={2.2} />
+
               <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-emerald-400" />
             </div>
 
@@ -404,6 +515,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               <h1 className="text-[15px] font-extrabold tracking-tight text-slate-900">
                 MCHMS
               </h1>
+
               <p className="mt-0.5 text-[11px] font-medium text-slate-500">
                 City Health Office
               </p>
@@ -420,9 +532,14 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               hidden h-8 w-8 shrink-0 items-center justify-center
               rounded-lg text-slate-400
               transition hover:bg-slate-100 hover:text-slate-700
-              focus-visible:outline-none focus-visible:ring-2 ${theme.ring}
+              focus-visible:outline-none focus-visible:ring-2
+              ${theme.ring}
               lg:flex
-              ${collapsed ? "lg:absolute lg:-right-3 lg:top-6 lg:z-10 lg:bg-white lg:shadow-sm lg:ring-1 lg:ring-slate-200" : ""}
+              ${
+                collapsed
+                  ? "lg:absolute lg:-right-3 lg:top-6 lg:z-10 lg:bg-white lg:shadow-sm lg:ring-1 lg:ring-slate-200"
+                  : ""
+              }
             `}
           >
             {collapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
@@ -433,13 +550,13 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             type="button"
             onClick={() => setMobileOpen(false)}
             aria-label="Close sidebar"
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 lg:hidden"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 lg:hidden"
           >
             <X size={20} />
           </button>
         </div>
 
-        {/* USER PROFILE CARD */}
+        {/* USER PROFILE */}
         <div
           className={`
             shrink-0 px-3 py-4
@@ -455,8 +572,13 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               border border-slate-100 bg-slate-50/80 p-3
               text-left transition duration-200
               hover:border-slate-200 hover:bg-white hover:shadow-sm
-              focus-visible:outline-none focus-visible:ring-2 ${theme.ring}
-              ${collapsed ? "lg:justify-center lg:border-transparent lg:bg-transparent lg:p-1 lg:hover:bg-slate-100 lg:hover:shadow-none" : ""}
+              focus-visible:outline-none focus-visible:ring-2
+              ${theme.ring}
+              ${
+                collapsed
+                  ? "lg:justify-center lg:border-transparent lg:bg-transparent lg:p-1 lg:hover:bg-slate-100 lg:hover:shadow-none"
+                  : ""
+              }
               ${isProfileActive ? `${theme.light} ${theme.border}` : ""}
             `}
           >
@@ -468,6 +590,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               `}
             >
               {initials}
+
               <span
                 className={`
                   absolute -bottom-0.5 -right-0.5
@@ -490,9 +613,11 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               <div className="mt-1 flex items-center gap-1.5">
                 <span
                   className={`
-                    h-1.5 w-1.5 shrink-0 rounded-full ${theme.dot}
+                    h-1.5 w-1.5 shrink-0 rounded-full
+                    ${theme.dot}
                   `}
                 />
+
                 <p className="truncate text-[11px] font-medium text-slate-500">
                   {roleName}
                 </p>
@@ -508,7 +633,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             {!collapsed && (
               <ChevronRight
                 size={16}
-                className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-slate-500"
+                className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5"
               />
             )}
           </button>
@@ -560,7 +685,6 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                       }
                     `}
                   >
-                    {/* Active indicator */}
                     {isActive && (
                       <span
                         className={`
@@ -602,7 +726,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                     )}
                   </button>
 
-                  {/* Collapsed navigation tooltip */}
+                  {/* COLLAPSED TOOLTIP */}
                   {collapsed && (
                     <div
                       className="
@@ -616,6 +740,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                       "
                     >
                       {item.name}
+
                       <span className="absolute right-full top-1/2 -translate-y-1/2 border-[5px] border-transparent border-r-slate-900" />
                     </div>
                   )}
@@ -625,7 +750,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
           </div>
         </nav>
 
-        {/* BOTTOM AREA — FIXED */}
+        {/* BOTTOM AREA */}
         <div className="shrink-0 border-t border-slate-100 bg-white p-3">
           {!collapsed && (
             <div className={`mb-3 rounded-xl p-3 ${theme.light}`}>
@@ -633,15 +758,18 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                 <div
                   className={`
                     flex h-8 w-8 shrink-0 items-center justify-center
-                    rounded-lg bg-white ${theme.accentText}
+                    rounded-lg bg-white
+                    ${theme.accentText}
                   `}
                 >
                   <ShieldCheck size={17} />
                 </div>
+
                 <div className="min-w-0">
                   <p className="text-[11px] font-bold text-slate-700">
                     Authorized access
                   </p>
+
                   <p className="mt-0.5 truncate text-[10px] text-slate-500">
                     {roleName}
                   </p>
@@ -650,6 +778,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             </div>
           )}
 
+          {/* LOGOUT BUTTON */}
           <div className="group relative">
             <button
               type="button"
@@ -661,7 +790,8 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                 text-[13px] font-semibold text-slate-500
                 transition-all duration-200
                 hover:border-red-100 hover:bg-red-50 hover:text-red-600
-                focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400
+                focus-visible:outline-none focus-visible:ring-2
+                focus-visible:ring-red-400
                 ${collapsed ? "lg:justify-center lg:px-0" : ""}
               `}
             >
@@ -696,11 +826,15 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
         </div>
       </aside>
 
-      {/* LOGOUT CONFIRMATION */}
+      {/* LOGOUT CONFIRMATION MODAL */}
       {showLogoutModal && (
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/50 px-4 backdrop-blur-sm"
-          onClick={() => setShowLogoutModal(false)}
+          onClick={() => {
+            if (!loggingOut) {
+              setShowLogoutModal(false);
+            }
+          }}
         >
           <div
             role="dialog"
@@ -709,18 +843,23 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
             className="w-full max-w-sm overflow-hidden rounded-3xl border border-slate-100 bg-white shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
+            {/* MODAL HEADER */}
             <div className="flex items-center justify-between border-b border-slate-100 px-6 py-4">
               <div className="flex items-center gap-2.5">
                 <div
                   className={`
                     flex h-9 w-9 items-center justify-center
-                    rounded-xl ${theme.light} ${theme.accentText}
+                    rounded-xl
+                    ${theme.light}
+                    ${theme.accentText}
                   `}
                 >
                   <HeartPulse size={20} />
                 </div>
+
                 <div>
                   <p className="text-sm font-bold text-slate-900">MCHMS</p>
+
                   <p className="text-[10px] text-slate-500">Secure session</p>
                 </div>
               </div>
@@ -728,13 +867,15 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               <button
                 type="button"
                 onClick={() => setShowLogoutModal(false)}
+                disabled={loggingOut}
                 aria-label="Close logout confirmation"
-                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                className="flex h-8 w-8 items-center justify-center rounded-lg text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"
               >
                 <X size={18} />
               </button>
             </div>
 
+            {/* MODAL CONTENT */}
             <div className="px-6 pb-6 pt-7 text-center">
               <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-red-50 text-red-500 ring-8 ring-red-50/50">
                 <LogOut size={29} />
@@ -753,11 +894,13 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                 . Are you sure you want to end your session?
               </p>
 
+              {/* CONFIRMATION BUTTONS */}
               <div className="mt-7 grid grid-cols-2 gap-3">
                 <button
                   type="button"
                   onClick={() => setShowLogoutModal(false)}
-                  className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+                  disabled={loggingOut}
+                  className="rounded-xl border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50"
                 >
                   Cancel
                 </button>
@@ -765,16 +908,28 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="flex items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-red-600/15 transition hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2"
+                  disabled={loggingOut}
+                  className="flex items-center justify-center gap-2 rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-red-600/15 transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <LogOut size={16} />
-                  Sign out
+                  {loggingOut ? (
+                    <>
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                      Signing out...
+                    </>
+                  ) : (
+                    <>
+                      <LogOut size={16} />
+                      Sign out
+                    </>
+                  )}
                 </button>
               </div>
             </div>
 
+            {/* MODAL FOOTER */}
             <div className="flex items-center justify-center gap-2 border-t border-slate-100 bg-slate-50/70 px-4 py-3">
               <ShieldCheck size={14} className="text-slate-400" />
+
               <p className="text-[10px] text-slate-400">
                 Remember to protect confidential health records.
               </p>

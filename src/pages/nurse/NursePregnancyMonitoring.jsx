@@ -472,6 +472,59 @@ const fullName = (person) => {
     .join(" ");
 };
 
+/* Audit events contain identifiers and workflow metadata only, not patient notes. */
+const NURSE_AUDIT_PREFIX = "mchms_nurse_pregnancy_audit_v1_";
+const auditFlushInProgress = new Set();
+
+const nurseAuditKey = (user) =>
+  `${NURSE_AUDIT_PREFIX}${user?.id ?? "unknown"}_${user?.district_id ?? "unknown"}`;
+
+const queueNurseAudit = (
+  user,
+  action,
+  status = "success",
+  entityId = null,
+  details = {},
+) => {
+  if (!user?.id) return;
+  const key = nurseAuditKey(user);
+  const pending = JSON.parse(localStorage.getItem(key) || "[]");
+  pending.push({
+    actor_id: user.id,
+    action,
+    entity_type: "pregnancy_monitoring",
+    entity_id: entityId == null ? null : String(entityId),
+    status,
+    details: {
+      module: "nurse_pregnancy_monitoring",
+      district_id: user.district_id ?? null,
+      recorded_at: new Date().toISOString(),
+      ...details,
+    },
+  });
+  localStorage.setItem(key, JSON.stringify(pending));
+};
+
+const flushNurseAudit = async (user) => {
+  if (!user?.id || !navigator.onLine) return;
+  const key = nurseAuditKey(user);
+  if (auditFlushInProgress.has(key)) return;
+  auditFlushInProgress.add(key);
+  try {
+    const pending = JSON.parse(localStorage.getItem(key) || "[]");
+    if (!pending.length) return;
+    const { error } = await supabase.from("it_audit_logs").insert(pending);
+    if (error) throw error;
+    // Retain events appended while the request was in flight.
+    const current = JSON.parse(localStorage.getItem(key) || "[]");
+    localStorage.setItem(key, JSON.stringify(current.slice(pending.length)));
+  } catch (error) {
+    console.warn("Nurse pregnancy audit sync failed:", error);
+  } finally {
+    auditFlushInProgress.delete(key);
+  }
+};
+
 /* =========================================================
    MAIN COMPONENT
 ========================================================= */
@@ -522,6 +575,24 @@ export default function NursePregnancyMonitoring() {
     facility_name: "",
     attended_by: "",
   });
+
+  const recordAudit = (
+    action,
+    status = "success",
+    entityId = null,
+    details = {},
+  ) => {
+    try {
+      queueNurseAudit(user, action, status, entityId, details);
+      if (navigator.onLine) void flushNurseAudit(user);
+    } catch (error) {
+      console.warn("Unable to queue audit event:", error);
+    }
+  };
+
+  useEffect(() => {
+    if (user?.id && navigator.onLine) void flushNurseAudit(user);
+  }, [user]);
 
   // A draft is written only after its form has been initialized/restored.
   // The key includes the Nurse, district, patient, form and visit/referral ID.
@@ -694,6 +765,14 @@ export default function NursePregnancyMonitoring() {
       setHasNurseAuthorization(authorized);
       setAuthorizedThisSession(authorized);
       setAuthorizationChecked(true);
+      recordAudit(
+        authorized
+          ? "nurse_pregnancy_access_verified"
+          : "nurse_pregnancy_access_denied",
+        authorized ? "success" : "failed",
+        null,
+        { authorization_active: authorized },
+      );
 
       if (authorized) {
         await loadPregnancies(true);
@@ -706,6 +785,9 @@ export default function NursePregnancyMonitoring() {
       setNurseAccessError(
         error.message || "Unable to verify your authorization.",
       );
+      recordAudit("nurse_pregnancy_access_check_failed", "failed", null, {
+        error_code: error.code || null,
+      });
       setHasNurseAuthorization(false);
       setAuthorizedThisSession(false);
       setAuthorizationChecked(true);
@@ -985,6 +1067,7 @@ export default function NursePregnancyMonitoring() {
       setDraftStatus("");
       setSelectedPregnancy(pregnancy);
       setLoadingDetails(true);
+      recordAudit("nurse_pregnancy_record_viewed", "success", pregnancy.id);
 
       if (!navigator.onLine) {
         const cached = await readPregnancyCache(user, "details", pregnancy.id);
@@ -1259,6 +1342,9 @@ export default function NursePregnancyMonitoring() {
         setAncVisits((old) =>
           old.map((v) => (v.id === editingAnc.id ? { ...v, ...payload } : v)),
         );
+        recordAudit("nurse_anc_visit_update_queued", "success", editingAnc.id, {
+          pregnancy_id: selectedPregnancy.id,
+        });
         await completeDraft("anc");
         setAncModal(false);
         setEditingAnc(null);
@@ -1279,6 +1365,12 @@ export default function NursePregnancyMonitoring() {
       }
 
       if (result.error) throw result.error;
+      recordAudit(
+        editingAnc ? "nurse_anc_visit_updated" : "nurse_anc_visit_created",
+        "success",
+        editingAnc?.id ?? selectedPregnancy.id,
+        { pregnancy_id: selectedPregnancy.id },
+      );
 
       await completeDraft("anc");
       setAncModal(false);
@@ -1294,6 +1386,15 @@ export default function NursePregnancyMonitoring() {
       );
     } catch (error) {
       console.error("Error saving ANC:", error);
+      recordAudit(
+        "nurse_anc_visit_save_failed",
+        "failed",
+        editingAnc?.id ?? selectedPregnancy?.id,
+        {
+          operation: editingAnc ? "update" : "create",
+          error_code: error.code || null,
+        },
+      );
       alert(error.message || "Failed to save ANC visit.");
     } finally {
       setSaving(false);
@@ -1320,6 +1421,9 @@ export default function NursePregnancyMonitoring() {
         .eq("id", visit.id);
 
       if (error) throw error;
+      recordAudit("nurse_anc_visit_deleted", "success", visit.id, {
+        pregnancy_id: selectedPregnancy.id,
+      });
 
       await openPregnancy(selectedPregnancy);
       await loadPregnancies();
@@ -1327,6 +1431,9 @@ export default function NursePregnancyMonitoring() {
       alert("ANC visit deleted.");
     } catch (error) {
       console.error(error);
+      recordAudit("nurse_anc_visit_delete_failed", "failed", visit.id, {
+        error_code: error.code || null,
+      });
       alert(error.message || "Failed to delete ANC visit.");
     }
   };
@@ -1388,6 +1495,15 @@ export default function NursePregnancyMonitoring() {
               : r,
           ),
         );
+        recordAudit(
+          "nurse_pregnancy_referral_review_queued",
+          "success",
+          selectedReferral.id,
+          {
+            pregnancy_id: selectedPregnancy?.id,
+            review_status: referralStatus,
+          },
+        );
         await completeDraft("referral");
         setReferralModal(false);
         await refreshPendingOffline();
@@ -1408,6 +1524,12 @@ export default function NursePregnancyMonitoring() {
         .eq("id", selectedReferral.id);
 
       if (error) throw error;
+      recordAudit(
+        "nurse_pregnancy_referral_reviewed",
+        "success",
+        selectedReferral.id,
+        { pregnancy_id: selectedPregnancy?.id, review_status: referralStatus },
+      );
 
       await completeDraft("referral");
       setReferralModal(false);
@@ -1416,6 +1538,12 @@ export default function NursePregnancyMonitoring() {
       alert("Referral updated successfully.");
     } catch (error) {
       console.error(error);
+      recordAudit(
+        "nurse_pregnancy_referral_review_failed",
+        "failed",
+        selectedReferral?.id,
+        { error_code: error.code || null },
+      );
       alert(error.message || "Failed to update referral.");
     } finally {
       setSaving(false);
@@ -1462,6 +1590,12 @@ export default function NursePregnancyMonitoring() {
             p.id === selectedPregnancy.id ? { ...p, ...changes } : p,
           ),
         );
+        recordAudit(
+          "nurse_pregnancy_outcome_update_queued",
+          "success",
+          selectedPregnancy.id,
+          { new_status: outcomeForm.status },
+        );
         await completeDraft("outcome");
         setOutcomeModal(false);
         await refreshPendingOffline();
@@ -1485,6 +1619,15 @@ export default function NursePregnancyMonitoring() {
         .eq("id", selectedPregnancy.id);
 
       if (error) throw error;
+      recordAudit(
+        "nurse_pregnancy_outcome_updated",
+        "success",
+        selectedPregnancy.id,
+        {
+          previous_status: selectedPregnancy.status,
+          new_status: outcomeForm.status,
+        },
+      );
 
       await completeDraft("outcome");
       setOutcomeModal(false);
@@ -1500,6 +1643,12 @@ export default function NursePregnancyMonitoring() {
       alert("Pregnancy outcome updated successfully.");
     } catch (error) {
       console.error(error);
+      recordAudit(
+        "nurse_pregnancy_outcome_update_failed",
+        "failed",
+        selectedPregnancy?.id,
+        { error_code: error.code || null },
+      );
       alert(error.message || "Failed to update pregnancy outcome.");
     } finally {
       setSaving(false);
@@ -1530,6 +1679,12 @@ export default function NursePregnancyMonitoring() {
           ),
         );
         setOutcomeForm((prev) => ({ ...prev, status }));
+        recordAudit(
+          "nurse_pregnancy_status_update_queued",
+          "success",
+          selectedPregnancy.id,
+          { previous_status: selectedPregnancy.status, new_status: status },
+        );
         await refreshPendingOffline();
         setOfflineNotice(
           "Pregnancy status queued. It is not yet saved to Supabase.",
@@ -1542,6 +1697,12 @@ export default function NursePregnancyMonitoring() {
         .eq("id", selectedPregnancy.id);
 
       if (error) throw error;
+      recordAudit(
+        "nurse_pregnancy_status_updated",
+        "success",
+        selectedPregnancy.id,
+        { previous_status: selectedPregnancy.status, new_status: status },
+      );
 
       setSelectedPregnancy((prev) => ({ ...prev, status }));
       await loadPregnancies();
@@ -1549,6 +1710,12 @@ export default function NursePregnancyMonitoring() {
       setOutcomeForm((prev) => ({ ...prev, status }));
     } catch (error) {
       console.error(error);
+      recordAudit(
+        "nurse_pregnancy_status_update_failed",
+        "failed",
+        selectedPregnancy?.id,
+        { error_code: error.code || null },
+      );
       alert(error.message || "Failed to update status.");
     }
   };
@@ -1564,6 +1731,10 @@ export default function NursePregnancyMonitoring() {
     setSyncing(true);
     try {
       const count = await syncPregnancyActions(user);
+      recordAudit("nurse_pregnancy_offline_sync_completed", "success", null, {
+        synced_changes: count,
+      });
+      await flushNurseAudit(user);
       await refreshPendingOffline();
       if (hasNurseAuthorization) {
         await loadPregnancies(true);
@@ -1571,6 +1742,9 @@ export default function NursePregnancyMonitoring() {
       }
       setOfflineNotice(`${count} change(s) synchronized.`);
     } catch (error) {
+      recordAudit("nurse_pregnancy_offline_sync_failed", "failed", null, {
+        error_code: error.code || null,
+      });
       await refreshPendingOffline();
       setOfflineNotice(`Sync stopped: ${error.message}`);
     } finally {
@@ -1583,6 +1757,7 @@ export default function NursePregnancyMonitoring() {
     refreshPendingOffline();
     const onOnline = () => {
       setOnline(true);
+      void flushNurseAudit(user);
       setOfflineNotice(
         "Connection restored. Use Sync Now to submit pending changes.",
       );

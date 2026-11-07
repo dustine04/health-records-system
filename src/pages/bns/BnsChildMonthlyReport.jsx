@@ -9,9 +9,12 @@ import {
   AlertCircle,
   CheckCircle2,
   RotateCcw,
+  Download,
+  Loader2,
 } from "lucide-react";
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
+import { downloadBnsChildMonthlyReportPdf } from "../../utils/bnsChildMonthlyReportPdf";
 /* =========================================================
    HELPERS
 ========================================================= */
@@ -162,6 +165,7 @@ export default function BnsChildMonthlyReport() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
   const [children, setChildren] = useState([]);
   const [monitoringData, setMonitoringData] = useState({
     newborn: [],
@@ -184,6 +188,32 @@ export default function BnsChildMonthlyReport() {
   const [reportData, setReportData] = useState(createEmptyReportData());
   const [message, setMessage] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
+  // Best-effort audit logging; no child names or clinical values.
+  async function writeAudit(action, auditStatus = "success", extra = {}) {
+    if (!user?.id) return;
+    try {
+      const { error } = await supabase.from("it_audit_logs").insert({
+        actor_id: user.id,
+        action,
+        entity_type: "bns_child_monthly_reports",
+        entity_id: String(extra.report_id ?? reportId ?? ""),
+        status: auditStatus,
+        details: {
+          module: "bns_child_monthly_report",
+          actor_role: user.role || "bns",
+          barangay_id: selectedBarangayId || null,
+          report_month: Number(reportMonth),
+          report_year: Number(reportYear),
+          ...extra,
+        },
+      });
+      if (error)
+        console.warn("Audit log insert failed:", error.code || error.message);
+    } catch (auditError) {
+      console.warn("Audit log unavailable:", auditError);
+    }
+  }
+
   /* =======================================================
      LOAD USER
   ======================================================= */
@@ -799,12 +829,14 @@ export default function BnsChildMonthlyReport() {
     /*
       Submitted reports are also locked.
     */
-    if (status === "submitted" && nextStatus !== "draft") {
+    if (status === "submitted") {
       alert(
         "This report has already been submitted and is waiting for Midwife review.",
       );
       return;
     }
+    const previousStatus = status;
+    const previousReportId = reportId;
     try {
       setSaving(true);
       setMessage("");
@@ -854,6 +886,20 @@ export default function BnsChildMonthlyReport() {
       if (result.error) {
         throw result.error;
       }
+      const auditAction =
+        nextStatus === "submitted"
+          ? previousStatus === "returned"
+            ? "bns_child_report_resubmitted"
+            : "bns_child_report_submitted"
+          : previousReportId
+            ? "bns_child_report_draft_updated"
+            : "bns_child_report_draft_created";
+      await writeAudit(auditAction, "success", {
+        report_id: result.data.id,
+        previous_status: previousStatus,
+        new_status: result.data.status,
+        operation: previousReportId ? "update" : "insert",
+      });
       setReportId(result.data.id);
       setStatus(result.data.status);
       setReportData(result.data.report_data || snapshot);
@@ -866,11 +912,71 @@ export default function BnsChildMonthlyReport() {
       }
     } catch (error) {
       console.error(error);
+      await writeAudit(
+        nextStatus === "submitted"
+          ? "bns_child_report_submission_failed"
+          : "bns_child_report_draft_save_failed",
+        "failed",
+        {
+          previous_status: previousStatus,
+          requested_status: nextStatus,
+          error_code: error?.code || null,
+        },
+      );
       setErrorMessage(error.message || "Unable to save the monthly report.");
     } finally {
       setSaving(false);
     }
   }
+  async function handleDownloadPdf() {
+    if (downloadingPdf) return;
+    setDownloadingPdf(true);
+    try {
+      setErrorMessage("");
+
+      // Get the selected barangay ID from the current selection.
+      // Fall back to the selected barangay object if necessary.
+      const barangayId = selectedBarangayId || selectedBarangay?.id || "";
+
+      if (!barangayId) {
+        throw new Error(
+          "No barangay was found. Please select an assigned barangay.",
+        );
+      }
+
+      console.log("BNS PDF Export:", {
+        userId: user?.id,
+        barangayId,
+        barangayName: selectedBarangay?.name,
+        reportMonth,
+        reportYear,
+      });
+
+      await downloadBnsChildMonthlyReportPdf({
+        user,
+        reportData,
+        displayData,
+        monitoringData,
+        reportMonth,
+        reportYear,
+        selectedBarangayId: barangayId,
+        status,
+      });
+      await writeAudit("bns_child_report_pdf_downloaded", "success", {
+        report_status: status,
+      });
+    } catch (error) {
+      console.error("BNS PDF export failed:", error);
+      await writeAudit("bns_child_report_pdf_download_failed", "failed", {
+        report_status: status,
+        error_code: error?.code || null,
+      });
+      setErrorMessage(error?.message || "Unable to generate the PDF report.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  }
+
   /* =======================================================
      HANDLE SAVE DRAFT
   ======================================================= */
@@ -1085,7 +1191,27 @@ export default function BnsChildMonthlyReport() {
                 </p>
               </div>
             </div>
-            <StatusBadge />
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={handleDownloadPdf}
+                disabled={
+                  downloadingPdf ||
+                  loading ||
+                  loadingMonitoring ||
+                  !selectedBarangayId
+                }
+                className="inline-flex items-center justify-center gap-2 rounded-xl bg-green-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {downloadingPdf ? (
+                  <Loader2 size={18} className="animate-spin" />
+                ) : (
+                  <Download size={18} />
+                )}
+                {downloadingPdf ? "Generating PDF..." : "Download PDF"}
+              </button>
+              <StatusBadge />
+            </div>
           </div>
         </div>
         {/* ===================================================
