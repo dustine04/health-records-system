@@ -198,6 +198,7 @@ function MidwifeDashboard() {
   const [errorMessage, setErrorMessage] = useState("");
 
   const [pregnancies, setPregnancies] = useState([]);
+  const [homeVisits, setHomeVisits] = useState([]);
   const [workerCount, setWorkerCount] = useState(0);
 
   const [reportCounts, setReportCounts] = useState({
@@ -444,24 +445,22 @@ function MidwifeDashboard() {
        * Otherwise, if a district is assigned, use that district.
        * If neither is assigned, return no pregnancy records.
        */
-      if (user.barangay_id != null) {
-        combined = combined.filter((pregnancy) => {
-          const barangayId =
-            pregnancy.resident?.households?.local_areas?.barangays?.id;
-
-          return (
-            barangayId != null &&
-            String(barangayId) === String(user.barangay_id)
-          );
-        });
-      } else if (user.district_id != null) {
+      if (user.district_id != null) {
         combined = combined.filter((pregnancy) => {
           const districtId =
             pregnancy.resident?.households?.local_areas?.barangays?.district_id;
-
           return (
             districtId != null &&
             String(districtId) === String(user.district_id)
+          );
+        });
+      } else if (user.barangay_id != null) {
+        combined = combined.filter((pregnancy) => {
+          const barangayId =
+            pregnancy.resident?.households?.local_areas?.barangays?.id;
+          return (
+            barangayId != null &&
+            String(barangayId) === String(user.barangay_id)
           );
         });
       } else {
@@ -469,6 +468,39 @@ function MidwifeDashboard() {
       }
 
       setPregnancies(combined);
+
+      // BHW home visits are separate from ANC clinical check-ups.
+      // Fetch only pregnancies within the midwife's authorized district.
+      const scopedPregnancyIds = combined
+        .map((pregnancy) => pregnancy.id)
+        .filter(Boolean);
+      const latestHomeVisitMap = new Map();
+      if (scopedPregnancyIds.length) {
+        // Batch IDs to avoid excessively large PostgREST URL filters.
+        for (
+          let offset = 0;
+          offset < scopedPregnancyIds.length;
+          offset += 100
+        ) {
+          const batch = scopedPregnancyIds.slice(offset, offset + 100);
+          const { data: visits, error: visitsError } = await supabase
+            .from("pregnant_woman_home_visits")
+            .select(
+              "id, pregnant_woman_id, visit_number, visit_date, next_visit_date",
+            )
+            .in("pregnant_woman_id", batch)
+            .order("visit_date", { ascending: false })
+            .order("visit_number", { ascending: false });
+          if (visitsError) throw visitsError;
+          for (const visit of visits || []) {
+            const pregnancyId = String(visit.pregnant_woman_id);
+            if (!latestHomeVisitMap.has(pregnancyId)) {
+              latestHomeVisitMap.set(pregnancyId, visit);
+            }
+          }
+        }
+      }
+      setHomeVisits(Array.from(latestHomeVisitMap.values()));
 
       /*
        * STEP 5:
@@ -583,6 +615,68 @@ function MidwifeDashboard() {
         ),
       })),
     [pregnancies],
+  );
+
+  // Keep ANC statistics unchanged. Combine both services for the bell only.
+  const appointmentNotifications = useMemo(() => {
+    const results = [];
+    const pregnancyById = new Map(pregnancies.map((p) => [String(p.id), p]));
+    const append = (pregnancy, visitId, type, date) => {
+      if (!pregnancy || !isActivePregnancy(pregnancy) || !date) return;
+      const status = getCheckupStatus(date, pregnancy.status);
+      if (!["missed", "today", "upcoming"].includes(status.key)) return;
+      results.push({
+        id: `${type}-${visitId || pregnancy.id}`,
+        name: getFullName(pregnancy.resident),
+        barangay:
+          pregnancy.resident?.households?.local_areas?.barangays?.name ||
+          "Unknown barangay",
+        type,
+        date,
+        status: status.key,
+        daysOverdue: status.daysOverdue || 0,
+        daysUntil: status.daysUntil || 0,
+      });
+    };
+    for (const pregnancy of enrichedPregnancies) {
+      append(
+        pregnancy,
+        pregnancy.latest_anc_visit?.id,
+        "anc",
+        pregnancy.next_visit_date,
+      );
+    }
+    for (const visit of homeVisits) {
+      append(
+        pregnancyById.get(String(visit.pregnant_woman_id)),
+        visit.id,
+        "home",
+        visit.next_visit_date,
+      );
+    }
+    const priority = { missed: 0, today: 1, upcoming: 2 };
+    return results.sort(
+      (a, b) =>
+        priority[a.status] - priority[b.status] ||
+        String(a.date).localeCompare(String(b.date)),
+    );
+  }, [pregnancies, enrichedPregnancies, homeVisits]);
+
+  const notificationCounts = useMemo(
+    () => ({
+      total: appointmentNotifications.length,
+      missedANC: appointmentNotifications.filter(
+        (n) => n.type === "anc" && n.status === "missed",
+      ).length,
+      missedHome: appointmentNotifications.filter(
+        (n) => n.type === "home" && n.status === "missed",
+      ).length,
+      dueToday: appointmentNotifications.filter((n) => n.status === "today")
+        .length,
+      upcoming: appointmentNotifications.filter((n) => n.status === "upcoming")
+        .length,
+    }),
+    [appointmentNotifications],
   );
 
   const statistics = useMemo(() => {
@@ -961,124 +1055,161 @@ function MidwifeDashboard() {
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              {/* MISSED CHECK-UP NOTIFICATIONS */}
+              {/* ANC AND BHW HOME-VISIT NOTIFICATIONS */}
               <div className="relative">
                 <button
                   type="button"
                   onClick={() =>
                     setShowMissedNotifications((current) => !current)
                   }
-                  aria-label={`Missed check-up notifications: ${statistics.missedCheckups.length}`}
+                  aria-label={`${notificationCounts.total} maternal appointment alerts`}
                   aria-expanded={showMissedNotifications}
-                  className="relative inline-flex h-11 w-11 items-center justify-center rounded-xl border border-white/30 bg-white/10 text-white transition hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white/70"
+                  className="relative inline-flex h-11 w-11 items-center justify-center rounded-xl border border-white/30 bg-white/10 text-white transition hover:bg-white/20"
                 >
-                  <Bell size={19} />
-                  {statistics.missedCheckups.length > 0 && (
-                    <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-teal-700 bg-red-500 px-1 text-[10px] font-bold leading-none text-white">
-                      {statistics.missedCheckups.length > 99
+                  <Bell size={20} />
+                  {notificationCounts.total > 0 && (
+                    <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-teal-700 bg-red-500 px-1 text-[10px] font-bold text-white">
+                      {notificationCounts.total > 99
                         ? "99+"
-                        : statistics.missedCheckups.length}
+                        : notificationCounts.total}
                     </span>
                   )}
                 </button>
-
                 {showMissedNotifications && (
                   <div
                     role="dialog"
-                    aria-label="Missed check-up notifications"
-                    className="absolute right-0 top-full z-[100] mt-3 w-[min(22rem,calc(100vw-2.5rem))] max-h-[min(75vh,32rem)] overflow-y-auto rounded-2xl border border-gray-200 bg-white text-left text-gray-800 shadow-2xl"
+                    aria-label="Maternal health notifications"
+                    className="absolute right-0 top-full z-[100] mt-3 w-[min(24rem,calc(100vw-2.5rem))] max-h-[75vh] overflow-y-auto rounded-2xl border border-gray-200 bg-white text-left text-gray-800 shadow-2xl"
                   >
-                    <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
+                    <div className="sticky top-0 z-10 flex items-center justify-between border-b border-gray-100 bg-white px-4 py-3">
                       <div>
                         <p className="font-bold text-gray-800">
-                          Missed check-ups
+                          Maternal Health Notifications
                         </p>
-                        <p className="mt-0.5 text-xs text-gray-500">
-                          {statistics.missedCheckups.length} overdue{" "}
-                          {statistics.missedCheckups.length === 1
-                            ? "appointment"
-                            : "appointments"}
+                        <p className="mt-1 text-xs text-gray-500">
+                          {notificationCounts.total} appointments requiring
+                          attention
                         </p>
                       </div>
                       <button
                         type="button"
                         onClick={() => setShowMissedNotifications(false)}
                         aria-label="Close notifications"
-                        className="rounded-lg p-1.5 text-gray-400 transition hover:bg-gray-100 hover:text-gray-700"
+                        className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
                       >
                         <X size={17} />
                       </button>
                     </div>
-
-                    {statistics.missedCheckups.length === 0 ? (
-                      <div className="px-4 py-8 text-center">
+                    <div className="grid grid-cols-2 gap-2 border-b border-gray-100 p-3">
+                      {[
+                        [
+                          "Missed ANC",
+                          notificationCounts.missedANC,
+                          "bg-red-50 text-red-700",
+                        ],
+                        [
+                          "Missed Home Visits",
+                          notificationCounts.missedHome,
+                          "bg-orange-50 text-orange-700",
+                        ],
+                        [
+                          "Due Today",
+                          notificationCounts.dueToday,
+                          "bg-amber-50 text-amber-800",
+                        ],
+                        [
+                          "Upcoming (7 Days)",
+                          notificationCounts.upcoming,
+                          "bg-blue-50 text-blue-700",
+                        ],
+                      ].map(([label, count, style]) => (
+                        <div key={label} className={`rounded-xl p-3 ${style}`}>
+                          <p className="text-xs">{label}</p>
+                          <p className="mt-1 text-xl font-bold">{count}</p>
+                        </div>
+                      ))}
+                    </div>
+                    {appointmentNotifications.length === 0 ? (
+                      <div className="px-4 py-10 text-center">
                         <CheckCircle2
+                          size={28}
                           className="mx-auto text-green-500"
-                          size={26}
                         />
-                        <p className="mt-2 text-sm font-semibold text-gray-700">
-                          No missed check-ups
+                        <p className="mt-2 text-sm font-semibold">
+                          No appointment alerts
                         </p>
                         <p className="mt-1 text-xs text-gray-500">
-                          There are no overdue ANC appointments in your assigned
-                          area.
+                          No overdue, due-today, or upcoming ANC or home visits
+                          found.
                         </p>
                       </div>
                     ) : (
-                      <>
-                        <div className="max-h-80 overflow-y-auto">
-                          {statistics.missedCheckups
-                            .slice(0, 8)
-                            .map((pregnancy) => {
-                              const barangay =
-                                pregnancy.resident?.households?.local_areas
-                                  ?.barangays;
-                              const days = pregnancy.checkupStatus.daysOverdue;
-
-                              return (
-                                <button
-                                  key={pregnancy.id}
-                                  type="button"
-                                  onClick={openMissedNotifications}
-                                  className="flex w-full items-start gap-3 border-b border-gray-100 px-4 py-3 text-left transition hover:bg-red-50"
-                                >
-                                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100 text-red-600">
-                                    <AlertTriangle size={17} />
-                                  </span>
-                                  <span className="min-w-0 flex-1">
-                                    <span className="block truncate text-sm font-semibold text-gray-800">
-                                      {getFullName(pregnancy.resident)}
-                                    </span>
-                                    <span className="mt-0.5 block text-xs text-gray-500">
-                                      {barangay?.name ||
-                                        "Barangay not available"}{" "}
-                                      · Due{" "}
-                                      {formatDate(pregnancy.next_visit_date)}
-                                    </span>
-                                    <span className="mt-1 block text-xs font-semibold text-red-600">
-                                      {days} day{days === 1 ? "" : "s"} overdue
-                                    </span>
-                                  </span>
-                                  <ChevronRight
-                                    size={16}
-                                    className="mt-2 shrink-0 text-gray-400"
-                                  />
-                                </button>
-                              );
-                            })}
-                        </div>
-                        <div className="bg-gray-50 p-3">
+                      <div className="max-h-80 overflow-y-auto">
+                        {appointmentNotifications.map((notice) => (
                           <button
+                            key={notice.id}
                             type="button"
-                            onClick={openMissedNotifications}
-                            className="flex w-full items-center justify-center gap-2 rounded-lg bg-teal-700 px-3 py-2.5 text-sm font-semibold text-white transition hover:bg-teal-800"
+                            onClick={() => {
+                              setShowMissedNotifications(false);
+                              if (notice.type === "anc") {
+                                selectAppointmentFilter(notice.status);
+                              } else {
+                                openPregnancyMonitoring();
+                              }
+                            }}
+                            className="flex w-full items-start gap-3 border-b border-gray-100 px-4 py-3 text-left hover:bg-gray-50"
                           >
-                            View all missed check-ups
-                            <ArrowRight size={15} />
+                            <span
+                              className={`mt-0.5 rounded-full p-2 ${notice.status === "missed" ? "bg-red-100 text-red-600" : "bg-blue-100 text-blue-600"}`}
+                            >
+                              {notice.status === "missed" ? (
+                                <AlertTriangle size={17} />
+                              ) : (
+                                <CalendarDays size={17} />
+                              )}
+                            </span>
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm font-semibold text-gray-900">
+                                {notice.name}
+                              </span>
+                              <span className="mt-1 block text-xs font-medium text-gray-600">
+                                {notice.type === "anc"
+                                  ? "ANC Check-up"
+                                  : "BHW Home Visit"}
+                              </span>
+                              <span className="mt-1 block text-xs text-gray-500">
+                                {notice.barangay} · {formatDate(notice.date)}
+                              </span>
+                              <span
+                                className={`mt-1 block text-xs font-semibold ${notice.status === "missed" ? "text-red-600" : "text-blue-600"}`}
+                              >
+                                {notice.status === "missed"
+                                  ? `${notice.daysOverdue} day(s) overdue`
+                                  : notice.status === "today"
+                                    ? "Due today"
+                                    : `In ${notice.daysUntil} day(s)`}
+                              </span>
+                            </span>
+                            <ChevronRight
+                              size={16}
+                              className="mt-2 shrink-0 text-gray-400"
+                            />
                           </button>
-                        </div>
-                      </>
+                        ))}
+                      </div>
                     )}
+                    <div className="border-t border-gray-100 bg-gray-50 p-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowMissedNotifications(false);
+                          openPregnancyMonitoring();
+                        }}
+                        className="flex w-full items-center justify-center gap-2 rounded-lg bg-teal-700 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-800"
+                      >
+                        Open Pregnancy Monitoring <ArrowRight size={15} />
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>

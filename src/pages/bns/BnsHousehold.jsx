@@ -93,6 +93,62 @@ const flushBnsAudits = async () => {
   }
 };
 
+// Read the existing household mutation queue without changing its schema.
+function readHouseholdPendingQueue(userId) {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB is unavailable in this browser."));
+      return;
+    }
+    const request = indexedDB.open("mchms-bns-households-v1");
+    request.onerror = () =>
+      reject(request.error || new Error("Unable to open offline storage."));
+    request.onupgradeneeded = () => request.transaction.abort();
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("queue")) {
+        db.close();
+        reject(new Error("Household offline queue was not found."));
+        return;
+      }
+      const transaction = db.transaction("queue", "readonly");
+      const query = transaction.objectStore("queue").getAll();
+      query.onsuccess = () => {
+        resolve(
+          (query.result || [])
+            .filter((entry) => String(entry.userId) === String(userId))
+            .sort((a, b) =>
+              String(a.createdAt || "").localeCompare(
+                String(b.createdAt || ""),
+              ),
+            ),
+        );
+      };
+      query.onerror = () =>
+        reject(query.error || new Error("Unable to read queued changes."));
+      transaction.oncomplete = () => db.close();
+      transaction.onabort = () => db.close();
+    };
+  });
+}
+
+function describeHouseholdPending(entry) {
+  const type = String(entry.type || "change");
+  const isResident = type.startsWith("resident-");
+  const isDelete = type.endsWith("-delete");
+  const isUpdate =
+    !isDelete && !String(entry.entityId || "").startsWith("local:");
+  const name = isResident
+    ? [entry.data?.first_name, entry.data?.middle_name, entry.data?.last_name]
+        .filter(Boolean)
+        .join(" ")
+    : entry.data?.household_head || entry.data?.household_code;
+  return {
+    title: `${isResident ? "Household member" : "Household"} — ${isDelete ? "Delete" : isUpdate ? "Save / update" : "Add"}`,
+    detail: name || `Record ID: ${entry.entityId || "Unknown"}`,
+  };
+}
+
 const getDraftKey = (userId, kind, householdId = "new", recordId = "new") =>
   ["bns", userId, kind, householdId, recordId]
     .map((value) => encodeURIComponent(String(value)))
@@ -279,6 +335,27 @@ function BnsHousehold() {
   const [pending, setPending] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState("");
+  const [showPendingChanges, setShowPendingChanges] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [pendingError, setPendingError] = useState("");
+
+  const loadPendingChanges = useCallback(async () => {
+    if (!userId) return;
+    setPendingLoading(true);
+    setPendingError("");
+    try {
+      setPendingChanges(await readHouseholdPendingQueue(userId));
+    } catch (error) {
+      setPendingError(error.message || "Unable to view pending changes.");
+    } finally {
+      setPendingLoading(false);
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (showPendingChanges) void loadPendingChanges();
+  }, [showPendingChanges, pending, loadPendingChanges]);
 
   /* =====================================================
      DRAFT STATE
@@ -1201,6 +1278,15 @@ function BnsHousehold() {
 
           <button
             type="button"
+            onClick={() => setShowPendingChanges(true)}
+            className={secondaryButton}
+          >
+            <Clock3 size={16} />
+            View pending changes ({pending})
+          </button>
+
+          <button
+            type="button"
             onClick={() => loadData(true)}
             disabled={!online || syncing}
             className={secondaryButton}
@@ -1229,16 +1315,6 @@ function BnsHousehold() {
               </p>
             </div>
           </div>
-
-          <button
-            type="button"
-            onClick={openAddModal}
-            disabled={draftBusy || draftLoading}
-            className={primaryButton}
-          >
-            <Plus size={18} />
-            Add Household
-          </button>
         </div>
 
         {/* ASSIGNED AREAS */}
@@ -1410,6 +1486,102 @@ function BnsHousehold() {
           </div>
         </div>
 
+        {showPendingChanges && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-3">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="pending-household-title"
+              className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-4 border-b p-5">
+                <div>
+                  <h2
+                    id="pending-household-title"
+                    className="text-lg font-bold text-gray-800"
+                  >
+                    Pending household changes
+                  </h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Changes awaiting synchronization on this device. Unfinished
+                    drafts are stored separately.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Close pending changes"
+                  onClick={() => setShowPendingChanges(false)}
+                  className="rounded-lg p-2 hover:bg-gray-100"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-5">
+                {pendingLoading ? (
+                  <p className="text-sm text-gray-500">
+                    Reading local changes...
+                  </p>
+                ) : pendingError ? (
+                  <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700">
+                    {pendingError}
+                  </p>
+                ) : pendingChanges.length === 0 ? (
+                  <p className="rounded-xl bg-green-50 p-4 text-sm text-green-700">
+                    No pending household changes on this device.
+                  </p>
+                ) : (
+                  pendingChanges.map((entry, index) => {
+                    const description = describeHouseholdPending(entry);
+                    return (
+                      <div
+                        key={entry.uuid ?? index}
+                        className="rounded-xl border border-amber-200 bg-amber-50/50 p-4"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="font-semibold text-gray-800">
+                              {description.title}
+                            </p>
+                            <p className="mt-1 text-sm text-gray-600">
+                              {description.detail}
+                            </p>
+                          </div>
+                          <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-800">
+                            {entry.syncStatus === "audit_pending"
+                              ? "Awaiting audit sync"
+                              : "Awaiting sync"}
+                          </span>
+                        </div>
+                        {entry.createdAt && (
+                          <p className="mt-2 text-xs text-gray-500">
+                            Queued: {formatDateTime(entry.createdAt)}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              <div className="flex justify-end gap-2 border-t p-4">
+                <button
+                  type="button"
+                  onClick={() => void loadPendingChanges()}
+                  className={secondaryButton}
+                >
+                  Refresh list
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingChanges(false)}
+                  className={primaryButton}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* =================================================
             ADD / EDIT HOUSEHOLD MODAL
         ================================================= */}
@@ -1488,15 +1660,6 @@ function BnsHousehold() {
               </Field>
 
               <div className="flex flex-wrap justify-end gap-3 border-t pt-4">
-                <button
-                  type="button"
-                  onClick={() => void saveDraftAndClose("household")}
-                  disabled={draftBusy || householdSaving}
-                  className={secondaryButton}
-                >
-                  Save Draft & Close
-                </button>
-
                 <button
                   type="submit"
                   disabled={householdSaving || draftBusy || draftLoading}
@@ -1934,15 +2097,6 @@ function BnsHousehold() {
               {/* BUTTONS */}
 
               <div className="flex flex-wrap justify-end gap-3 border-t pt-5">
-                <button
-                  type="button"
-                  onClick={() => void saveDraftAndClose("resident")}
-                  disabled={residentSaving || draftBusy}
-                  className={secondaryButton}
-                >
-                  Save Draft & Close
-                </button>
-
                 <button
                   type="submit"
                   disabled={residentSaving || draftBusy || draftLoading}

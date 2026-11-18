@@ -18,6 +18,7 @@ import {
   Users as UsersIcon,
   Clock3,
   ShieldCheck,
+  ListChecks,
 } from "lucide-react";
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
@@ -57,6 +58,8 @@ export default function Users() {
   const [syncing, setSyncing] = useState(false);
   const [online, setOnline] = useState(() => navigator.onLine);
   const [pendingCount, setPendingCount] = useState(0);
+  const [pendingItems, setPendingItems] = useState([]);
+  const [showPending, setShowPending] = useState(false);
   const [cacheReady, setCacheReady] = useState(false);
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState("all");
@@ -89,7 +92,9 @@ export default function Users() {
 
   const refreshPending = useCallback(async () => {
     try {
-      setPendingCount((await pendingStaffActions(getAdmin())).length);
+      const items = await pendingStaffActions(getAdmin());
+      setPendingItems(items || []);
+      setPendingCount((items || []).length);
     } catch (e) {
       console.error("Pending staff actions:", e);
     }
@@ -454,6 +459,17 @@ export default function Users() {
             </span>
             <button
               type="button"
+              onClick={async () => {
+                await refreshPending();
+                setShowPending(true);
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-white px-4 py-2.5 text-sm font-semibold text-amber-800 hover:bg-amber-50"
+            >
+              <ListChecks size={16} />
+              View Pending Changes ({pendingCount})
+            </button>
+            <button
+              type="button"
               disabled={!online || syncing}
               onClick={syncNow}
               className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
@@ -690,6 +706,128 @@ export default function Users() {
             </>
           )}
         </div>
+
+        {showPending && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Pending staff synchronization changes"
+              className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+            >
+              <div className="flex items-center justify-between gap-3 border-b px-5 py-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-slate-800">
+                    Pending Staff Changes
+                  </h3>
+                  <p className="text-sm text-slate-500">
+                    {pendingCount} change(s) waiting to synchronize with
+                    Supabase.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Close pending changes"
+                  onClick={() => setShowPending(false)}
+                  className="rounded-lg p-2 hover:bg-slate-100"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="space-y-3 overflow-y-auto p-5">
+                {pendingItems.length === 0 ? (
+                  <p className="rounded-xl border border-dashed p-8 text-center text-sm text-slate-500">
+                    No pending staff changes.
+                  </p>
+                ) : (
+                  pendingItems.map((item, index) => {
+                    const staff = users.find(
+                      (u) => String(u.id) === String(item.userId),
+                    );
+                    const changes =
+                      item.changes && typeof item.changes === "object"
+                        ? item.changes
+                        : {};
+                    const changedKeys = Object.keys(changes);
+                    return (
+                      <div
+                        key={item.id ?? index}
+                        className="rounded-xl border border-slate-200 p-4"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="font-semibold text-slate-800">
+                            {staff
+                              ? `${staff.first_name || ""} ${staff.last_name || ""}`.trim()
+                              : `Staff ID: ${item.userId ?? "Unknown"}`}
+                          </p>
+                          <span className="rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">
+                            {item.type === "edit"
+                              ? "Pending edit"
+                              : item.type || "Pending"}
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Record ID: {String(item.userId ?? "—")} · Queued:{" "}
+                          {item.createdAt
+                            ? new Date(item.createdAt).toLocaleString("en-PH")
+                            : "Unknown"}
+                        </p>
+                        {changedKeys.length > 0 && (
+                          <div className="mt-3 space-y-1 rounded-lg bg-slate-50 p-3 text-sm">
+                            {changedKeys.map((field) => (
+                              <div
+                                key={field}
+                                className="grid grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)] gap-3"
+                              >
+                                <span className="break-words font-medium text-slate-600">
+                                  {field.replaceAll("_", " ")}
+                                </span>
+                                <span className="break-words text-slate-800">
+                                  {field === "district_id"
+                                    ? districtMap.get(String(changes[field])) ||
+                                      String(changes[field] ?? "—")
+                                    : String(changes[field] ?? "—")}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              <div className="flex flex-wrap justify-end gap-2 border-t p-4">
+                <button
+                  type="button"
+                  onClick={refreshPending}
+                  className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                >
+                  Refresh List
+                </button>
+                <button
+                  type="button"
+                  disabled={!online || syncing || pendingCount === 0}
+                  onClick={syncNow}
+                  className="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  <RefreshCw
+                    size={16}
+                    className={syncing ? "animate-spin" : ""}
+                  />{" "}
+                  Sync Now
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPending(false)}
+                  className="rounded-lg bg-slate-100 px-4 py-2 text-sm font-medium"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {editingUser && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">

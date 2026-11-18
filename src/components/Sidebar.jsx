@@ -21,6 +21,7 @@ import {
   ShieldCheck,
   ScrollText,
   Download,
+  BookOpen,
 } from "lucide-react";
 
 import { supabase } from "../lib/supabase";
@@ -246,6 +247,11 @@ const MENUS = {
       icon: HeartPulse,
     },
     {
+      name: "Child Monitoring",
+      path: "/dashboard/nurse/child-monitoring",
+      icon: Activity,
+    },
+    {
       name: "Reports",
       path: "/dashboard/nurse/fhsis-reports",
       icon: BarChart3,
@@ -272,6 +278,11 @@ const MENUS = {
       name: "Pregnancy Monitoring",
       path: "/dashboard/midwife/pregnancy-monitoring",
       icon: HeartPulse,
+    },
+    {
+      name: "Child Monitoring",
+      path: "/dashboard/midwife/child-monitoring",
+      icon: Activity,
     },
     {
       name: "BHW Monthly Reports",
@@ -515,10 +526,6 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               <h1 className="text-[15px] font-extrabold tracking-tight text-slate-900">
                 MCHMS
               </h1>
-
-              <p className="mt-0.5 text-[11px] font-medium text-slate-500">
-                City Health Office
-              </p>
             </div>
           </button>
 
@@ -669,6 +676,7 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
                   <button
                     type="button"
                     onClick={() => navigateTo(item.path)}
+                    data-tutorial-path={item.path}
                     aria-current={isActive ? "page" : undefined}
                     title={collapsed ? item.name : undefined}
                     className={`
@@ -777,6 +785,24 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
               </div>
             </div>
           )}
+
+          {/* BUILT-IN HELP & TUTORIALS */}
+          <button
+            type="button"
+            onClick={() => {
+              setMobileOpen(false);
+              window.dispatchEvent(new Event("mchms:open-tutorial"));
+            }}
+            title={collapsed ? "Help & Tutorials" : undefined}
+            className={`mb-2 flex w-full items-center gap-3 rounded-xl px-3 py-3 text-[13px] font-semibold text-slate-600 transition hover:bg-slate-100 hover:text-slate-900 ${collapsed ? "lg:justify-center lg:px-0" : ""}`}
+          >
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl">
+              <BookOpen size={19} />
+            </span>
+            <span className={collapsed ? "lg:hidden" : ""}>
+              Help & Tutorials
+            </span>
+          </button>
 
           {/* LOGOUT BUTTON */}
           <div className="group relative">

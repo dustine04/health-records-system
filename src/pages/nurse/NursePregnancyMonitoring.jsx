@@ -494,8 +494,8 @@ const queueNurseAudit = (
     action,
     entity_type: "pregnancy_monitoring",
     entity_id: entityId == null ? null : String(entityId),
-    status,
     details: {
+      audit_status: status,
       module: "nurse_pregnancy_monitoring",
       district_id: user.district_id ?? null,
       recorded_at: new Date().toISOString(),
@@ -557,6 +557,9 @@ export default function NursePregnancyMonitoring() {
   const [saving, setSaving] = useState(false);
   const [online, setOnline] = useState(navigator.onLine);
   const [pendingCount, setPendingCount] = useState(0);
+  const [pendingActions, setPendingActions] = useState([]);
+  const [pendingModal, setPendingModal] = useState(false);
+  const [pendingLoading, setPendingLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [offlineNotice, setOfflineNotice] = useState("");
   const [authorizedThisSession, setAuthorizedThisSession] = useState(false);
@@ -1724,6 +1727,7 @@ export default function NursePregnancyMonitoring() {
     if (!user?.id || !user?.district_id) return;
     const actions = await getPendingPregnancyActions(user);
     setPendingCount(actions.length);
+    setPendingActions(actions);
   };
 
   const syncOfflineNow = async () => {
@@ -1807,6 +1811,25 @@ export default function NursePregnancyMonitoring() {
             <span className="text-amber-700">
               {pendingCount} pending change(s)
             </span>
+            <button
+              type="button"
+              onClick={async () => {
+                setPendingModal(true);
+                setPendingLoading(true);
+                try {
+                  await refreshPendingOffline();
+                } catch (e) {
+                  setOfflineNotice(
+                    `Unable to read pending changes: ${e.message}`,
+                  );
+                } finally {
+                  setPendingLoading(false);
+                }
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 font-semibold text-amber-900 hover:bg-amber-100"
+            >
+              <ClipboardList size={15} /> View Pending Changes ({pendingCount})
+            </button>
             <button
               type="button"
               onClick={syncOfflineNow}
@@ -2827,15 +2850,6 @@ export default function NursePregnancyMonitoring() {
 
             <div className="flex justify-end gap-3 border-t pt-5">
               <button
-                type="button"
-                onClick={() =>
-                  closeDraftForm("anc", ancForm, () => setAncModal(false))
-                }
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
                 type="submit"
                 disabled={saving}
                 className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
@@ -2917,19 +2931,6 @@ export default function NursePregnancyMonitoring() {
             </div>
 
             <div className="flex justify-end gap-3 border-t pt-4">
-              <button
-                type="button"
-                onClick={() =>
-                  closeDraftForm(
-                    "referral",
-                    { status: referralStatus, notes: referralNotes },
-                    () => setReferralModal(false),
-                  )
-                }
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
-              >
-                Cancel
-              </button>
               <button
                 type="submit"
                 disabled={saving}
@@ -3034,17 +3035,6 @@ export default function NursePregnancyMonitoring() {
 
             <div className="flex justify-end gap-3 border-t pt-4">
               <button
-                type="button"
-                onClick={() =>
-                  closeDraftForm("outcome", outcomeForm, () =>
-                    setOutcomeModal(false),
-                  )
-                }
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
-              >
-                Cancel
-              </button>
-              <button
                 type="submit"
                 disabled={saving}
                 className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
@@ -3054,6 +3044,108 @@ export default function NursePregnancyMonitoring() {
             </div>
           </form>
         </Modal>
+      )}
+
+      {pendingModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Pending offline changes"
+            className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl bg-white shadow-2xl"
+          >
+            <div className="flex items-center justify-between border-b p-4">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">
+                  Pending Offline Changes
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Saved on this device; not yet confirmed by Supabase.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close pending changes"
+                onClick={() => setPendingModal(false)}
+                className="rounded-lg p-2 hover:bg-slate-100"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+              {pendingLoading ? (
+                <p className="text-sm text-slate-500">
+                  Loading pending changes...
+                </p>
+              ) : pendingActions.length === 0 ? (
+                <p className="rounded-xl border border-dashed p-6 text-center text-sm text-slate-500">
+                  No pending changes for this Nurse account.
+                </p>
+              ) : (
+                pendingActions.map((action, index) => (
+                  <div
+                    key={action.id ?? index}
+                    className="rounded-xl border p-3 text-sm"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <strong className="text-slate-800">
+                        {String(
+                          action.table ||
+                            action.entity_type ||
+                            "Pregnancy record",
+                        ).replaceAll("_", " ")}
+                      </strong>
+                      <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-800">
+                        Pending sync
+                      </span>
+                    </div>
+                    <p className="mt-1 text-slate-600">
+                      {String(
+                        action.method || action.operation || "update",
+                      ).toUpperCase()}{" "}
+                      · Record #
+                      {String(
+                        action.rowId ??
+                          action.recordId ??
+                          action.entityId ??
+                          "—",
+                      )}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-500">
+                      Queued:{" "}
+                      {action.createdAt
+                        ? new Date(action.createdAt).toLocaleString("en-PH")
+                        : "Unknown time"}
+                    </p>
+                    {action.payload && (
+                      <p className="mt-2 text-xs text-slate-500">
+                        Fields:{" "}
+                        {Object.keys(action.payload).join(", ") || "None"}
+                      </p>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="flex flex-wrap justify-end gap-2 border-t p-4">
+              <button
+                type="button"
+                onClick={() => void refreshPendingOffline()}
+                className="rounded-lg border px-3 py-2 text-sm font-semibold"
+              >
+                Refresh List
+              </button>
+              <button
+                type="button"
+                disabled={!online || syncing || !pendingActions.length}
+                onClick={() => void syncOfflineNow()}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              >
+                {syncing ? "Syncing..." : "Sync Now"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </DashboardLayout>
   );

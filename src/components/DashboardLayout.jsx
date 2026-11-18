@@ -1,9 +1,100 @@
 import { useState } from "react";
+import { BookOpen, Menu, HeartPulse } from "lucide-react";
+
 import Sidebar from "./Sidebar";
+import TutorialGuide from "./tutorial/TutorialGuide";
+
+/* =========================================================
+   ROLE-BASED HEADER THEMES
+   Matches the color themes in Sidebar.jsx
+========================================================= */
+
+const HEADER_THEMES = {
+  it_admin: {
+    background: "bg-gradient-to-r from-slate-700 to-slate-900",
+    border: "border-slate-600",
+    button: "border-white/25 bg-white/15 hover:bg-white/25",
+    iconBackground: "bg-white/15",
+    roleName: "IT Administrator",
+  },
+
+  cho_admin: {
+    background: "bg-gradient-to-r from-indigo-600 to-indigo-700",
+    border: "border-indigo-500",
+    button: "border-white/25 bg-white/15 hover:bg-white/25",
+    iconBackground: "bg-white/15",
+    roleName: "CHO Administrator",
+  },
+
+  nurse: {
+    background: "bg-gradient-to-r from-cyan-600 to-cyan-700",
+    border: "border-cyan-500",
+    button: "border-white/25 bg-white/15 hover:bg-white/25",
+    iconBackground: "bg-white/15",
+    roleName: "Nurse",
+  },
+
+  midwife: {
+    background: "bg-gradient-to-r from-teal-600 to-teal-700",
+    border: "border-teal-500",
+    button: "border-white/25 bg-white/15 hover:bg-white/25",
+    iconBackground: "bg-white/15",
+    roleName: "Midwife",
+  },
+
+  bns: {
+    background: "bg-gradient-to-r from-green-600 to-emerald-700",
+    border: "border-green-500",
+    button: "border-white/25 bg-white/15 hover:bg-white/25",
+    iconBackground: "bg-white/15",
+    roleName: "Barangay Nutrition Scholar",
+  },
+
+  bhw: {
+    background: "bg-gradient-to-r from-blue-600 to-blue-700",
+    border: "border-blue-500",
+    button: "border-white/25 bg-white/15 hover:bg-white/25",
+    iconBackground: "bg-white/15",
+    roleName: "Barangay Health Worker",
+  },
+};
+
+/* =========================================================
+   GET CURRENT LOGGED-IN USER
+========================================================= */
+
+function getCurrentUser() {
+  try {
+    const storedUser = localStorage.getItem("user");
+
+    return storedUser ? JSON.parse(storedUser) : null;
+  } catch (error) {
+    console.warn("Unable to read user session:", error);
+    return null;
+  }
+}
+
+/* =========================================================
+   MAIN DASHBOARD LAYOUT
+========================================================= */
 
 function DashboardLayout({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Read the role from your existing localStorage session.
+  const user = getCurrentUser();
+
+  const role = String(user?.role || "")
+    .trim()
+    .toLowerCase();
+
+  // Default to Slate when the role is unknown.
+  const theme = HEADER_THEMES[role] || HEADER_THEMES.it_admin;
+
+  const openTutorial = () => {
+    window.dispatchEvent(new Event("mchms:open-tutorial"));
+  };
 
   return (
     <div className="min-h-screen bg-gray-100">
@@ -13,13 +104,7 @@ function DashboardLayout({ children }) {
 
       {mobileOpen && (
         <div
-          className="
-            fixed
-            inset-0
-            z-40
-            bg-black/30
-            lg:hidden
-          "
+          className="fixed inset-0 z-40 bg-black/30 lg:hidden"
           onClick={() => setMobileOpen(false)}
         />
       )}
@@ -37,8 +122,6 @@ function DashboardLayout({ children }) {
 
       {/* =====================================================
           MAIN CONTENT
-          Sidebar is fixed, so add matching left margin
-          on desktop.
       ===================================================== */}
 
       <div
@@ -47,91 +130,116 @@ function DashboardLayout({ children }) {
           transition-all
           duration-300
           ease-in-out
-
-          ${collapsed ? "lg:ml-20" : "lg:ml-64"}
+          ${collapsed ? "lg:ml-[84px]" : "lg:ml-[272px]"}
         `}
       >
-        <main
-          className="
-            min-w-0
-            min-h-screen
-          "
-        >
+        <main className="min-h-screen min-w-0">
           {/* =================================================
-              TOP BAR
+              ROLE-BASED TOP HEADER
           ================================================= */}
 
           <header
-            className="
-              h-20
-              bg-white
-              border-b border-gray-200
-
-              flex
-              items-center
-
-              px-4
-              sm:px-6
-              lg:px-8
-
-              sticky
-              top-0
-              z-30
-            "
+            className={`
+              sticky top-0 z-30
+              flex h-20 items-center justify-between
+              border-b
+              px-4 sm:px-6 lg:px-8
+              text-white
+              shadow-sm
+              transition-colors duration-300
+              ${theme.background}
+              ${theme.border}
+            `}
           >
-            {/* ================= MOBILE HAMBURGER ================= */}
+            {/* =============================================
+                LEFT SECTION
+            ============================================= */}
 
-            <button
-              onClick={() => setMobileOpen(true)}
-              className="
-                lg:hidden
-                mr-4
+            <div className="flex min-w-0 items-center gap-3">
+              {/* MOBILE MENU BUTTON */}
 
-                w-10
-                h-10
-
-                flex
-                items-center
-                justify-center
-
-                rounded-lg
-
-                text-gray-600
-
-                hover:bg-gray-100
-                hover:text-blue-600
-
-                transition
-              "
-              aria-label="Open menu"
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="22"
-                height="22"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+              <button
+                type="button"
+                onClick={() => setMobileOpen(true)}
+                className="
+                  flex h-10 w-10 shrink-0
+                  items-center justify-center
+                  rounded-xl
+                  text-white
+                  transition
+                  hover:bg-white/20
+                  focus-visible:outline-none
+                  focus-visible:ring-2
+                  focus-visible:ring-white/70
+                  lg:hidden
+                "
+                aria-label="Open menu"
               >
-                <line x1="4" y1="6" x2="20" y2="6" />
-                <line x1="4" y1="12" x2="20" y2="12" />
-                <line x1="4" y1="18" x2="20" y2="18" />
-              </svg>
-            </button>
+                <Menu size={22} />
+              </button>
 
-            {/* ================= TITLE ================= */}
+              {/* HEADER ICON */}
 
-            <div>
-              <p className="text-xs sm:text-sm text-gray-500">
-                City Health Office
-              </p>
+              <div
+                className={`
+                  hidden h-11 w-11 shrink-0
+                  items-center justify-center
+                  rounded-xl
+                  text-white
+                  shadow-sm
+                  sm:flex
+                  ${theme.iconBackground}
+                `}
+              >
+                <HeartPulse size={24} strokeWidth={2.2} />
+              </div>
 
-              <h1 className="text-base sm:text-lg font-semibold text-gray-800">
-                MCHMS
-              </h1>
+              {/* SYSTEM TITLE */}
+
+              <div className="min-w-0">
+                <h1 className="truncate text-base font-bold tracking-tight text-white sm:text-lg">
+                  MCHMS
+                </h1>
+
+                <p className="mt-0.5 truncate text-[11px] font-medium text-white/80 sm:text-xs">
+                  {theme.roleName} Dashboard
+                </p>
+              </div>
+            </div>
+
+            {/* =============================================
+                RIGHT SECTION
+            ============================================= */}
+
+            <div className="flex shrink-0 items-center gap-3">
+              {/* HELP & TUTORIALS */}
+
+              <button
+                type="button"
+                onClick={openTutorial}
+                className={`
+                  inline-flex items-center
+                  justify-center gap-2
+                  rounded-xl
+                  border
+                  px-3 py-2.5
+                  text-sm font-semibold
+                  text-white
+                  shadow-sm
+                  transition-all duration-200
+                  focus-visible:outline-none
+                  focus-visible:ring-2
+                  focus-visible:ring-white/70
+                  ${theme.button}
+                `}
+                title="Open Help & Tutorials"
+              >
+                <BookOpen size={18} />
+
+                <span className="hidden sm:inline">Help & Tutorials</span>
+
+                <span className="sm:hidden">Help</span>
+              </button>
             </div>
           </header>
 
@@ -139,17 +247,15 @@ function DashboardLayout({ children }) {
               PAGE CONTENT
           ================================================= */}
 
-          <div
-            className="
-              p-4
-              sm:p-6
-              lg:p-8
-            "
-          >
-            {children}
-          </div>
+          <div className="p-4 sm:p-6 lg:p-8">{children}</div>
         </main>
       </div>
+
+      {/* =====================================================
+          BUILT-IN TUTORIAL
+      ===================================================== */}
+
+      <TutorialGuide />
     </div>
   );
 }

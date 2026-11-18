@@ -63,6 +63,11 @@ function Workers() {
   const [online, setOnline] = useState(navigator.onLine);
   const [syncing, setSyncing] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
+  const [showPendingChanges, setShowPendingChanges] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [assignmentDraftStatus, setAssignmentDraftStatus] = useState("");
+  const [originalAreaIds, setOriginalAreaIds] = useState([]);
   const [notice, setNotice] = useState("");
 
   const [search, setSearch] = useState("");
@@ -82,6 +87,88 @@ function Workers() {
     currentUser?.id &&
     currentUser?.role === "midwife" &&
     currentUser?.district_id;
+
+  const assignmentDraftKey = (workerId) =>
+    `mchms:midwife:area-draft:${currentUser?.id}:${currentUser?.district_id}:${workerId}`;
+
+  const restoreAssignmentDraft = (workerId, serverIds) => {
+    const initial = serverIds.map(Number);
+    setOriginalAreaIds(initial);
+    try {
+      const raw = localStorage.getItem(assignmentDraftKey(workerId));
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (Array.isArray(saved.areaIds)) {
+          setSelectedAreas(saved.areaIds.map(Number));
+          setAssignmentDraftStatus(
+            "Unsaved area selections restored from this device.",
+          );
+          return;
+        }
+      }
+    } catch (error) {
+      console.error("Unable to restore assignment draft:", error);
+    }
+    setSelectedAreas(initial);
+    setAssignmentDraftStatus("Changes are saved as a draft on this device.");
+  };
+
+  const loadPendingChanges = useCallback(async () => {
+    const user = getCurrentUser();
+    if (!user?.id || !user?.district_id) return;
+    setPendingLoading(true);
+    try {
+      const actions = await pendingWorkerActions(user);
+      setPendingChanges(actions);
+      setPendingCount(actions.length);
+    } catch (error) {
+      setNotice(`Unable to read pending changes: ${error.message}`);
+    } finally {
+      setPendingLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (showPendingChanges) void loadPendingChanges();
+  }, [showPendingChanges, pendingCount, loadPendingChanges]);
+
+  useEffect(() => {
+    if (!areaModalOpen || !selectedWorker || loadingAreas) return;
+    const current = [...selectedAreas].map(Number).sort((a, b) => a - b);
+    const original = [...originalAreaIds].map(Number).sort((a, b) => a - b);
+    const changed = JSON.stringify(current) !== JSON.stringify(original);
+    const key = assignmentDraftKey(selectedWorker.id);
+    const timer = setTimeout(() => {
+      try {
+        if (changed) {
+          localStorage.setItem(
+            key,
+            JSON.stringify({
+              areaIds: current,
+              savedAt: new Date().toISOString(),
+            }),
+          );
+          setAssignmentDraftStatus("Draft saved on this device.");
+        } else {
+          localStorage.removeItem(key);
+          setAssignmentDraftStatus(
+            "Changes are saved as a draft on this device.",
+          );
+        }
+      } catch (error) {
+        setAssignmentDraftStatus(
+          "Draft storage unavailable. Save your changes before closing.",
+        );
+      }
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [
+    areaModalOpen,
+    selectedWorker,
+    selectedAreas,
+    originalAreaIds,
+    loadingAreas,
+  ]);
 
   const updatePending = useCallback(async () => {
     const user = getCurrentUser();
@@ -345,6 +432,8 @@ function Workers() {
     setAreaModalOpen(true);
     setLocalAreas([]);
     setSelectedAreas([]);
+    setOriginalAreaIds([]);
+    setAssignmentDraftStatus("");
     setLoadingAreas(true);
 
     try {
@@ -352,7 +441,7 @@ function Workers() {
 
       if (cached) {
         setLocalAreas(cached.areas || []);
-        setSelectedAreas(cached.assignedIds || []);
+        restoreAssignmentDraft(worker.id, cached.assignedIds || []);
       }
 
       if (!navigator.onLine) {
@@ -390,7 +479,7 @@ function Workers() {
         .filter((id) => allowedIds.has(String(id)));
 
       setLocalAreas(areas);
-      setSelectedAreas(assignedIds);
+      restoreAssignmentDraft(worker.id, assignedIds);
 
       await saveWorkerAreaSnapshot(user, worker.id, {
         areas,
@@ -405,7 +494,25 @@ function Workers() {
 
   const closeAssignmentModal = () => {
     if (savingAreas) return;
-
+    if (selectedWorker && !loadingAreas) {
+      try {
+        const current = [...selectedAreas].map(Number).sort((a, b) => a - b);
+        const original = [...originalAreaIds].map(Number).sort((a, b) => a - b);
+        const key = assignmentDraftKey(selectedWorker.id);
+        if (JSON.stringify(current) !== JSON.stringify(original)) {
+          localStorage.setItem(
+            key,
+            JSON.stringify({
+              areaIds: current,
+              savedAt: new Date().toISOString(),
+            }),
+          );
+        } else localStorage.removeItem(key);
+      } catch (error) {
+        alert("Could not save the assignment draft. Please try again.");
+        return;
+      }
+    }
     setAreaModalOpen(false);
     setSelectedWorker(null);
     setLocalAreas([]);
@@ -466,6 +573,11 @@ function Workers() {
         areaIds: selectedAreas.map(Number),
       });
 
+      try {
+        localStorage.removeItem(assignmentDraftKey(selectedWorker.id));
+      } catch (error) {
+        console.error("Draft cleanup failed:", error);
+      }
       await updatePending();
 
       setAreaModalOpen(false);
@@ -578,6 +690,14 @@ function Workers() {
             <span className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
               {pendingCount} pending
             </span>
+
+            <button
+              type="button"
+              onClick={() => setShowPendingChanges(true)}
+              className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-medium text-amber-900 hover:bg-amber-100"
+            >
+              View Pending Changes ({pendingCount})
+            </button>
 
             <button
               type="button"
@@ -788,6 +908,111 @@ function Workers() {
           )}
         </div>
 
+        {/* PENDING OFFLINE WORKER ACTIONS */}
+        {showPendingChanges && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+            <div className="max-h-[85vh] w-full max-w-xl overflow-y-auto rounded-2xl bg-white shadow-xl">
+              <div className="flex items-center justify-between border-b p-5">
+                <div>
+                  <h3 className="text-lg font-bold text-gray-800">
+                    Pending Changes ({pendingChanges.length})
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    Worker actions queued on this device, awaiting
+                    synchronization
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingChanges(false)}
+                  className="rounded-lg p-2 hover:bg-gray-100"
+                  aria-label="Close pending changes"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="space-y-3 p-5">
+                {pendingLoading ? (
+                  <p className="text-sm text-gray-500">
+                    Loading pending changes...
+                  </p>
+                ) : pendingChanges.length === 0 ? (
+                  <p className="rounded-lg bg-green-50 p-4 text-sm text-green-700">
+                    No worker changes are waiting to sync.
+                  </p>
+                ) : (
+                  pendingChanges.map((action, index) => {
+                    const worker = workers.find(
+                      (w) => String(w.id) === String(action.workerId),
+                    );
+                    const name = worker
+                      ? [worker.first_name, worker.last_name]
+                          .filter(Boolean)
+                          .join(" ")
+                      : `Worker ID ${action.workerId ?? "unknown"}`;
+                    const label =
+                      action.type === "status"
+                        ? action.active
+                          ? "Activate account"
+                          : "Deactivate account"
+                        : action.type === "areas"
+                          ? "Update assigned areas"
+                          : action.type || "Worker change";
+                    const when =
+                      action.createdAt || action.created_at || action.queuedAt;
+                    return (
+                      <div
+                        key={action.id ?? index}
+                        className="rounded-xl border border-gray-200 p-4"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-800">
+                              {label}
+                            </p>
+                            <p className="text-sm text-gray-600">{name}</p>
+                            {action.type === "areas" &&
+                              Array.isArray(action.areaIds) && (
+                                <p className="text-xs text-gray-500">
+                                  Selected area IDs:{" "}
+                                  {action.areaIds.join(", ") || "None"}
+                                </p>
+                              )}
+                            {when && (
+                              <p className="mt-1 text-xs text-gray-400">
+                                Queued: {new Date(when).toLocaleString("en-PH")}
+                              </p>
+                            )}
+                          </div>
+                          <span className="shrink-0 rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                            Awaiting sync
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              <div className="flex justify-end gap-2 border-t p-4">
+                <button
+                  type="button"
+                  onClick={loadPendingChanges}
+                  className="rounded-lg border px-4 py-2 text-sm font-medium"
+                >
+                  Refresh List
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingChanges(false)}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* AREA ASSIGNMENT MODAL */}
         {areaModalOpen && selectedWorker && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
@@ -877,6 +1102,11 @@ function Workers() {
                   </div>
                 )}
 
+                <p className="text-xs text-gray-500" role="status">
+                  {assignmentDraftStatus} Closing with X keeps your selections
+                  as a local draft; Save Assignments queues the changes for
+                  synchronization.
+                </p>
                 <div className="flex justify-end gap-3 border-t pt-4">
                   <button
                     type="button"
@@ -884,7 +1114,7 @@ function Workers() {
                     disabled={savingAreas}
                     className="rounded-lg bg-gray-100 px-4 py-2.5 text-sm font-medium"
                   >
-                    Cancel
+                    Close (Save Draft)
                   </button>
 
                   <button

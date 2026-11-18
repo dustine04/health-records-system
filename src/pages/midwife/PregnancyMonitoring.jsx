@@ -6,6 +6,8 @@ import {
   CalendarDays,
   ClipboardList,
   Clock3,
+  Wifi,
+  RefreshCw,
   Edit,
   Eye,
   FileText,
@@ -18,10 +20,18 @@ import {
   Trash2,
   UserRound,
   BookOpen,
+  WifiOff,
   X,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
+import {
+  getPregnancyCache,
+  setPregnancyCache,
+  pendingPregnancyChanges,
+  queuePregnancyChange,
+  syncPregnancyChanges,
+} from "../../lib/midwifePregnancyOffline";
 import { supabase } from "../../lib/supabase";
 import {
   pregnancyDraftKey,
@@ -34,7 +44,14 @@ import {
    HELPERS
 ========================================================= */
 
-const today = () => new Date().toISOString().split("T")[0];
+// Use the local calendar date so the monitoring page and dashboard agree.
+const today = () => {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+};
 
 /* =========================================================
    LOCAL DRAFT STORAGE — IndexedDB (Dexie)
@@ -483,7 +500,6 @@ async function recordPregnancyAudit(actor, event) {
     action: event.action,
     entity_type: event.entityType,
     entity_id: String(event.entityId),
-    status: "success",
     details: {
       module: "Pregnancy Monitoring",
       actor_role: actor.role,
@@ -551,6 +567,49 @@ export default function PregnancyMonitoring() {
   const [activeDraftKey, setActiveDraftKey] = useState(null);
   const [draftReady, setDraftReady] = useState(false);
   const [draftStatus, setDraftStatus] = useState("");
+  const [showPendingChanges, setShowPendingChanges] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [pendingItems, setPendingItems] = useState([]);
+  const [syncing, setSyncing] = useState(false);
+  const [offlineNotice, setOfflineNotice] = useState("");
+  const refreshPending = async () => {
+    if (!user?.id || !user?.district_id) return;
+    try {
+      setPendingItems(await pendingPregnancyChanges(user));
+    } catch (error) {
+      setOfflineNotice(error.message);
+    }
+  };
+  const syncNow = async () => {
+    if (!user?.id || syncing || !navigator.onLine) return;
+    setSyncing(true);
+    try {
+      const count = await syncPregnancyChanges(user);
+      setOfflineNotice(`${count} queued change(s) synchronized.`);
+      await loadPregnancies();
+      if (selectedPregnancy) await openPregnancy(selectedPregnancy);
+    } catch (error) {
+      setOfflineNotice(
+        `Sync stopped: ${error.message}. Remaining changes are kept locally.`,
+      );
+    } finally {
+      await refreshPending();
+      setSyncing(false);
+    }
+  };
+  useEffect(() => {
+    const onOnline = () => setOnline(true);
+    const onOffline = () => setOnline(false);
+    window.addEventListener("online", onOnline);
+    window.addEventListener("offline", onOffline);
+    return () => {
+      window.removeEventListener("online", onOnline);
+      window.removeEventListener("offline", onOffline);
+    };
+  }, []);
+  useEffect(() => {
+    refreshPending();
+  }, [user?.id, user?.district_id, showPendingChanges]);
 
   useEffect(() => {
     const savedUser = localStorage.getItem("user");
@@ -662,6 +721,12 @@ export default function PregnancyMonitoring() {
 
   const setNurseAccess = async (nurse, shouldEnable) => {
     if (!user?.id || !user?.district_id || !nurse?.id) return;
+    if (!navigator.onLine) {
+      setNurseAccessError(
+        "Nurse authorization changes require an internet connection.",
+      );
+      return;
+    }
     const verb = shouldEnable ? "grant access to" : "revoke access for";
     if (
       !window.confirm(
@@ -738,6 +803,16 @@ export default function PregnancyMonitoring() {
     try {
       setLoading(true);
 
+      if (!navigator.onLine) {
+        const cached = await getPregnancyCache(user, "pregnancies");
+        setPregnancies(cached || []);
+        setOfflineNotice(
+          cached
+            ? "Showing cached pregnancy records."
+            : "No cached records. Open this page online first.",
+        );
+        return;
+      }
       // Midwives and Nurses have full monitoring permissions within their district.
       const role = String(user?.role || "").toLowerCase();
       const isMidwife = role === "midwife";
@@ -756,8 +831,8 @@ export default function PregnancyMonitoring() {
         return;
       }
 
-      // Nurses are always district-scoped. Midwives retain their existing
-      // barangay scope when assigned, otherwise they use their district.
+      // District-wide monitoring for both Midwife and authorized Nurse.
+      // Barangay is a fallback only when the Midwife has no district.
       const barangayId = isMidwife ? user.barangay_id : null;
       const districtId = user.district_id;
 
@@ -844,31 +919,29 @@ export default function PregnancyMonitoring() {
       }));
 
       /*
-       * Apply the Midwife's location scope.
-       *
-       * If the Midwife has a barangay assignment, use that barangay.
-       * Otherwise, use the Midwife's district assignment.
+       * Match Midwife Dashboard notification scope: district first.
+       * An authorized Nurse remains strictly district-scoped.
        */
-      if (barangayId) {
-        combined = combined.filter((pregnancy) => {
-          const residentBarangayId =
-            pregnancy.resident?.households?.local_areas?.barangays?.id;
-
-          return (
-            residentBarangayId != null &&
-            String(residentBarangayId) === String(barangayId)
-          );
-        });
-      } else if (districtId) {
+      if (districtId != null) {
         combined = combined.filter((pregnancy) => {
           const residentDistrictId =
             pregnancy.resident?.households?.local_areas?.barangays?.district_id;
-
           return (
             residentDistrictId != null &&
             String(residentDistrictId) === String(districtId)
           );
         });
+      } else if (isMidwife && barangayId != null) {
+        combined = combined.filter((pregnancy) => {
+          const residentBarangayId =
+            pregnancy.resident?.households?.local_areas?.barangays?.id;
+          return (
+            residentBarangayId != null &&
+            String(residentBarangayId) === String(barangayId)
+          );
+        });
+      } else {
+        combined = [];
       }
 
       // Only fetch ANC data for pregnancies visible to this Midwife.
@@ -882,7 +955,9 @@ export default function PregnancyMonitoring() {
             "id, pregnant_woman_id, visit_number, visit_date, next_visit_date",
           )
           .in("pregnant_woman_id", pregnancyIds)
-          .order("visit_number", { ascending: false });
+          .order("visit_date", { ascending: false })
+          .order("visit_number", { ascending: false })
+          .order("id", { ascending: false });
 
         if (ancError) throw ancError;
 
@@ -903,10 +978,16 @@ export default function PregnancyMonitoring() {
       }));
 
       setPregnancies(combined);
+      await setPregnancyCache(user, "pregnancies", combined);
     } catch (error) {
       console.error("Error loading pregnancies:", error);
-      setPregnancies([]);
-      alert(error.message || "Failed to load pregnancy records.");
+      const cached = user ? await getPregnancyCache(user, "pregnancies") : null;
+      setPregnancies(cached || []);
+      setOfflineNotice(
+        cached
+          ? "Network unavailable; showing cached records."
+          : error.message || "Failed to load pregnancy records.",
+      );
     } finally {
       setLoading(false);
     }
@@ -998,6 +1079,20 @@ export default function PregnancyMonitoring() {
       setSelectedPregnancy(pregnancy);
       setLoadingDetails(true);
 
+      if (!navigator.onLine) {
+        const cached = await getPregnancyCache(user, `details:${pregnancy.id}`);
+        if (!cached)
+          throw new Error(
+            "No cached visits for this pregnancy. Open it online first.",
+          );
+        setHomeVisits(cached.homeVisits);
+        setAncVisits(cached.ancVisits);
+        setReferrals(cached.referrals);
+        setOfflineNotice(
+          "Showing cached visits. Unsynced edits are listed under Pending Changes.",
+        );
+        return;
+      }
       const [homeResult, ancResult, referralResult] = await Promise.all([
         supabase
           .from("pregnant_woman_home_visits")
@@ -1028,6 +1123,11 @@ export default function PregnancyMonitoring() {
       setHomeVisits(homeResult.data || []);
       setAncVisits(ancResult.data || []);
       setReferrals(referralResult.data || []);
+      await setPregnancyCache(user, `details:${pregnancy.id}`, {
+        homeVisits: homeResult.data || [],
+        ancVisits: ancResult.data || [],
+        referrals: referralResult.data || [],
+      });
 
       setOutcomeForm({
         status: pregnancy.status || "active",
@@ -1296,6 +1396,26 @@ export default function PregnancyMonitoring() {
     });
   };
 
+  const queueClinicalOffline = async (
+    table,
+    method,
+    pregnancyId,
+    rowId,
+    payload,
+    label,
+  ) => {
+    await queuePregnancyChange(user, {
+      table,
+      method,
+      pregnancyId,
+      rowId,
+      payload,
+      label,
+    });
+    await refreshPending();
+    setOfflineNotice(`${label} saved on this device. Sync when connected.`);
+  };
+
   /* =========================================================
      SAVE ANC — ALL ASSESSMENT NOTES GO INTO ONE COLUMN
   ========================================================= */
@@ -1345,6 +1465,20 @@ export default function PregnancyMonitoring() {
         payload.updated_at = new Date().toISOString();
       }
 
+      if (!navigator.onLine) {
+        await queueClinicalOffline(
+          "pregnant_woman_visits",
+          editingAnc ? "update" : "insert",
+          selectedPregnancy.id,
+          editingAnc?.id ?? null,
+          payload,
+          editingAnc ? "Update ANC visit" : "Add ANC visit",
+        );
+        await clearSavedDraft();
+        setAncModal(false);
+        setEditingAnc(null);
+        return;
+      }
       let result;
 
       if (editingAnc) {
@@ -1407,6 +1541,17 @@ export default function PregnancyMonitoring() {
     if (!window.confirm(`Delete ANC Visit #${visit.visit_number}?`)) return;
 
     try {
+      if (!navigator.onLine) {
+        await queueClinicalOffline(
+          "pregnant_woman_visits",
+          "delete",
+          selectedPregnancy.id,
+          visit.id,
+          null,
+          `Delete ANC visit #${visit.visit_number}`,
+        );
+        return;
+      }
       const { error } = await supabase
         .from("pregnant_woman_visits")
         .delete()
@@ -1466,6 +1611,24 @@ export default function PregnancyMonitoring() {
     try {
       setSaving(true);
 
+      if (!navigator.onLine) {
+        await queueClinicalOffline(
+          "pregnancy_referrals",
+          "update",
+          selectedPregnancy.id,
+          selectedReferral.id,
+          {
+            status: referralStatus,
+            midwife_notes: referralNotes || null,
+            reviewed_by: user?.id,
+            reviewed_at: new Date().toISOString(),
+          },
+          "Referral review",
+        );
+        await clearSavedDraft();
+        setReferralModal(false);
+        return;
+      }
       const { error } = await supabase
         .from("pregnancy_referrals")
         .update({
@@ -1539,6 +1702,27 @@ export default function PregnancyMonitoring() {
     try {
       setSaving(true);
 
+      if (!navigator.onLine) {
+        await queueClinicalOffline(
+          "pregnant_women",
+          "update",
+          selectedPregnancy.id,
+          selectedPregnancy.id,
+          {
+            status: outcomeForm.status,
+            pregnancy_outcome: outcomeForm.pregnancy_outcome || null,
+            birth_status: outcomeForm.birth_status || null,
+            date_of_delivery: outcomeForm.date_of_delivery || null,
+            place_of_delivery: outcomeForm.place_of_delivery || null,
+            facility_name: outcomeForm.facility_name || null,
+            attended_by: outcomeForm.attended_by || null,
+          },
+          "Pregnancy outcome",
+        );
+        await clearSavedDraft();
+        setOutcomeModal(false);
+        return;
+      }
       const { error } = await supabase
         .from("pregnant_women")
         .update({
@@ -1604,6 +1788,18 @@ export default function PregnancyMonitoring() {
     if (!selectedPregnancy) return;
 
     try {
+      if (!navigator.onLine) {
+        await queueClinicalOffline(
+          "pregnant_women",
+          "update",
+          selectedPregnancy.id,
+          selectedPregnancy.id,
+          { status },
+          "Update pregnancy status",
+        );
+        setSelectedPregnancy((prev) => ({ ...prev, status }));
+        return;
+      }
       const { error } = await supabase
         .from("pregnant_women")
         .update({ status })
@@ -1653,6 +1849,84 @@ export default function PregnancyMonitoring() {
             absent.
           </p>
         </div>
+
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-4 shadow-sm">
+          <span
+            className={`inline-flex items-center gap-2 text-sm ${online ? "text-green-700" : "text-amber-700"}`}
+          >
+            {online ? <Wifi size={16} /> : <WifiOff size={16} />}
+            {online ? "Online" : "Offline"}
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              refreshPending();
+              setShowPendingChanges(true);
+            }}
+            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2 text-sm font-semibold text-amber-800"
+          >
+            <Clock3 size={16} className="inline mr-1" /> View Pending Changes (
+            {pendingItems.length})
+          </button>
+          <button
+            type="button"
+            onClick={syncNow}
+            disabled={!online || syncing || !pendingItems.length}
+            className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+          >
+            <RefreshCw size={16} className="inline mr-1" />
+            {syncing ? "Syncing..." : "Sync Now"}
+          </button>
+          {offlineNotice && (
+            <p className="w-full text-sm text-amber-800">{offlineNotice}</p>
+          )}
+        </div>
+        {showPendingChanges && (
+          <Modal
+            title="Pending Offline Changes"
+            onClose={() => setShowPendingChanges(false)}
+          >
+            <div className="space-y-3 text-sm">
+              {pendingItems.length ? (
+                pendingItems.map((item) => (
+                  <div key={item.id} className="rounded-lg border p-3">
+                    <p className="font-semibold">
+                      {item.label || `${item.method} ${item.table}`}
+                    </p>
+                    <p className="text-gray-500">
+                      Pregnancy #{item.pregnancyId} ·{" "}
+                      {new Date(item.createdAt).toLocaleString()}
+                    </p>
+                    <p className="text-amber-700">Awaiting sync</p>
+                  </div>
+                ))
+              ) : (
+                <p>No queued clinical changes.</p>
+              )}
+              <p className="text-xs text-gray-500">
+                Unfinished form drafts are separate from queued changes. Queued
+                actions will be sent in order when you sync. Keep this browser's
+                site data until synchronization completes.
+              </p>
+              <div className="flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={refreshPending}
+                  className="rounded-lg border px-4 py-2"
+                >
+                  Refresh
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingChanges(false)}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-white"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </Modal>
+        )}
 
         {String(user?.role || "").toLowerCase() === "midwife" && (
           <section className="overflow-hidden rounded-xl border bg-white shadow-sm">
@@ -2743,13 +3017,6 @@ export default function PregnancyMonitoring() {
 
             <div className="flex justify-end gap-3 border-t pt-5">
               <button
-                type="button"
-                onClick={() => closeDraftModal("anc")}
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700 hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
                 type="submit"
                 disabled={saving}
                 className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
@@ -2826,13 +3093,6 @@ export default function PregnancyMonitoring() {
             </div>
 
             <div className="flex justify-end gap-3 border-t pt-4">
-              <button
-                type="button"
-                onClick={() => closeDraftModal("referral")}
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
-              >
-                Cancel
-              </button>
               <button
                 type="submit"
                 disabled={saving}
@@ -2932,13 +3192,6 @@ export default function PregnancyMonitoring() {
             </div>
 
             <div className="flex justify-end gap-3 border-t pt-4">
-              <button
-                type="button"
-                onClick={() => closeDraftModal("outcome")}
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-semibold text-gray-700"
-              >
-                Cancel
-              </button>
               <button
                 type="submit"
                 disabled={saving}

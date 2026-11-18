@@ -11,6 +11,7 @@ import {
   Wifi,
   WifiOff,
   RefreshCw,
+  ClipboardList,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
@@ -58,6 +59,7 @@ export default function Barangay() {
   const [online, setOnline] = useState(navigator.onLine);
   const [syncing, setSyncing] = useState(false);
   const [pending, setPending] = useState([]);
+  const [showPendingModal, setShowPendingModal] = useState(false);
   const [notice, setNotice] = useState("");
   const [cachedAt, setCachedAt] = useState(null);
 
@@ -577,9 +579,21 @@ export default function Barangay() {
               {online ? "Online" : "Offline"}
             </span>
 
-            <span className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              {pending.length} pending
-            </span>
+            <button
+              type="button"
+              className={`${buttonStyle} border border-amber-200 bg-amber-50 text-amber-800`}
+              onClick={async () => {
+                try {
+                  await refreshPending();
+                  setShowPendingModal(true);
+                } catch (e) {
+                  setNotice(`Unable to load pending changes: ${e.message}`);
+                }
+              }}
+            >
+              <ClipboardList size={16} />
+              View Pending Changes ({pending.length})
+            </button>
 
             <button
               type="button"
@@ -754,6 +768,150 @@ export default function Barangay() {
           </table>
         </div>
       </div>
+
+      {/* VIEW PENDING SYNC CHANGES — read-only; uses existing offline queue */}
+      {showPendingModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pending-sync-title"
+            className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-xl"
+          >
+            <div className="flex items-center justify-between border-b p-5">
+              <div>
+                <h2
+                  id="pending-sync-title"
+                  className="text-lg font-bold text-gray-900"
+                >
+                  Pending Synchronization ({pending.length})
+                </h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  These edits are stored on this device until synchronized with
+                  Supabase.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close pending changes"
+                className="rounded-lg p-2 hover:bg-gray-100"
+                onClick={() => setShowPendingModal(false)}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="space-y-3 overflow-y-auto p-5">
+              {pending.length === 0 ? (
+                <p className="rounded-lg border border-dashed p-8 text-center text-sm text-gray-500">
+                  No pending changes. All queued edits have been synchronized.
+                </p>
+              ) : (
+                pending.map((action, index) => {
+                  const changes = action.changes ?? action.payload ?? {};
+                  const entries = Object.entries(changes).filter(
+                    ([field]) =>
+                      !["id", "updated_at", "created_at"].includes(field),
+                  );
+                  const isArea = action.table === "local_areas";
+                  const source = isArea ? localAreas : barangays;
+                  const current = source.find(
+                    (item) => String(item.id) === String(action.recordId),
+                  );
+                  const recordName =
+                    action.original?.name ??
+                    action.before?.name ??
+                    current?.name;
+                  const queuedDate = action.createdAt
+                    ? new Date(action.createdAt).toLocaleString("en-PH")
+                    : "Unknown time";
+                  return (
+                    <div
+                      key={action.id ?? index}
+                      className="rounded-xl border p-4"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <p className="font-semibold text-gray-900">
+                            {isArea ? "Purok / Sitio" : "Barangay"}
+                            {recordName
+                              ? ` — ${recordName}`
+                              : ` #${action.recordId ?? "?"}`}
+                          </p>
+                          <p className="mt-1 text-xs text-gray-500">
+                            Record ID: {String(action.recordId ?? "—")} ·
+                            Queued: {queuedDate}
+                          </p>
+                        </div>
+                        <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                          Pending sync
+                        </span>
+                      </div>
+                      <div className="mt-3 space-y-1 text-sm">
+                        {entries.length ? (
+                          entries.map(([field, value]) => (
+                            <div key={field} className="flex flex-wrap gap-2">
+                              <span className="font-medium text-gray-600">
+                                {field.replace(/_/g, " ")}:
+                              </span>
+                              <span className="break-words text-gray-900">
+                                {value == null
+                                  ? "(empty)"
+                                  : typeof value === "object"
+                                    ? JSON.stringify(value)
+                                    : String(value)}
+                              </span>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-gray-500">
+                            Edit queued; field details unavailable.
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <div className="flex flex-wrap justify-end gap-2 border-t p-4">
+              <button
+                type="button"
+                className={`${buttonStyle} border bg-white`}
+                onClick={async () => {
+                  try {
+                    await refreshPending();
+                  } catch (e) {
+                    setNotice(
+                      `Unable to refresh pending changes: ${e.message}`,
+                    );
+                  }
+                }}
+              >
+                <RefreshCw size={16} /> Refresh List
+              </button>
+              <button
+                type="button"
+                className={`${buttonStyle} bg-blue-600 text-white`}
+                disabled={!online || syncing || saving || pending.length === 0}
+                onClick={syncNow}
+              >
+                <RefreshCw
+                  size={16}
+                  className={syncing ? "animate-spin" : ""}
+                />
+                {syncing ? "Syncing..." : "Sync Now"}
+              </button>
+              <button
+                type="button"
+                className={`${buttonStyle} border bg-white`}
+                onClick={() => setShowPendingModal(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ADD / EDIT BARANGAY MODAL */}
       {showModal && (

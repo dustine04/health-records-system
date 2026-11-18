@@ -77,6 +77,76 @@ async function flushBhwMonitoringAudit(actorId) {
   }
 }
 
+// Read the existing monitoring outbox without creating or modifying a database.
+async function readPendingMonitoringChanges(userId) {
+  if (typeof indexedDB === "undefined" || !indexedDB.databases) {
+    throw new Error(
+      "This browser cannot list offline databases. Use a recent Chrome or Edge browser.",
+    );
+  }
+  const databases = await indexedDB.databases();
+  const matches = databases.filter(
+    ({ name }) => /monitor/i.test(name || "") && /bhw|mchms/i.test(name || ""),
+  );
+  const changes = [];
+  for (const { name } of matches) {
+    const rows = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(name);
+      request.onupgradeneeded = () => {
+        request.transaction?.abort();
+        reject(new Error("Offline database was modified while opening."));
+      };
+      request.onerror = () =>
+        reject(request.error || new Error("Cannot open offline database."));
+      request.onsuccess = () => {
+        const db = request.result;
+        if (!db.objectStoreNames.contains("queue")) {
+          db.close();
+          resolve([]);
+          return;
+        }
+        const tx = db.transaction("queue", "readonly");
+        const query = tx.objectStore("queue").getAll();
+        query.onsuccess = () => resolve(query.result || []);
+        query.onerror = () =>
+          reject(query.error || new Error("Cannot read offline queue."));
+        tx.oncomplete = () => db.close();
+        tx.onabort = () => db.close();
+      };
+    });
+    for (const entry of rows) {
+      const owner =
+        entry.userId ??
+        entry.user_id ??
+        entry.bhwId ??
+        entry.bhw_id ??
+        entry.actorId;
+      if (owner == null || String(owner) !== String(userId)) continue;
+      changes.push({ ...entry, _database: name });
+    }
+  }
+  return changes.sort((a, b) =>
+    String(a.createdAt ?? a.created_at ?? "").localeCompare(
+      String(b.createdAt ?? b.created_at ?? ""),
+    ),
+  );
+}
+
+function monitoringChangeLabel(entry) {
+  const kind = String(
+    entry.kind ?? entry.section ?? entry.table ?? entry.recordType ?? "",
+  ).toLowerCase();
+  const action = String(
+    entry.action ?? entry.operation ?? entry.type ?? "",
+  ).toLowerCase();
+  const subject = /home/.test(kind)
+    ? "Home visit"
+    : /anc/.test(kind)
+      ? "ANC visit"
+      : "Monitoring record";
+  return `${/delete|remove/.test(action) ? "Delete" : /create|insert|add/.test(action) ? "Add" : "Update"} ${subject.toLowerCase()}`;
+}
+
 function BhwPregnantMonitoring() {
   const storedUser = localStorage.getItem("user");
   const user = storedUser ? JSON.parse(storedUser) : null;
@@ -118,6 +188,10 @@ function BhwPregnantMonitoring() {
   const [pregnantWomen, setPregnantWomen] = useState([]);
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
+  const [showPendingChanges, setShowPendingChanges] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [pendingError, setPendingError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [offlineError, setOfflineError] = useState("");
   const [localAreas, setLocalAreas] = useState([]);
@@ -477,6 +551,24 @@ function BhwPregnantMonitoring() {
       setSyncing(false);
     }
   };
+
+  const loadPendingChanges = async () => {
+    if (!user?.id) return;
+    setPendingLoading(true);
+    setPendingError("");
+    try {
+      setPendingChanges(await readPendingMonitoringChanges(user.id));
+      setPending(await pendingMonitoringCount(user.id));
+    } catch (error) {
+      setPendingError(error.message || "Unable to read pending changes.");
+    } finally {
+      setPendingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showPendingChanges) void loadPendingChanges();
+  }, [showPendingChanges, pending]);
 
   // =====================================================
   // GET PREGNANT WOMEN
@@ -1128,8 +1220,15 @@ function BhwPregnantMonitoring() {
             {online ? "Online" : "Offline — cached records"}
           </span>
           <span className="text-sm text-gray-500">
-            Pending home visits: {pending}
+            Pending monitoring changes: {pending}
           </span>
+          <button
+            type="button"
+            onClick={() => setShowPendingChanges(true)}
+            className="inline-flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+          >
+            <FileText size={15} /> View Pending Changes
+          </button>
           <button
             type="button"
             onClick={runSync}
@@ -1145,6 +1244,101 @@ function BhwPregnantMonitoring() {
             </p>
           )}
         </div>
+
+        {showPendingChanges && (
+          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-black/50 p-3">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="monitoring-pending-title"
+              className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-xl"
+            >
+              <div className="flex items-start justify-between gap-3 border-b p-5">
+                <div>
+                  <h3
+                    id="monitoring-pending-title"
+                    className="text-lg font-semibold"
+                  >
+                    Pending monitoring changes
+                  </h3>
+                  <p className="mt-1 text-sm text-gray-500">
+                    Changes queued on this device awaiting synchronization.
+                    Unfinished drafts are separate.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="Close pending changes"
+                  onClick={() => setShowPendingChanges(false)}
+                  className="rounded-lg p-2 hover:bg-gray-100"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-5">
+                {pendingLoading ? (
+                  <p className="text-sm text-gray-500">
+                    Reading offline queue...
+                  </p>
+                ) : pendingError ? (
+                  <p
+                    role="alert"
+                    className="rounded-lg bg-red-50 p-4 text-sm text-red-700"
+                  >
+                    {pendingError}
+                  </p>
+                ) : pendingChanges.length === 0 ? (
+                  <p className="rounded-lg bg-gray-50 p-4 text-sm text-gray-600">
+                    No readable pending monitoring changes found for this
+                    account on this device.
+                    {pending > 0 &&
+                      " Your offline helper may use a different database name or queue structure; verify bhwMonitoringOffline.js."}
+                  </p>
+                ) : (
+                  pendingChanges.map((entry, index) => (
+                    <div
+                      key={`${entry._database}-${entry.id ?? entry.uuid ?? index}`}
+                      className="rounded-xl border border-amber-200 bg-amber-50/50 p-4"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-medium text-gray-800">
+                          {monitoringChangeLabel(entry)}
+                        </p>
+                        <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-medium text-amber-800">
+                          Awaiting sync
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-gray-500">
+                        Queued:{" "}
+                        {entry.createdAt || entry.created_at
+                          ? new Date(
+                              entry.createdAt ?? entry.created_at,
+                            ).toLocaleString("en-PH")
+                          : "Time unavailable"}
+                      </p>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="flex justify-end gap-2 border-t p-4">
+                <button
+                  type="button"
+                  onClick={() => void loadPendingChanges()}
+                  className="rounded-lg border px-4 py-2 text-sm hover:bg-gray-50"
+                >
+                  Refresh list
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingChanges(false)}
+                  className="rounded-lg bg-pink-600 px-4 py-2 text-sm font-medium text-white"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* =====================================================
             ASSIGNED AREAS
@@ -2013,7 +2207,6 @@ function BhwPregnantMonitoring() {
 
                   <ModalButtons
                     saving={savingPregnancyInfo}
-                    onCancel={closePregnancyInfoModal}
                     saveText="Save Pregnancy Information"
                   />
                 </>
@@ -2572,7 +2765,6 @@ function BhwPregnantMonitoring() {
 
                   <ModalButtons
                     saving={savingHomeVisit}
-                    onCancel={closeHomeVisitModal}
                     saveText={
                       editingHomeVisit ? "Update Home Visit" : "Save Home Visit"
                     }
@@ -3177,18 +3369,9 @@ function ModalShell({ title, subtitle, onClose, children }) {
    MODAL BUTTONS
 ========================================================= */
 
-function ModalButtons({ saving, onCancel, saveText }) {
+function ModalButtons({ saving, saveText }) {
   return (
     <div className="flex justify-end gap-3 pt-5 border-t border-gray-200">
-      <button
-        type="button"
-        onClick={onCancel}
-        disabled={saving}
-        className="px-4 py-2.5 rounded-lg border border-gray-200 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-      >
-        Cancel
-      </button>
-
       <button
         type="submit"
         disabled={saving}

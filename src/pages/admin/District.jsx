@@ -12,6 +12,7 @@ import {
   RefreshCw,
   AlertCircle,
   Clock3,
+  Eye,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
@@ -43,6 +44,7 @@ export default function District() {
 
   const [online, setOnline] = useState(navigator.onLine);
   const [pendingActions, setPendingActions] = useState([]);
+  const [showPendingModal, setShowPendingModal] = useState(false);
   const [cachedAt, setCachedAt] = useState(null);
   const [notice, setNotice] = useState("");
 
@@ -384,6 +386,20 @@ export default function District() {
 
             <button
               type="button"
+              onClick={() => {
+                setShowPendingModal(true);
+                refreshPending().catch((error) =>
+                  setNotice(`Unable to load pending changes: ${error.message}`),
+                );
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-white px-4 py-2.5 text-sm font-medium text-amber-800 hover:bg-amber-50"
+            >
+              <Eye size={16} />
+              View Pending Changes ({pendingActions.length})
+            </button>
+
+            <button
+              type="button"
               onClick={syncNow}
               disabled={!online || syncing || saving}
               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white disabled:opacity-50"
@@ -704,6 +720,123 @@ export default function District() {
                   </button>
                 </div>
               </form>
+            </div>
+          </div>
+        )}
+
+        {/* READ-ONLY PENDING SYNC VIEWER */}
+        {showPendingModal && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4">
+            <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl bg-white shadow-xl">
+              <div className="flex items-start justify-between gap-4 border-b p-5">
+                <div>
+                  <h2 className="text-lg font-bold text-gray-900">
+                    Pending District Changes ({pendingActions.length})
+                  </h2>
+                  <p className="mt-1 text-sm text-gray-500">
+                    These changes are saved locally and await synchronization.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingModal(false)}
+                  className="rounded-lg p-2 hover:bg-gray-100"
+                  aria-label="Close pending changes"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="space-y-3 overflow-y-auto p-5">
+                {pendingActions.length === 0 ? (
+                  <div className="rounded-lg border border-dashed p-8 text-center text-sm text-gray-500">
+                    No pending district changes.
+                  </div>
+                ) : (
+                  pendingActions.map((action, index) => {
+                    const district = districts.find(
+                      (item) => String(item.id) === String(action.districtId),
+                    );
+                    const oldName =
+                      action.expectedName ??
+                      action.oldName ??
+                      action.originalName ??
+                      action.expected?.name ??
+                      district?.name;
+                    const newName =
+                      action.newName ??
+                      action.name ??
+                      action.changes?.name ??
+                      action.payload?.name;
+                    const queuedAt = action.createdAt ?? action.queuedAt;
+                    return (
+                      <div
+                        key={action.id ?? `${action.districtId}-${index}`}
+                        className="rounded-xl border border-amber-200 bg-amber-50/40 p-4"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="font-semibold text-gray-900">
+                            {district?.name ??
+                              oldName ??
+                              `District #${action.districtId ?? "Unknown"}`}
+                          </p>
+                          <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
+                            Pending rename
+                          </span>
+                        </div>
+                        <p className="mt-1 text-xs text-gray-500">
+                          District ID: {String(action.districtId ?? "—")}
+                        </p>
+                        {oldName != null && (
+                          <p className="mt-2 text-sm text-gray-700">
+                            <strong>Current name:</strong> {String(oldName)}
+                          </p>
+                        )}
+                        {newName != null && (
+                          <p className="mt-1 text-sm text-gray-700">
+                            <strong>New name:</strong> {String(newName)}
+                          </p>
+                        )}
+                        {queuedAt && (
+                          <p className="mt-2 text-xs text-gray-500">
+                            Queued: {new Date(queuedAt).toLocaleString()}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
+              <div className="flex flex-wrap justify-end gap-2 border-t p-4">
+                <button
+                  type="button"
+                  onClick={() =>
+                    refreshPending().catch((error) =>
+                      setNotice(
+                        `Unable to refresh pending changes: ${error.message}`,
+                      ),
+                    )
+                  }
+                  className="inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm font-medium"
+                >
+                  <RefreshCw size={16} /> Refresh List
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    !online || syncing || saving || !pendingActions.length
+                  }
+                  onClick={syncNow}
+                  className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+                >
+                  <RefreshCw
+                    size={16}
+                    className={syncing ? "animate-spin" : ""}
+                  />
+                  {syncing ? "Syncing..." : "Sync Now"}
+                </button>
+              </div>
             </div>
           </div>
         )}

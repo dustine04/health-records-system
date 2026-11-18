@@ -10,6 +10,8 @@ import {
   LoaderCircle,
   MessageSquare,
   Download,
+  CalendarDays,
+  BarChart3,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -19,6 +21,7 @@ import {
 import DashboardLayout from "../../components/DashboardLayout";
 import { supabase } from "../../lib/supabase";
 import { downloadMidwifeNurseFhsisPdf } from "../../utils/midwifeNurseFhsisPdf";
+import { downloadChoMonthlyFhsisPdf } from "../../utils/choMonthlyFhsisPdf";
 
 const MONTHS = [
   "January",
@@ -525,6 +528,165 @@ function BhwRecordTable({ data }) {
     />
   );
 }
+
+// Sum only known indicator fields. This avoids treating identifiers or text as totals.
+const createCitywideTotals = (selectedReports) => {
+  const bns = {};
+  const bhw = { family_planning: {}, prenatal_checkup: {}, records: {} };
+  let bnsSources = 0;
+  let bhwSources = 0;
+  const add = (target, key, value) => {
+    target[key] = (target[key] || 0) + asNumber(value);
+  };
+  for (const report of selectedReports) {
+    const data = isObject(report.report_data) ? report.report_data : {};
+    const child = isObject(data.bns_child_indicators)
+      ? data.bns_child_indicators
+      : {};
+    const maternal = isObject(data.bhw_maternal_community_indicators)
+      ? data.bhw_maternal_community_indicators
+      : {};
+    for (const { key } of BNS_AGE_GROUPS) {
+      if (!bns[key]) bns[key] = {};
+      for (const field of [
+        "male",
+        "female",
+        "deceased_male",
+        "deceased_female",
+        "trans_out_male",
+        "trans_out_female",
+      ]) {
+        add(bns[key], field, child[key]?.[field]);
+      }
+    }
+    for (const section of BHW_INDICATORS) {
+      if (!bhw[section.key]) bhw[section.key] = {};
+      for (const [field] of section.metrics)
+        add(bhw[section.key], field, maternal[section.key]?.[field]);
+    }
+    for (const [group] of FP_GROUPS) {
+      if (!bhw.family_planning[group]) bhw.family_planning[group] = {};
+      for (const [method] of FP_METHODS) {
+        add(
+          bhw.family_planning[group],
+          method,
+          maternal.family_planning?.[group]?.[method],
+        );
+      }
+    }
+    for (const [field] of PRENATAL_TRIMESTERS) {
+      const value = maternal.prenatal_checkup?.[field];
+      add(
+        bhw.prenatal_checkup,
+        field,
+        Array.isArray(value) ? value.length : value,
+      );
+    }
+    const records = isObject(maternal.records) ? maternal.records : maternal;
+    for (const [field] of BHW_RECORDS) {
+      const value = records[field];
+      add(bhw.records, field, Array.isArray(value) ? value.length : value);
+    }
+    const counts = isObject(data.source_counts) ? data.source_counts : {};
+    const snapshot = isObject(report.source_snapshot)
+      ? report.source_snapshot
+      : {};
+    bnsSources += asNumber(
+      counts.bns_child_monthly_reports ??
+        counts.bns ??
+        (Array.isArray(snapshot.bns_child_monthly_reports)
+          ? snapshot.bns_child_monthly_reports.length
+          : Array.isArray(snapshot.bns_reports)
+            ? snapshot.bns_reports.length
+            : 0),
+    );
+    bhwSources += asNumber(
+      counts.bhw_monthly_reports ??
+        counts.bhw ??
+        (Array.isArray(snapshot.bhw_monthly_reports)
+          ? snapshot.bhw_monthly_reports.length
+          : Array.isArray(snapshot.bhw_reports)
+            ? snapshot.bhw_reports.length
+            : 0),
+    );
+  }
+  return { bns, bhw, bnsSources, bhwSources };
+};
+
+const csvEscape = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+const downloadCitywideCsv = (month, year, selectedReports, districtById) => {
+  const rows = [
+    [
+      "District",
+      "Report ID",
+      "Month",
+      "Year",
+      "BNS source reports",
+      "BHW source reports",
+      "Indicator",
+      "Value",
+    ],
+  ];
+  for (const report of selectedReports) {
+    const totals = createCitywideTotals([report]);
+    const district =
+      districtById.get(String(report.district_id)) ||
+      `District ${report.district_id}`;
+    const addRow = (indicator, value) =>
+      rows.push([
+        district,
+        report.id,
+        MONTHS[month - 1],
+        year,
+        totals.bnsSources,
+        totals.bhwSources,
+        indicator,
+        value,
+      ]);
+    for (const { key, label: groupLabel } of BNS_AGE_GROUPS) {
+      for (const field of [
+        "male",
+        "female",
+        "deceased_male",
+        "deceased_female",
+        "trans_out_male",
+        "trans_out_female",
+      ])
+        addRow(
+          `Child / ${groupLabel} / ${label(field)}`,
+          totals.bns[key]?.[field] || 0,
+        );
+    }
+    for (const section of BHW_INDICATORS)
+      for (const [field, name] of section.metrics)
+        addRow(
+          `${section.title} / ${name}`,
+          totals.bhw[section.key]?.[field] || 0,
+        );
+    for (const [group, groupLabel] of FP_GROUPS)
+      for (const [method, methodLabel] of FP_METHODS)
+        addRow(
+          `Family Planning / ${groupLabel} / ${methodLabel}`,
+          totals.bhw.family_planning[group]?.[method] || 0,
+        );
+    for (const [field, name] of PRENATAL_TRIMESTERS)
+      addRow(`Prenatal / ${name}`, totals.bhw.prenatal_checkup[field] || 0);
+    for (const [field, name] of BHW_RECORDS)
+      addRow(`Other Records / ${name}`, totals.bhw.records[field] || 0);
+  }
+  const content =
+    "\uFEFF" + rows.map((row) => row.map(csvEscape).join(",")).join("\r\n");
+  const url = URL.createObjectURL(
+    new Blob([content], { type: "text/csv;charset=utf-8;" }),
+  );
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `CHO_FHSIS_Citywide_${MONTHS[month - 1]}_${year}.csv`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
 
 /* -------------------------------------------------------------------------- */
 /*                           PRINTABLE FHSIS REPORT                           */
@@ -1087,6 +1249,10 @@ export default function ChoFhsisReports() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [districtFilter, setDistrictFilter] = useState("all");
+  const [monthlyMonth, setMonthlyMonth] = useState(new Date().getMonth() + 1);
+  const [monthlyYear, setMonthlyYear] = useState(new Date().getFullYear());
+  const [monthlyPdfLoading, setMonthlyPdfLoading] = useState(false);
+  const [monthlyPdfError, setMonthlyPdfError] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
@@ -1108,23 +1274,28 @@ export default function ChoFhsisReports() {
     setError("");
 
     try {
-      const { data: rows, error: reportError } = await supabase
-        .from("midwife_nurse_fhsis_reports")
-        .select(
-          `
-          id, reporting_month, reporting_year, district_id,
-          midwife_id, nurse_id, report_title, report_data, source_snapshot,
-          status, submitted_at, reviewed_by, reviewed_at, review_notes,
-          forwarded_by, forwarded_at, cho_reviewed_by, cho_reviewed_at,
-          cho_review_notes, created_at, updated_at
-        `,
-        )
-        .in("status", ["forwarded_to_cho", "cho_approved", "returned_by_cho"])
-        .order("forwarded_at", { ascending: false, nullsFirst: false });
-
-      if (reportError) throw reportError;
-
-      const reportRows = rows || [];
+      // Fetch all forwarded/processed records, not only Supabase's default first page.
+      const reportRows = [];
+      const pageSize = 500;
+      for (let offset = 0; ; offset += pageSize) {
+        const { data: rows, error: reportError } = await supabase
+          .from("midwife_nurse_fhsis_reports")
+          .select(
+            `
+            id, reporting_month, reporting_year, district_id,
+            midwife_id, nurse_id, report_title, report_data, source_snapshot,
+            status, submitted_at, reviewed_by, reviewed_at, review_notes,
+            forwarded_by, forwarded_at, cho_reviewed_by, cho_reviewed_at,
+            cho_review_notes, created_at, updated_at
+          `,
+          )
+          .in("status", ["forwarded_to_cho", "cho_approved", "returned_by_cho"])
+          .order("id", { ascending: true })
+          .range(offset, offset + pageSize - 1);
+        if (reportError) throw reportError;
+        reportRows.push(...(rows || []));
+        if (!rows || rows.length < pageSize) break;
+      }
       setReports(reportRows);
 
       const userIds = [
@@ -1297,6 +1468,60 @@ export default function ChoFhsisReports() {
     districtById,
   ]);
 
+  const monthlyReports = useMemo(
+    () =>
+      reports.filter(
+        (report) =>
+          Number(report.reporting_month) === Number(monthlyMonth) &&
+          Number(report.reporting_year) === Number(monthlyYear),
+      ),
+    [reports, monthlyMonth, monthlyYear],
+  );
+
+  const monthlyApproved = useMemo(
+    () => monthlyReports.filter((report) => report.status === "cho_approved"),
+    [monthlyReports],
+  );
+  const cityTotals = useMemo(
+    () => createCitywideTotals(monthlyApproved),
+    [monthlyApproved],
+  );
+  const monthlyDistrictRows = useMemo(
+    () =>
+      monthlyApproved.map((report) => ({
+        report,
+        districtName:
+          districtById.get(String(report.district_id)) ||
+          `District ${report.district_id}`,
+        totals: createCitywideTotals([report]),
+      })),
+    [monthlyApproved, districtById],
+  );
+  const monthlyDistrictIds = monthlyApproved.map((r) => String(r.district_id));
+  const hasDuplicateDistricts =
+    new Set(monthlyDistrictIds).size !== monthlyDistrictIds.length;
+  const approvedDistrictCount = new Set(monthlyDistrictIds).size;
+
+  const downloadMonthlyPdf = async () => {
+    if (!monthlyApproved.length || hasDuplicateDistricts) return;
+    setMonthlyPdfLoading(true);
+    setMonthlyPdfError("");
+    try {
+      await downloadChoMonthlyFhsisPdf({
+        month: Number(monthlyMonth),
+        year: Number(monthlyYear),
+        cityTotals,
+        districtRows: monthlyDistrictRows,
+        districtCount: districts.length,
+      });
+    } catch (err) {
+      console.error("Citywide PDF generation failed:", err);
+      setMonthlyPdfError(err?.message || "Unable to generate citywide PDF.");
+    } finally {
+      setMonthlyPdfLoading(false);
+    }
+  };
+
   const pendingCount = reports.filter(
     (item) => item.status === "forwarded_to_cho",
   ).length;
@@ -1385,6 +1610,222 @@ export default function ChoFhsisReports() {
               color="bg-rose-50 text-rose-700"
             />
           </div>
+
+          {/* Monthly consolidation is separate from the individual review filters. */}
+          <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm sm:p-6">
+            <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
+              <div>
+                <div className="flex items-center gap-2 text-indigo-700">
+                  <BarChart3 size={19} />
+                  <h2 className="text-lg font-bold text-slate-900">
+                    Monthly Citywide Consolidation
+                  </h2>
+                </div>
+                <p className="mt-1 text-sm text-slate-500">
+                  View and export combined, final-approved FHSIS reports from
+                  all districts.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <select
+                  aria-label="Reporting month"
+                  value={monthlyMonth}
+                  onChange={(e) => setMonthlyMonth(Number(e.target.value))}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                >
+                  {MONTHS.map((month, index) => (
+                    <option key={month} value={index + 1}>
+                      {month}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  aria-label="Reporting year"
+                  value={monthlyYear}
+                  onChange={(e) => setMonthlyYear(Number(e.target.value))}
+                  className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+                >
+                  {Array.from(
+                    new Set([
+                      ...reports.map((r) => Number(r.reporting_year)),
+                      new Date().getFullYear(),
+                    ]),
+                  )
+                    .filter(Number.isFinite)
+                    .sort((a, b) => b - a)
+                    .map((year) => (
+                      <option key={year} value={year}>
+                        {year}
+                      </option>
+                    ))}
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <StatCard
+                title="Approved Districts"
+                value={`${approvedDistrictCount} / ${districts.length}`}
+                icon={ShieldCheck}
+                color="bg-emerald-50 text-emerald-700"
+              />
+              <StatCard
+                title="Approved Reports"
+                value={monthlyApproved.length}
+                icon={CheckCircle2}
+                color="bg-indigo-50 text-indigo-700"
+              />
+              <StatCard
+                title="BNS Source Reports"
+                value={cityTotals.bnsSources}
+                icon={FileText}
+                color="bg-blue-50 text-blue-700"
+              />
+              <StatCard
+                title="BHW Source Reports"
+                value={cityTotals.bhwSources}
+                icon={ClipboardCheck}
+                color="bg-violet-50 text-violet-700"
+              />
+            </div>
+            {monthlyReports.length > monthlyApproved.length && (
+              <p className="rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+                {monthlyReports.length - monthlyApproved.length} report(s) for
+                this month are pending or returned and are excluded from the
+                official totals.
+              </p>
+            )}
+            {hasDuplicateDistricts && (
+              <p
+                role="alert"
+                className="rounded-lg bg-rose-50 p-3 text-sm text-rose-800"
+              >
+                Multiple approved reports exist for at least one district this
+                month. Review these duplicates before exporting to avoid double
+                counting. PDF and CSV export are disabled until resolved.
+              </p>
+            )}
+            {monthlyApproved.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-slate-300 p-6 text-center text-sm text-slate-500">
+                No final-approved district reports for{" "}
+                {MONTHS[monthlyMonth - 1]} {monthlyYear}.
+              </p>
+            ) : (
+              <>
+                <div>
+                  <h3 className="mb-2 font-bold text-slate-800">
+                    Approved district contributions
+                  </h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2">District</th>
+                          <th className="px-3 py-2">Report</th>
+                          <th className="px-3 py-2">BNS sources</th>
+                          <th className="px-3 py-2">BHW sources</th>
+                          <th className="px-3 py-2">Pregnancies</th>
+                          <th className="px-3 py-2">Deliveries</th>
+                          <th className="px-3 py-2 text-right">View</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {monthlyDistrictRows.map(
+                          ({ report, districtName, totals }) => (
+                            <tr key={report.id}>
+                              <td className="px-3 py-3 font-medium">
+                                {districtName}
+                              </td>
+                              <td className="px-3 py-3">FHSIS-{report.id}</td>
+                              <td className="px-3 py-3">{totals.bnsSources}</td>
+                              <td className="px-3 py-3">{totals.bhwSources}</td>
+                              <td className="px-3 py-3">
+                                {totals.bhw.pregnancy_tracking?.total || 0}
+                              </td>
+                              <td className="px-3 py-3">
+                                {totals.bhw.deliveries?.total || 0}
+                              </td>
+                              <td className="px-3 py-3 text-right">
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedReport(report)}
+                                  className="font-semibold text-indigo-700 hover:underline"
+                                >
+                                  View report
+                                </button>
+                              </td>
+                            </tr>
+                          ),
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <div className="space-y-4 border-t pt-4">
+                  <h3 className="font-bold text-slate-800">
+                    Combined citywide indicators
+                  </h3>
+                  <BnsChildIndicators data={cityTotals.bns} />
+                  <ObjectIndicators
+                    data={cityTotals.bhw}
+                    sections={BHW_INDICATORS}
+                  />
+                  <h4 className="font-semibold text-slate-800">
+                    Family planning
+                  </h4>
+                  <FamilyPlanningTable data={cityTotals.bhw} />
+                  <h4 className="font-semibold text-slate-800">
+                    Prenatal checkups
+                  </h4>
+                  <PrenatalTable data={cityTotals.bhw} />
+                  <h4 className="font-semibold text-slate-800">
+                    Other community health records
+                  </h4>
+                  <BhwRecordTable data={cityTotals.bhw.records} />
+                </div>
+                <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+                  <button
+                    type="button"
+                    disabled={monthlyPdfLoading || hasDuplicateDistricts}
+                    onClick={downloadMonthlyPdf}
+                    className="inline-flex items-center gap-2 rounded-lg bg-indigo-700 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+                  >
+                    {monthlyPdfLoading ? (
+                      <LoaderCircle size={17} className="animate-spin" />
+                    ) : (
+                      <Download size={17} />
+                    )}
+                    {monthlyPdfLoading
+                      ? "Generating PDF..."
+                      : "Download Citywide PDF"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={hasDuplicateDistricts}
+                    onClick={() =>
+                      downloadCitywideCsv(
+                        Number(monthlyMonth),
+                        Number(monthlyYear),
+                        monthlyApproved,
+                        districtById,
+                      )
+                    }
+                    className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2.5 text-sm font-semibold text-slate-700 disabled:opacity-50"
+                  >
+                    <Download size={17} /> Download District Breakdown CSV
+                  </button>
+                  <p className="text-xs text-slate-500">
+                    Counts may overlap across age groups and record categories.
+                    Verify before official submission.
+                  </p>
+                </div>
+                {monthlyPdfError && (
+                  <p role="alert" className="text-sm text-rose-700">
+                    {monthlyPdfError}
+                  </p>
+                )}
+              </>
+            )}
+          </section>
 
           <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
             <div className="flex flex-col gap-3 lg:flex-row">

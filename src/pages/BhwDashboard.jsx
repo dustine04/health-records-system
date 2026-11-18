@@ -17,6 +17,10 @@ import {
   CheckCircle2,
   Clock3,
   AlertCircle,
+  Bell,
+  BellRing,
+  Check,
+  X,
 } from "lucide-react";
 
 import {
@@ -183,6 +187,9 @@ export default function BhwDashboard() {
   const [residents, setResidents] = useState([]);
 
   const [missedHomeVisits, setMissedHomeVisits] = useState([]);
+  const [scheduledHomeVisits, setScheduledHomeVisits] = useState([]);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [readNotificationIds, setReadNotificationIds] = useState([]);
   const [recentReports, setRecentReports] = useState([]);
   const [reportCount, setReportCount] = useState(0);
 
@@ -391,7 +398,7 @@ export default function BhwDashboard() {
           residentRows.map((resident) => [String(resident.id), resident]),
         );
 
-        const overdueVisits = pregnancyRows
+        const allScheduledVisits = pregnancyRows
           .map((pregnancy) => {
             const latestVisit = latestVisitByPregnancy.get(pregnancy.id);
 
@@ -405,8 +412,6 @@ export default function BhwDashboard() {
               0,
               10,
             );
-
-            if (nextVisitDate >= today) return null;
 
             const household = getRelation(resident.households);
             const localArea = getRelation(household?.local_areas);
@@ -427,7 +432,10 @@ export default function BhwDashboard() {
           .filter(Boolean)
           .sort((a, b) => b.daysOverdue - a.daysOverdue);
 
-        setMissedHomeVisits(overdueVisits);
+        setScheduledHomeVisits(allScheduledVisits);
+        setMissedHomeVisits(
+          allScheduledVisits.filter((visit) => visit.nextVisitDate < today),
+        );
 
         // 7. Load this BHW's monthly reports.
         // The dashboard no longer queries health_records or submissions.
@@ -507,6 +515,90 @@ export default function BhwDashboard() {
       setLoading(false);
     }
   }, [loadDashboard]);
+
+  // Persist read notifications per BHW account and per scheduled visit.
+  useEffect(() => {
+    if (!user?.id) return;
+    try {
+      const stored = JSON.parse(
+        localStorage.getItem(`mchms_bhw_notification_read_${user.id}`) || "[]",
+      );
+      setReadNotificationIds(Array.isArray(stored) ? stored : []);
+    } catch {
+      setReadNotificationIds([]);
+    }
+  }, [user?.id]);
+
+  const saveReadNotifications = useCallback(
+    (ids) => {
+      setReadNotificationIds(ids);
+      if (user?.id) {
+        try {
+          localStorage.setItem(
+            `mchms_bhw_notification_read_${user.id}`,
+            JSON.stringify(ids),
+          );
+        } catch (error) {
+          console.warn("Unable to save notification read status:", error);
+        }
+      }
+    },
+    [user?.id],
+  );
+
+  const notifications = useMemo(() => {
+    const day = new Date(`${getLocalDate()}T00:00:00`);
+    const selected = scheduledHomeVisits.filter(
+      (visit) =>
+        selectedAreaId === "all" ||
+        assignedAreas.some(
+          (area) =>
+            String(area.id) === selectedAreaId &&
+            area.name === visit.localAreaName,
+        ),
+    );
+
+    return selected
+      .map((visit) => {
+        const due = new Date(`${visit.nextVisitDate}T00:00:00`);
+        const days = Math.round((due.getTime() - day.getTime()) / 86400000);
+        if (!Number.isFinite(days) || days > 7) return null;
+        const priority = days < 0 ? 0 : days === 0 ? 1 : 2;
+        return {
+          ...visit,
+          id: `pregnancy-${visit.pregnancyId}-${visit.nextVisitDate}`,
+          priority,
+          title:
+            days < 0
+              ? "Overdue pregnancy follow-up"
+              : days === 0
+                ? "Pregnancy follow-up due today"
+                : "Upcoming pregnancy follow-up",
+          description:
+            days < 0
+              ? `${Math.abs(days)} day(s) overdue`
+              : days === 0
+                ? "Scheduled for today"
+                : `Due in ${days} day(s)`,
+        };
+      })
+      .filter(Boolean)
+      .sort(
+        (a, b) =>
+          a.priority - b.priority ||
+          a.nextVisitDate.localeCompare(b.nextVisitDate),
+      );
+  }, [scheduledHomeVisits, selectedAreaId, assignedAreas]);
+
+  const unreadNotifications = notifications.filter(
+    (item) => !readNotificationIds.includes(item.id),
+  ).length;
+
+  const markNotificationRead = (id) => {
+    if (!readNotificationIds.includes(id)) {
+      saveReadNotifications([...readNotificationIds, id]);
+    }
+  };
 
   // Apply the area filter to household and resident statistics.
   const filteredHouseholds = useMemo(() => {
@@ -689,18 +781,149 @@ export default function BhwDashboard() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => user && loadDashboard(user, true)}
-            disabled={loading || refreshing || !user}
-            className="inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <RefreshCw
-              size={16}
-              className={loading || refreshing ? "animate-spin" : ""}
-            />
-            {refreshing ? "Refreshing..." : "Refresh Dashboard"}
-          </button>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="relative">
+              <button
+                type="button"
+                aria-label={`Notifications, ${unreadNotifications} unread`}
+                aria-expanded={notificationOpen}
+                onClick={() => setNotificationOpen((open) => !open)}
+                className="relative inline-flex h-11 w-11 items-center justify-center rounded-xl border border-blue-200 bg-white text-blue-700 shadow-sm transition hover:bg-blue-50"
+              >
+                {unreadNotifications > 0 ? (
+                  <BellRing size={21} />
+                ) : (
+                  <Bell size={21} />
+                )}
+                {unreadNotifications > 0 && (
+                  <span className="absolute -right-2 -top-2 flex h-6 min-w-6 items-center justify-center rounded-full bg-rose-600 px-1 text-xs font-bold text-white">
+                    {unreadNotifications > 99 ? "99+" : unreadNotifications}
+                  </span>
+                )}
+              </button>
+
+              {notificationOpen && (
+                <div className="absolute right-0 top-14 z-50 w-[min(90vw,390px)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
+                  <div className="flex items-center justify-between border-b border-gray-100 p-4">
+                    <div>
+                      <h3 className="font-bold text-gray-900">
+                        Pregnancy Notifications
+                      </h3>
+                      <p className="text-xs text-gray-500">
+                        {unreadNotifications} unread · Overdue, today and next 7
+                        days
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setNotificationOpen(false)}
+                      aria-label="Close notifications"
+                      className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
+                    >
+                      <X size={17} />
+                    </button>
+                  </div>
+                  {notifications.length > 0 && (
+                    <div className="flex justify-end border-b border-gray-100 px-4 py-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          saveReadNotifications([
+                            ...new Set([
+                              ...readNotificationIds,
+                              ...notifications.map((n) => n.id),
+                            ]),
+                          ])
+                        }
+                        className="text-xs font-semibold text-blue-700 hover:underline"
+                      >
+                        Mark all as read
+                      </button>
+                    </div>
+                  )}
+                  <div className="max-h-96 overflow-y-auto">
+                    {notifications.length === 0 ? (
+                      <div className="p-8 text-center text-sm text-gray-500">
+                        No upcoming or overdue pregnancy follow-ups in this
+                        area.
+                      </div>
+                    ) : (
+                      notifications.map((notice) => {
+                        const unread = !readNotificationIds.includes(notice.id);
+                        return (
+                          <div
+                            key={notice.id}
+                            className={`border-b border-gray-100 p-4 last:border-b-0 ${unread ? "bg-blue-50/50" : "bg-white"}`}
+                          >
+                            <div className="flex items-start gap-3">
+                              <span
+                                className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${unread ? "bg-blue-600" : "bg-gray-200"}`}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <p
+                                  className={`text-sm font-semibold ${notice.priority === 0 ? "text-rose-700" : "text-gray-900"}`}
+                                >
+                                  {notice.title}
+                                </p>
+                                <p className="mt-1 text-sm font-medium text-gray-800">
+                                  {notice.residentName}
+                                </p>
+                                <p className="mt-1 text-xs text-gray-500">
+                                  {notice.localAreaName} ·{" "}
+                                  {formatDate(notice.nextVisitDate)}
+                                </p>
+                                <p className="mt-1 text-xs text-gray-600">
+                                  {notice.description}
+                                </p>
+                                <div className="mt-3 flex items-center gap-4">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      markNotificationRead(notice.id);
+                                      setNotificationOpen(false);
+                                      navigate(
+                                        "/dashboard/bhw/pregnant-monitoring",
+                                      );
+                                    }}
+                                    className="text-xs font-semibold text-blue-700 hover:underline"
+                                  >
+                                    Open Monitoring
+                                  </button>
+                                  {unread && (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        markNotificationRead(notice.id)
+                                      }
+                                      className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900"
+                                    >
+                                      <Check size={13} /> Mark read
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => user && loadDashboard(user, true)}
+              disabled={loading || refreshing || !user}
+              className="inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2.5 text-sm font-semibold text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw
+                size={16}
+                className={loading || refreshing ? "animate-spin" : ""}
+              />
+              {refreshing ? "Refreshing..." : "Refresh Dashboard"}
+            </button>
+          </div>
         </div>
 
         {/* Error message */}

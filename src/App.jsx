@@ -20,6 +20,7 @@ import District from "./pages/admin/District";
 import Barangay from "./pages/admin/Barangay";
 import NurseFhsisReports from "./pages/nurse/NurseFhsisReports";
 import NursePregnancyMonitoring from "./pages/nurse/NursePregnancyMonitoring";
+import NurseChildMonitoring from "./pages/nurse/NurseChildMonitoring";
 import NurseDistrictCoverage from "./pages/nurse/NurseDistrictCoverage";
 import ProtectedRoute from "./components/ProtectedRoute";
 
@@ -37,6 +38,7 @@ import BhwMonthlyReport from "./pages/bhw/BhwMonthlyReport";
 import MidwifeNurseFhsisReport from "./pages/midwife/MidwifeNurseFhsisReport";
 import Profile from "./pages/Profile";
 import PregnancyMonitoring from "./pages/midwife/PregnancyMonitoring";
+import MidwifeChildMonitoring from "./pages/midwife/MidwifeChildMonitoring";
 import ForgotPassword from "./pages/ForgotPassword";
 function App() {
   return (
@@ -175,6 +177,16 @@ function App() {
           }
         />
 
+        {/* Nurse Child Monitoring - Midwife authorization required */}
+        <Route
+          path="/dashboard/nurse/child-monitoring"
+          element={
+            <ProtectedRoute allowedRoles={["nurse"]}>
+              <NurseChildMonitoring />
+            </ProtectedRoute>
+          }
+        />
+
         {/* Nurse Profile */}
         <Route
           path="/dashboard/nurse/profile"
@@ -229,6 +241,15 @@ function App() {
           element={
             <ProtectedRoute allowedRoles={["midwife"]}>
               <PregnancyMonitoring />
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/dashboard/midwife/child-monitoring"
+          element={
+            <ProtectedRoute allowedRoles={["midwife"]}>
+              <MidwifeChildMonitoring />
             </ProtectedRoute>
           }
         />

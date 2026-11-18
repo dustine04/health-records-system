@@ -18,6 +18,7 @@ import {
   CalendarDays,
   FileText,
   RefreshCw,
+  Clock3,
   Wifi,
   WifiOff,
 } from "lucide-react";
@@ -138,6 +139,7 @@ const emptyForms = {
     weight_kg: "",
     height_cm: "",
     muac_cm: "",
+    next_visit_date: "",
   },
 
   immunization: {
@@ -145,6 +147,8 @@ const emptyForms = {
     vaccine_name: "",
     dose: "",
     facility: "",
+    next_visit_date: "",
+    next_vaccine_name: "",
     remarks: "",
   },
 
@@ -259,6 +263,96 @@ function formatDate(date) {
     month: "short",
     day: "numeric",
   });
+}
+
+function localToday() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function visitStatus(date) {
+  if (!date)
+    return { label: "Not scheduled", style: "bg-slate-100 text-slate-600" };
+  const today = localToday();
+  if (date < today)
+    return { label: "Missed / overdue", style: "bg-red-100 text-red-700" };
+  if (date === today)
+    return { label: "Due today", style: "bg-amber-100 text-amber-800" };
+  const days = Math.round(
+    (new Date(`${date}T12:00:00`) - new Date(`${today}T12:00:00`)) / 86400000,
+  );
+  if (days <= 7)
+    return { label: "Upcoming", style: "bg-blue-100 text-blue-700" };
+  return { label: "Scheduled", style: "bg-emerald-100 text-emerald-700" };
+}
+
+// Read the existing offline mutation queue without changing its database schema.
+function readMonitoringPendingQueue(userId) {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined") {
+      reject(new Error("IndexedDB is unavailable in this browser."));
+      return;
+    }
+    const request = indexedDB.open("mchms-bns-child-monitoring-v1");
+    request.onerror = () =>
+      reject(request.error || new Error("Cannot open offline storage."));
+    request.onupgradeneeded = () => {
+      // Never create a replacement database/store just to view the queue.
+      request.transaction.abort();
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("queue")) {
+        db.close();
+        reject(new Error("The monitoring offline queue was not found."));
+        return;
+      }
+      const tx = db.transaction("queue", "readonly");
+      const query = tx.objectStore("queue").getAll();
+      query.onsuccess = () => {
+        const own = (query.result || []).filter(
+          (item) => String(item.userId) === String(userId),
+        );
+        resolve(
+          own.sort((a, b) =>
+            String(a.createdAt || "").localeCompare(String(b.createdAt || "")),
+          ),
+        );
+      };
+      query.onerror = () =>
+        reject(query.error || new Error("Cannot read queued changes."));
+      tx.oncomplete = () => db.close();
+      tx.onabort = () => db.close();
+    };
+  });
+}
+
+function pendingMonitoringSummary(item) {
+  const operation = String(
+    item.operation || item.action || item.type || item.kind || "change",
+  );
+  const section = String(item.section || item.data?.section || "");
+  const title = sectionConfig[section]?.title || "Child monitoring";
+  const action = /delete|remove/i.test(operation)
+    ? "Delete"
+    : /update|edit/i.test(operation)
+      ? "Update"
+      : /create|add|insert/i.test(operation)
+        ? "Add"
+        : "Pending";
+  const childId =
+    item.childHealthRecordId ??
+    item.child_health_record_id ??
+    item.childId ??
+    item.data?.child_health_record_id;
+  return {
+    title: `${action} — ${title}`,
+    detail:
+      childId != null
+        ? `Child health record #${childId}`
+        : "Waiting for synchronization",
+    operation,
+  };
 }
 
 function getFullName(resident) {
@@ -498,11 +592,31 @@ export default function ChildMonitoring() {
 
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
+  const [showPendingChanges, setShowPendingChanges] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
+  const [pendingError, setPendingError] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState("");
   async function updatePending() {
     if (user?.id) setPending(await pendingMonitoringCount(user.id));
   }
+  async function loadPendingChanges() {
+    if (!user?.id) return;
+    setPendingLoading(true);
+    setPendingError("");
+    try {
+      setPendingChanges(await readMonitoringPendingQueue(user.id));
+    } catch (error) {
+      setPendingError(error.message || "Could not read pending changes.");
+    } finally {
+      setPendingLoading(false);
+    }
+  }
+  useEffect(() => {
+    if (showPendingChanges) void loadPendingChanges();
+  }, [showPendingChanges, pending, user?.id]);
+
   async function runSync() {
     if (!user?.id || !navigator.onLine) return;
     setSyncing(true);
@@ -729,6 +843,7 @@ export default function ChildMonitoring() {
           weight_kg: form.weight_kg ? Number(form.weight_kg) : null,
           height_cm: form.height_cm ? Number(form.height_cm) : null,
           muac_cm: form.muac_cm ? Number(form.muac_cm) : null,
+          next_visit_date: form.next_visit_date || null,
           created_by: user.id,
           updated_at: new Date().toISOString(),
         };
@@ -743,12 +858,24 @@ export default function ChildMonitoring() {
           return;
         }
 
+        if (
+          form.next_visit_date &&
+          form.next_visit_date < form.vaccination_date
+        ) {
+          alert(
+            "The next immunization visit cannot be before the recorded vaccination date.",
+          );
+          return;
+        }
+
         data = {
           child_health_record_id: childHealthRecordId,
           vaccination_date: form.vaccination_date,
           vaccine_name: form.vaccine_name.trim() || null,
           dose: form.dose.trim() || null,
           facility: form.facility.trim() || null,
+          next_visit_date: form.next_visit_date || null,
+          next_vaccine_name: form.next_vaccine_name.trim() || null,
           remarks: form.remarks.trim() || null,
           created_by: user.id,
           updated_at: new Date().toISOString(),
@@ -991,6 +1118,14 @@ export default function ChildMonitoring() {
             Pending changes: <strong>{pending}</strong>
           </span>
           <button
+            type="button"
+            onClick={() => setShowPendingChanges(true)}
+            className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 font-medium text-blue-700 hover:bg-blue-100"
+          >
+            <Clock3 size={15} />
+            View pending changes ({pending})
+          </button>
+          <button
             onClick={runSync}
             disabled={!online || syncing}
             className="ml-auto inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-white disabled:opacity-50"
@@ -1121,6 +1256,100 @@ export default function ChildMonitoring() {
         </div>
       </div>
 
+      {showPendingChanges && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-3">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pending-monitoring-title"
+            className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+          >
+            <div className="flex items-start justify-between gap-4 border-b p-5">
+              <div>
+                <h2
+                  id="pending-monitoring-title"
+                  className="text-lg font-bold text-gray-800"
+                >
+                  Pending monitoring changes
+                </h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Changes saved for synchronization on this device. Unfinished
+                  form drafts are separate.
+                </p>
+              </div>
+              <button
+                type="button"
+                aria-label="Close pending changes"
+                onClick={() => setShowPendingChanges(false)}
+                className="rounded-lg p-2 hover:bg-gray-100"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-5">
+              {pendingLoading ? (
+                <p className="text-sm text-gray-500">
+                  Reading local changes...
+                </p>
+              ) : pendingError ? (
+                <p className="rounded-xl bg-red-50 p-4 text-sm text-red-700">
+                  {pendingError}
+                </p>
+              ) : pendingChanges.length === 0 ? (
+                <p className="rounded-xl bg-green-50 p-4 text-sm text-green-700">
+                  No pending monitoring changes on this device.
+                </p>
+              ) : (
+                pendingChanges.map((item, index) => {
+                  const summary = pendingMonitoringSummary(item);
+                  return (
+                    <div
+                      key={item.uuid ?? item.id ?? index}
+                      className="rounded-xl border border-amber-200 bg-amber-50/50 p-4"
+                    >
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <p className="font-semibold text-gray-800">
+                            {summary.title}
+                          </p>
+                          <p className="mt-1 text-sm text-gray-600">
+                            {summary.detail}
+                          </p>
+                        </div>
+                        <span className="rounded-full bg-amber-100 px-2 py-1 text-xs font-semibold text-amber-800">
+                          Awaiting sync
+                        </span>
+                      </div>
+                      {item.createdAt && (
+                        <p className="mt-2 text-xs text-gray-500">
+                          Queued: {new Date(item.createdAt).toLocaleString()}
+                        </p>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t p-4">
+              <button
+                type="button"
+                onClick={() => void loadPendingChanges()}
+                className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-gray-50"
+              >
+                Refresh list
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPendingChanges(false)}
+                className="rounded-lg bg-gray-800 px-4 py-2 text-sm font-medium text-white"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* =======================================================
           CHILD MONITORING MODAL
       ======================================================== */}
@@ -1204,6 +1433,40 @@ export default function ChildMonitoring() {
 
               {/* Content */}
               <div className="min-h-0 flex-1 overflow-y-auto p-5">
+                {activeSection === "immunization" &&
+                  !loadingRecords &&
+                  (() => {
+                    const scheduled = (records.immunization || [])
+                      .filter((r) => r.next_visit_date)
+                      .sort((a, b) =>
+                        (b.vaccination_date || "").localeCompare(
+                          a.vaccination_date || "",
+                        ),
+                      )[0];
+                    if (!scheduled) return null;
+                    const status = visitStatus(scheduled.next_visit_date);
+                    return (
+                      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
+                        <div>
+                          <p className="text-xs font-semibold uppercase text-blue-700">
+                            Next immunization appointment
+                          </p>
+                          <p className="mt-1 font-bold text-slate-800">
+                            {formatDate(scheduled.next_visit_date)}
+                          </p>
+                          <p className="text-xs text-slate-600">
+                            {scheduled.next_vaccine_name ||
+                              "Vaccine not specified"}
+                          </p>
+                        </div>
+                        <span
+                          className={`rounded-full px-3 py-1 text-xs font-semibold ${status.style}`}
+                        >
+                          {status.label}
+                        </span>
+                      </div>
+                    );
+                  })()}
                 {loadingRecords ? (
                   <div className="flex items-center justify-center py-20">
                     <div className="h-8 w-8 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600" />
@@ -1285,14 +1548,6 @@ export default function ChildMonitoring() {
               />
 
               <div className="mt-6 flex justify-end gap-3 border-t border-gray-100 pt-5">
-                <button
-                  onClick={closeForm}
-                  disabled={saving}
-                  className="rounded-lg border border-gray-200 px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
-                >
-                  Save Draft & Close
-                </button>
-
                 <button
                   onClick={handleSave}
                   disabled={saving || draftBusy}
@@ -1566,6 +1821,7 @@ function MonitoringTable({ records, onEdit, onDelete }) {
           <th className="px-4 py-3">Weight</th>
           <th className="px-4 py-3">Height</th>
           <th className="px-4 py-3">MUAC</th>
+          <th className="px-4 py-3">Next Check-up</th>
           <th className="px-4 py-3 text-right">Actions</th>
         </tr>
       </thead>
@@ -1589,6 +1845,20 @@ function MonitoringTable({ records, onEdit, onDelete }) {
               {record.muac_cm != null ? `${record.muac_cm} cm` : "-"}
             </td>
 
+            <td className="px-4 py-3 text-sm">
+              {record.next_visit_date ? (
+                <div>
+                  <div>{formatDate(record.next_visit_date)}</div>
+                  <span
+                    className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs ${visitStatus(record.next_visit_date).style}`}
+                  >
+                    {visitStatus(record.next_visit_date).label}
+                  </span>
+                </div>
+              ) : (
+                "-"
+              )}
+            </td>
             <td className="px-4 py-3">
               <TableActions
                 record={record}
@@ -1616,6 +1886,8 @@ function ImmunizationTable({ records, onEdit, onDelete }) {
           <th className="px-4 py-3">Vaccine</th>
           <th className="px-4 py-3">Dose</th>
           <th className="px-4 py-3">Facility</th>
+          <th className="px-4 py-3">Next Visit</th>
+          <th className="px-4 py-3">Next Vaccine</th>
           <th className="px-4 py-3">Remarks</th>
           <th className="px-4 py-3 text-right">Actions</th>
         </tr>
@@ -1636,6 +1908,23 @@ function ImmunizationTable({ records, onEdit, onDelete }) {
 
             <td className="px-4 py-3 text-sm">{record.facility || "-"}</td>
 
+            <td className="px-4 py-3 text-sm">
+              {record.next_visit_date ? (
+                <div>
+                  {formatDate(record.next_visit_date)}
+                  <div
+                    className={`mt-1 inline-block rounded-full px-2 py-0.5 text-xs ${visitStatus(record.next_visit_date).style}`}
+                  >
+                    {visitStatus(record.next_visit_date).label}
+                  </div>
+                </div>
+              ) : (
+                "-"
+              )}
+            </td>
+            <td className="px-4 py-3 text-sm">
+              {record.next_vaccine_name || "-"}
+            </td>
             <td className="px-4 py-3 text-sm text-gray-500">
               {record.remarks || "-"}
             </td>
@@ -2086,6 +2375,14 @@ function RecordForm({ section, form, onChange }) {
           onChange={onChange}
           placeholder="e.g. 14.50"
         />
+
+        <InputField
+          label="Next Growth Check-up"
+          name="next_visit_date"
+          type="date"
+          value={form.next_visit_date || ""}
+          onChange={onChange}
+        />
       </div>
     );
   }
@@ -2124,6 +2421,22 @@ function RecordForm({ section, form, onChange }) {
           value={form.facility}
           onChange={onChange}
           placeholder="e.g. Barangay Health Station"
+        />
+
+        <InputField
+          label="Next Immunization Visit"
+          name="next_visit_date"
+          type="date"
+          value={form.next_visit_date || ""}
+          onChange={onChange}
+        />
+
+        <InputField
+          label="Vaccine Planned for Next Visit"
+          name="next_vaccine_name"
+          value={form.next_vaccine_name || ""}
+          onChange={onChange}
+          placeholder="e.g. Pentavalent dose 2"
         />
 
         <div className="sm:col-span-2">

@@ -13,7 +13,6 @@ import {
   Wifi,
   WifiOff,
   RefreshCw,
-  CloudUpload,
   Clock3,
 } from "lucide-react";
 
@@ -187,6 +186,9 @@ function ChildRegistration() {
 
   const [online, setOnline] = useState(navigator.onLine);
   const [pending, setPending] = useState(0);
+  const [showPendingChanges, setShowPendingChanges] = useState(false);
+  const [pendingChanges, setPendingChanges] = useState([]);
+  const [pendingLoading, setPendingLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState("");
   const [cachedAt, setCachedAt] = useState(null);
@@ -382,11 +384,76 @@ function ChildRegistration() {
     }
   };
 
+  // Show actual queued operations in IndexedDB, not unfinished drafts.
+  const loadPendingChanges = async () => {
+    if (!user?.id) return;
+    setPendingLoading(true);
+    try {
+      const queued = await childOfflineDB.mutations.toArray();
+      const own = queued.filter(
+        (item) => String(item.userId) === String(user.id),
+      );
+      setPendingChanges(
+        own.sort(
+          (a, b) =>
+            new Date(a.createdAt || 0).getTime() -
+            new Date(b.createdAt || 0).getTime(),
+        ),
+      );
+    } catch (error) {
+      console.error("Unable to load pending child changes:", error);
+      setSyncError(`Unable to read pending changes: ${error.message}`);
+    } finally {
+      setPendingLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (showPendingChanges) void loadPendingChanges();
+  }, [showPendingChanges, pending]);
+
+  const describePendingChange = (item) => {
+    const kind = item.kind || item.type || item.action || "change";
+    if (kind === "create-child")
+      return {
+        title: "New child and household",
+        detail:
+          [
+            item.resident?.first_name,
+            item.resident?.middle_name,
+            item.resident?.last_name,
+          ]
+            .filter(Boolean)
+            .join(" ") ||
+          item.record?.child_name ||
+          "New child",
+      };
+    if (/delet/i.test(kind))
+      return {
+        title: "Delete child health record",
+        detail: `Resident ID: ${item.residentId ?? item.resident_id ?? "—"}`,
+      };
+    if (/updat|edit/i.test(kind))
+      return {
+        title: "Update child health record",
+        detail:
+          item.record?.child_name ||
+          `Resident ID: ${item.residentId ?? item.resident_id ?? "—"}`,
+      };
+    return {
+      title: "Child record change awaiting sync",
+      detail:
+        item.record?.child_name ||
+        `Resident ID: ${item.residentId ?? item.resident_id ?? "—"}`,
+    };
+  };
+
   const showLocal = async () => {
     const local = await getCachedChildren(user.id);
     setChildren(local.children);
     setAssignedAreas(local.areas);
     setPending(local.pending);
+    if (showPendingChanges) void loadPendingChanges();
     setCachedAt(local.cachedAt);
   };
 
@@ -994,15 +1061,25 @@ function ChildRegistration() {
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={synchronize}
-            disabled={!online || syncing}
-            className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-white text-sm disabled:opacity-50"
-          >
-            <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
-            {syncing ? "Synchronizing..." : "Sync now"}
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowPendingChanges(true)}
+              className="inline-flex items-center gap-2 rounded-lg border border-teal-200 bg-teal-50 px-4 py-2 text-sm font-semibold text-teal-800 hover:bg-teal-100"
+            >
+              <Clock3 size={16} />
+              View pending changes ({pending})
+            </button>
+            <button
+              type="button"
+              onClick={synchronize}
+              disabled={!online || syncing}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2 text-white text-sm disabled:opacity-50"
+            >
+              <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+              {syncing ? "Synchronizing..." : "Sync now"}
+            </button>
+          </div>
         </div>
         {syncError && (
           <p
@@ -1216,6 +1293,97 @@ function ChildRegistration() {
             </div>
           )}
         </div>
+
+        {showPendingChanges && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/50 p-3 sm:p-6">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="pending-title"
+              className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
+            >
+              <div className="flex items-start justify-between border-b p-5">
+                <div>
+                  <h3
+                    id="pending-title"
+                    className="text-lg font-bold text-slate-900"
+                  >
+                    Pending changes for synchronization
+                  </h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    These changes are stored on this device and have not yet
+                    been confirmed by the server. Unfinished form drafts are
+                    separate.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingChanges(false)}
+                  aria-label="Close pending changes"
+                  className="rounded-lg p-2 hover:bg-slate-100"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="flex-1 space-y-3 overflow-y-auto p-5">
+                {pendingLoading ? (
+                  <p className="text-sm text-slate-500">
+                    Reading local queue...
+                  </p>
+                ) : pendingChanges.length === 0 ? (
+                  <p className="rounded-xl bg-emerald-50 p-4 text-sm text-emerald-800">
+                    No queued child registration changes on this device.
+                  </p>
+                ) : (
+                  pendingChanges.map((item, index) => {
+                    const description = describePendingChange(item);
+                    return (
+                      <div
+                        key={item.uuid ?? item.id ?? index}
+                        className="rounded-xl border border-amber-200 bg-amber-50/50 p-4"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="font-semibold text-slate-800">
+                              {description.title}
+                            </p>
+                            <p className="mt-1 text-sm text-slate-600">
+                              {description.detail}
+                            </p>
+                          </div>
+                          <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                            Awaiting sync
+                          </span>
+                        </div>
+                        {item.createdAt && (
+                          <p className="mt-2 text-xs text-slate-500">
+                            Queued: {new Date(item.createdAt).toLocaleString()}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+              <div className="flex flex-wrap justify-end gap-2 border-t p-4">
+                <button
+                  type="button"
+                  onClick={() => void loadPendingChanges()}
+                  className="rounded-lg border px-4 py-2 text-sm font-medium hover:bg-slate-50"
+                >
+                  Refresh list
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPendingChanges(false)}
+                  className="rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* =====================================================
             ADD / EDIT CHILD HEALTH RECORD
@@ -1928,22 +2096,6 @@ function ChildRegistration() {
                     </p>
 
                     <div className="flex justify-end gap-3">
-                      <button
-                        type="button"
-                        onClick={() => void closeAndKeepDraft()}
-                        className="
-            px-5 py-2.5
-            rounded-xl
-            border border-gray-200
-            bg-white
-            text-sm font-medium text-gray-700
-            hover:bg-gray-50
-            transition
-          "
-                      >
-                        Save Draft & Close
-                      </button>
-
                       <button
                         type="submit"
                         disabled={saving || draftBusy}
