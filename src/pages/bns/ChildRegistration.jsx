@@ -117,6 +117,16 @@ async function flushChildAuditEvents(userId) {
   }
 }
 
+// Unique, non-editable household codes also work when registering offline.
+// The database UNIQUE constraint remains the final collision safeguard.
+function generateHouseholdCode() {
+  const random =
+    typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID().replace(/-/g, "").slice(0, 12).toUpperCase()
+      : `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`.toUpperCase();
+  return `HH-${random}`;
+}
+
 function ChildRegistration() {
   const storedUser = localStorage.getItem("user");
   const user = storedUser ? JSON.parse(storedUser) : null;
@@ -135,8 +145,12 @@ function ChildRegistration() {
   const [children, setChildren] = useState([]);
   const [assignedAreas, setAssignedAreas] = useState([]);
   const [newChildMode, setNewChildMode] = useState(false);
+  const [householdMode, setHouseholdMode] = useState("new");
+  const [selectedHouseholdId, setSelectedHouseholdId] = useState("");
+  const [availableHouseholds, setAvailableHouseholds] = useState([]);
+  const [householdLoading, setHouseholdLoading] = useState(false);
   const [newHousehold, setNewHousehold] = useState({
-    household_code: "",
+    household_code: generateHouseholdCode(),
     household_head: "",
     local_area_id: "",
     first_name: "",
@@ -236,6 +250,8 @@ function ChildRegistration() {
         form: initialForm,
         newHousehold: initialHousehold,
         newChildMode: newMode,
+        householdMode: "new",
+        selectedHouseholdId: "",
       };
       if (existing) {
         const restore = window.confirm(
@@ -254,6 +270,11 @@ function ChildRegistration() {
               ...existing.data?.newHousehold,
             },
             newChildMode: newMode,
+            householdMode:
+              existing.data?.householdMode === "existing" ? "existing" : "new",
+            selectedHouseholdId: String(
+              existing.data?.selectedHouseholdId || "",
+            ),
           };
         } else {
           await enqueueDraft(() => deleteChildDraft(key));
@@ -264,6 +285,8 @@ function ChildRegistration() {
       draftKeyRef.current = key;
       setDraftKey(key);
       setNewChildMode(newMode);
+      setHouseholdMode(values.householdMode || "new");
+      setSelectedHouseholdId(values.selectedHouseholdId || "");
       setNewHousehold(values.newHousehold);
       setForm(values.form);
       setEditingRecord(record);
@@ -288,7 +311,13 @@ function ChildRegistration() {
 
   useEffect(() => {
     if (!showModal || !draftKey || draftBusy || saving) return;
-    const values = { form, newHousehold, newChildMode };
+    const values = {
+      form,
+      newHousehold,
+      newChildMode,
+      householdMode,
+      selectedHouseholdId,
+    };
     draftValuesRef.current = values;
     const sequence = draftSequenceRef.current;
     cancelDraftTimer();
@@ -312,6 +341,8 @@ function ChildRegistration() {
     form,
     newHousehold,
     newChildMode,
+    householdMode,
+    selectedHouseholdId,
     showModal,
     draftKey,
     draftBusy,
@@ -329,6 +360,8 @@ function ChildRegistration() {
           form,
           newHousehold,
           newChildMode,
+          householdMode,
+          selectedHouseholdId,
         };
         await enqueueDraft(() => saveChildDraft(user.id, key, values));
       }
@@ -416,7 +449,9 @@ function ChildRegistration() {
     const kind = item.kind || item.type || item.action || "change";
     if (kind === "create-child")
       return {
-        title: "New child and household",
+        title: item.household?.household_code
+          ? "New child and household"
+          : "New child registration",
         detail:
           [
             item.resident?.first_name,
@@ -536,8 +571,10 @@ function ChildRegistration() {
 
   const resetForm = () => {
     setNewChildMode(false);
+    setHouseholdMode("new");
+    setSelectedHouseholdId("");
     setNewHousehold({
-      household_code: "",
+      household_code: generateHouseholdCode(),
       household_head: "",
       local_area_id: "",
       first_name: "",
@@ -630,9 +667,49 @@ function ChildRegistration() {
     );
   };
 
+  useEffect(() => {
+    if (!showModal || !newChildMode || !user?.id) return;
+    let active = true;
+    const loadHouseholds = async () => {
+      const areaIds = assignedAreas
+        .map((area) => Number(area.id))
+        .filter(Number.isFinite);
+      // Cached children can provide household choices while offline, but
+      // creating a resident under an existing household requires internet.
+      const cached = Array.from(
+        new Map(
+          children
+            .map((child) => child.households)
+            .filter((h) => h?.id && areaIds.includes(Number(h.local_area_id)))
+            .map((h) => [String(h.id), h]),
+        ).values(),
+      );
+      if (active) setAvailableHouseholds(cached);
+      if (!navigator.onLine || !areaIds.length) return;
+      if (active) setHouseholdLoading(true);
+      try {
+        const { data, error } = await supabase
+          .from("households")
+          .select("id,household_code,household_head,local_area_id")
+          .in("local_area_id", areaIds)
+          .order("household_head");
+        if (error) throw error;
+        if (active) setAvailableHouseholds(data || []);
+      } catch (error) {
+        console.warn("Unable to load household choices", error);
+      } finally {
+        if (active) setHouseholdLoading(false);
+      }
+    };
+    void loadHouseholds();
+    return () => {
+      active = false;
+    };
+  }, [showModal, newChildMode, user?.id, assignedAreas, children]);
+
   const openNewChildModal = () => {
     const initialHousehold = {
-      household_code: "",
+      household_code: generateHouseholdCode(),
       household_head: "",
       local_area_id: assignedAreas[0] ? String(assignedAreas[0].id) : "",
       first_name: "",
@@ -673,6 +750,7 @@ function ChildRegistration() {
 
   const handleNewHouseholdChange = (e) => {
     const { name, value } = e.target;
+    if (name === "household_code") return;
     const next = { ...newHousehold, [name]: value };
     setNewHousehold(next);
     if (draftValuesRef.current)
@@ -780,17 +858,32 @@ function ChildRegistration() {
 
     if (newChildMode) {
       if (
-        !newHousehold.local_area_id ||
-        !newHousehold.household_code.trim() ||
-        !newHousehold.household_head.trim() ||
+        (householdMode === "new" &&
+          (!newHousehold.local_area_id ||
+            !newHousehold.household_code.trim() ||
+            !newHousehold.household_head.trim())) ||
+        (householdMode === "existing" && !selectedHouseholdId) ||
         !newHousehold.first_name.trim() ||
         !newHousehold.last_name.trim() ||
         !newHousehold.birth_date ||
         !newHousehold.sex
       ) {
         alert(
-          "Please complete the household area, household code, household head, and the child's name, date of birth, and sex.",
+          "Select an existing household or complete the new household details, and enter the child's name, date of birth, and sex.",
         );
+        return;
+      }
+      if (householdMode === "existing" && !navigator.onLine) {
+        alert(
+          "Adding a child to an existing household currently requires internet. New household registrations can still be queued offline.",
+        );
+        return;
+      }
+      if (
+        householdMode === "existing" &&
+        !availableHouseholds.some((h) => String(h.id) === selectedHouseholdId)
+      ) {
+        alert("Please select a household from your assigned areas.");
         return;
       }
       if (assignedAreas.length === 0) {
@@ -833,7 +926,53 @@ function ChildRegistration() {
         : editingRecord
           ? "bns_child_registration_update_queued"
           : "bns_child_registration_create_queued";
-      if (newChildMode) {
+      if (newChildMode && householdMode === "existing") {
+        // The existing offline helper only supports creating a new household.
+        // Create the resident online, then use its existing record queue.
+        const household = availableHouseholds.find(
+          (h) => String(h.id) === selectedHouseholdId,
+        );
+        if (
+          !household ||
+          !assignedAreas.some(
+            (a) => String(a.id) === String(household.local_area_id),
+          )
+        ) {
+          throw new Error(
+            "The selected household is not within your assigned areas.",
+          );
+        }
+        const { data: resident, error: residentError } = await supabase
+          .from("residents")
+          .insert({
+            household_id: Number(selectedHouseholdId),
+            first_name: newHousehold.first_name.trim(),
+            middle_name: newHousehold.middle_name.trim() || null,
+            last_name: newHousehold.last_name.trim(),
+            sex: newHousehold.sex,
+            birth_date: newHousehold.birth_date,
+          })
+          .select("id")
+          .single();
+        if (residentError) throw residentError;
+        try {
+          await queueRecordChange(
+            user.id,
+            Number(resident.id),
+            null,
+            childData,
+          );
+        } catch (queueError) {
+          // Avoid leaving an unregistered child resident after a local queue failure.
+          const { error: rollbackError } = await supabase
+            .from("residents")
+            .delete()
+            .eq("id", resident.id);
+          if (rollbackError)
+            console.error("Resident rollback failed", rollbackError);
+          throw queueError;
+        }
+      } else if (newChildMode) {
         await queueChildMutation(user.id, {
           kind: "create-child",
           household: {
@@ -871,7 +1010,9 @@ function ChildRegistration() {
         editingRecord?.id ?? (form.resident_id || null),
         {
           operation: newChildMode
-            ? "create_child_and_household"
+            ? householdMode === "existing"
+              ? "create_child_in_existing_household"
+              : "create_child_and_household"
             : editingRecord
               ? "update"
               : "create",
@@ -894,7 +1035,9 @@ function ChildRegistration() {
         editingRecord?.id ?? (form.resident_id || null),
         {
           operation: newChildMode
-            ? "create_child_and_household"
+            ? householdMode === "existing"
+              ? "create_child_in_existing_household"
+              : "create_child_and_household"
             : editingRecord
               ? "update"
               : "create",
@@ -1103,7 +1246,7 @@ function ChildRegistration() {
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold shadow-sm"
           >
             <Plus size={17} />
-            Register New Child / Household
+            Register New Child
           </button>
         </div>
 
@@ -1476,70 +1619,125 @@ function ChildRegistration() {
                         <section className="rounded-2xl border border-teal-200 bg-teal-50/50 p-5 space-y-4">
                           <div>
                             <h4 className="font-semibold text-gray-800">
-                              Create Household and Child Resident
+                              Household Selection and Child Resident
                             </h4>
                             <p className="text-sm text-gray-600 mt-1">
-                              Use this when the household has not yet been
-                              surveyed or added to the system. The household and
-                              child resident will be created before the health
-                              record is saved.
+                              Choose an existing household or create a new one.
+                              New household codes are generated automatically.
                             </p>
                           </div>
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <label className="flex items-center gap-2 rounded-lg border bg-white p-3 text-sm">
+                              <input
+                                type="radio"
+                                name="household_mode"
+                                checked={householdMode === "existing"}
+                                onChange={() => {
+                                  setHouseholdMode("existing");
+                                  setSelectedHouseholdId("");
+                                }}
+                              />
+                              Select Existing Household
+                            </label>
+                            <label className="flex items-center gap-2 rounded-lg border bg-white p-3 text-sm">
+                              <input
+                                type="radio"
+                                name="household_mode"
+                                checked={householdMode === "new"}
+                                onChange={() => setHouseholdMode("new")}
+                              />
+                              Create New Household
+                            </label>
+                          </div>
+                          {householdMode === "existing" ? (
                             <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                                Assigned Purok / Sitio *
+                              <label className="mb-1.5 block text-sm font-medium">
+                                Existing Household *
                               </label>
                               <select
-                                name="local_area_id"
-                                value={newHousehold.local_area_id}
-                                onChange={handleNewHouseholdChange}
                                 required
-                                className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                value={selectedHouseholdId}
+                                onChange={(e) =>
+                                  setSelectedHouseholdId(e.target.value)
+                                }
+                                className="h-11 w-full rounded-xl border border-gray-200 bg-white px-3 text-sm"
                               >
-                                <option value="">Select assigned area</option>
-                                {assignedAreas.map((area) => (
-                                  <option key={area.id} value={area.id}>
-                                    {area.name} ({area.type || "Area"})
-                                    {area.barangay_name
-                                      ? ` — ${area.barangay_name}`
-                                      : ""}
+                                <option value="">Select household</option>
+                                {availableHouseholds.map((h) => (
+                                  <option key={h.id} value={String(h.id)}>
+                                    {h.household_code} — {h.household_head}
                                   </option>
                                 ))}
                               </select>
-                              {assignedAreas.length === 0 && (
-                                <p className="text-xs text-red-600 mt-1">
-                                  No active assigned areas found.
+                              {householdLoading && (
+                                <p className="mt-1 text-xs text-gray-500">
+                                  Loading households...
+                                </p>
+                              )}
+                              {!online && (
+                                <p className="mt-1 text-xs text-amber-700">
+                                  Existing household registration requires
+                                  internet.
                                 </p>
                               )}
                             </div>
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                                Household Code *
-                              </label>
-                              <input
-                                name="household_code"
-                                value={newHousehold.household_code}
-                                onChange={handleNewHouseholdChange}
-                                required
-                                placeholder="Enter a unique household code"
-                                className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
-                              />
+                          ) : (
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  Assigned Purok / Sitio *
+                                </label>
+                                <select
+                                  name="local_area_id"
+                                  value={newHousehold.local_area_id}
+                                  onChange={handleNewHouseholdChange}
+                                  required
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                >
+                                  <option value="">Select assigned area</option>
+                                  {assignedAreas.map((area) => (
+                                    <option key={area.id} value={area.id}>
+                                      {area.name} ({area.type || "Area"})
+                                      {area.barangay_name
+                                        ? ` — ${area.barangay_name}`
+                                        : ""}
+                                    </option>
+                                  ))}
+                                </select>
+                                {assignedAreas.length === 0 && (
+                                  <p className="text-xs text-red-600 mt-1">
+                                    No active assigned areas found.
+                                  </p>
+                                )}
+                              </div>
+                              <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  Household Code *
+                                </label>
+                                <input
+                                  name="household_code"
+                                  value={newHousehold.household_code}
+                                  readOnly
+                                  required
+                                  placeholder="Generated automatically"
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                />
+                              </div>
+                              <div className="md:col-span-2">
+                                <label className="block text-sm font-medium text-gray-700 mb-1.5">
+                                  Household Head *
+                                </label>
+                                <input
+                                  name="household_head"
+                                  value={newHousehold.household_head}
+                                  onChange={handleNewHouseholdChange}
+                                  required
+                                  placeholder="Full name of household head"
+                                  className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
+                                />
+                              </div>
                             </div>
-                            <div className="md:col-span-2">
-                              <label className="block text-sm font-medium text-gray-700 mb-1.5">
-                                Household Head *
-                              </label>
-                              <input
-                                name="household_head"
-                                value={newHousehold.household_head}
-                                onChange={handleNewHouseholdChange}
-                                required
-                                placeholder="Full name of household head"
-                                className="w-full h-11 px-3 rounded-xl border border-gray-200 bg-white text-sm"
-                              />
-                            </div>
-                          </div>
+                          )}
                           <div className="border-t border-teal-100 pt-4">
                             <p className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-3">
                               Child Resident Details

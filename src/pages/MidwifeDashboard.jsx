@@ -22,6 +22,12 @@ import {
   CalendarCheck,
   UserRound,
   Bell,
+  MessageSquare,
+  Send,
+  ShieldAlert,
+  Baby,
+  Syringe,
+  Ruler,
 } from "lucide-react";
 
 import {
@@ -216,6 +222,343 @@ function MidwifeDashboard() {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [assignedDistrict, setAssignedDistrict] = useState(null);
   const [showMissedNotifications, setShowMissedNotifications] = useState(false);
+  const [smsLogs, setSmsLogs] = useState([]);
+  const [smsLoading, setSmsLoading] = useState(false);
+  const [smsError, setSmsError] = useState("");
+  const [smsTarget, setSmsTarget] = useState(null);
+  const [smsSending, setSmsSending] = useState(false);
+  const [smsFeedback, setSmsFeedback] = useState("");
+
+  // Child reminders use the same server-authorized function as Child Monitoring.
+  const [childAppointments, setChildAppointments] = useState([]);
+  const [childLoading, setChildLoading] = useState(false);
+  const [childError, setChildError] = useState("");
+  const [childSmsHistory, setChildSmsHistory] = useState({});
+  const [childSmsTarget, setChildSmsTarget] = useState(null);
+  const [guardianConfirmed, setGuardianConfirmed] = useState(false);
+  const [childSending, setChildSending] = useState(false);
+  const [childFeedback, setChildFeedback] = useState("");
+  const [childSuccess, setChildSuccess] = useState("");
+
+  // The browser cannot read pg_cron schedules or Edge Function secrets.
+  // Show SMS history only; Cron activity must be verified in Supabase.
+  const loadSmsLogs = useCallback(async () => {
+    if (!user?.id) return;
+    setSmsLoading(true);
+    setSmsError("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token) throw new Error("Please log in again to load SMS history.");
+      const ids = pregnancies.map((p) => p.id).filter(Boolean);
+      if (!ids.length) {
+        setSmsLogs([]);
+        return;
+      }
+      const allLogs = [];
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        const { data, error } = await supabase.functions.invoke(
+          "mchms-sms-history",
+          {
+            headers: { "x-mchms-session": token },
+            body: { pregnancy_ids: ids.slice(offset, offset + 500) },
+          },
+        );
+        if (error) throw error;
+        if (!data?.success)
+          throw new Error(data?.error || "Could not load SMS history.");
+        allLogs.push(...(data.logs || []));
+      }
+      setSmsLogs(allLogs);
+    } catch (error) {
+      console.error("SMS history load failed:", error);
+      setSmsError(error?.message || "Could not load SMS history.");
+    } finally {
+      setSmsLoading(false);
+    }
+  }, [user?.id, pregnancies]);
+
+  useEffect(() => {
+    if (user?.id && pregnancies.length) loadSmsLogs();
+  }, [user?.id, pregnancies, loadSmsLogs]);
+
+  // Match the specific scheduled ANC appointment, regardless of whether the
+  // reminder came from Cron or a manual send. Prefer successful records.
+  const smsLogFor = useCallback(
+    (pregnancy) => {
+      const matches = smsLogs.filter(
+        (log) =>
+          String(log.pregnant_woman_id) === String(pregnancy.id) &&
+          String(log.scheduled_date).slice(0, 10) ===
+            String(pregnancy.next_visit_date).slice(0, 10),
+      );
+      return (
+        matches.find((log) => String(log.status).toLowerCase() === "sent") ||
+        matches.find(
+          (log) =>
+            String(log.anc_visit_id) === String(pregnancy.latest_anc_visit?.id),
+        ) ||
+        matches[0] ||
+        null
+      );
+    },
+    [smsLogs],
+  );
+
+  const [smsSuccess, setSmsSuccess] = useState("");
+
+  const submitManualSms = async () => {
+    if (!smsTarget || smsSending) return;
+    setSmsSending(true);
+    setSmsFeedback("");
+    setSmsSuccess("");
+    try {
+      // Requires a separately deployed, server-authorized manual endpoint.
+      // NEVER send SMS_CRON_SECRET or SEMAPHORE_API_KEY from React.
+      const sessionToken = sessionStorage.getItem("mchms_session_token");
+      if (!sessionToken)
+        throw new Error("Please log in again to send SMS reminders.");
+      const { data, error } = await supabase.functions.invoke(
+        "send-missed-anc-sms-manual",
+        {
+          headers: { "x-mchms-session": sessionToken },
+          body: { pregnancy_id: smsTarget.id },
+        },
+      );
+      if (error) throw error;
+      if (!data?.success || data?.sent !== 1) {
+        throw new Error(
+          data?.message ||
+            "SMS was not sent. Check eligibility and SMS history.",
+        );
+      }
+      setSmsSuccess(
+        `SMS reminder successfully submitted for ${getFullName(smsTarget.resident)}.`,
+      );
+      // Optimistically update status, then retrieve the authoritative server log.
+      setSmsLogs((previous) => [
+        {
+          pregnant_woman_id: smsTarget.id,
+          anc_visit_id: smsTarget.latest_anc_visit?.id,
+          scheduled_date: smsTarget.next_visit_date,
+          status: "sent",
+          created_at: new Date().toISOString(),
+          sent_at: new Date().toISOString(),
+        },
+        ...previous,
+      ]);
+      setSmsTarget(null);
+      await loadSmsLogs();
+    } catch (error) {
+      setSmsFeedback(error?.message || "Manual SMS request failed.");
+    } finally {
+      setSmsSending(false);
+    }
+  };
+  // Load district-scoped children and their latest completed growth/immunization
+  // records. The server independently rechecks all eligibility before sending.
+  const loadChildAppointments = useCallback(async () => {
+    if (!user?.id || user.role !== "midwife" || user.district_id == null) {
+      setChildAppointments([]);
+      return;
+    }
+    setChildLoading(true);
+    setChildError("");
+    try {
+      const children = [];
+      for (let offset = 0; ; offset += 500) {
+        const { data, error } = await supabase
+          .from("child_health_records")
+          .select(
+            `id,resident_id,residents(id,first_name,middle_name,last_name,households(id,household_code,local_area_id,local_areas(id,name,barangays(id,name,district_id))))`,
+          )
+          .order("id", { ascending: true })
+          .range(offset, offset + 499);
+        if (error) throw error;
+        children.push(...(data || []));
+        if (!data || data.length < 500) break;
+      }
+      const single = (v) => (Array.isArray(v) ? v[0] : v);
+      const scoped = children
+        .map((child) => {
+          const resident = single(child.residents);
+          const household = single(resident?.households);
+          const area = single(household?.local_areas);
+          const barangay = single(area?.barangays);
+          return { ...child, resident, household, area, barangay };
+        })
+        .filter(
+          (child) =>
+            String(child.barangay?.district_id) === String(user.district_id),
+        );
+      const ids = scoped.map((child) => child.id);
+      const latest = { growth: new Map(), immunization: new Map() };
+      for (const [kind, table, dateField] of [
+        ["growth", "child_monitoring", "monitoring_date"],
+        ["immunization", "child_immunization", "vaccination_date"],
+      ]) {
+        for (let offset = 0; offset < ids.length; offset += 100) {
+          const batch = ids.slice(offset, offset + 100);
+          const { data, error } = await supabase
+            .from(table)
+            .select(`id,child_health_record_id,${dateField},next_visit_date`)
+            .in("child_health_record_id", batch)
+            .order(dateField, { ascending: false })
+            .order("id", { ascending: false });
+          if (error) throw error;
+          for (const visit of data || []) {
+            const key = String(visit.child_health_record_id);
+            if (!latest[kind].has(key)) latest[kind].set(key, visit);
+          }
+        }
+      }
+      const today = getLocalDate();
+      const result = [];
+      for (const child of scoped) {
+        for (const kind of ["growth", "immunization"]) {
+          const visit = latest[kind].get(String(child.id));
+          const scheduled = String(visit?.next_visit_date || "").slice(0, 10);
+          const completed = String(
+            visit?.[
+              kind === "growth" ? "monitoring_date" : "vaccination_date"
+            ] || "",
+          ).slice(0, 10);
+          if (
+            !visit ||
+            !scheduled ||
+            scheduled >= today ||
+            completed >= scheduled
+          )
+            continue;
+          result.push({
+            id: `${kind}-${child.id}-${visit.id}`,
+            childId: child.id,
+            sourceId: visit.id,
+            kind,
+            date: scheduled,
+            name: getFullName(child.resident),
+            barangay: child.barangay?.name || "Unknown barangay",
+            householdCode: child.household?.household_code || "—",
+          });
+        }
+      }
+      result.sort((a, b) => a.date.localeCompare(b.date));
+      setChildAppointments(result);
+    } catch (error) {
+      console.error("Child appointment load failed:", error);
+      setChildError(error?.message || "Could not load child appointments.");
+    } finally {
+      setChildLoading(false);
+    }
+  }, [user?.id, user?.role, user?.district_id]);
+
+  useEffect(() => {
+    loadChildAppointments();
+  }, [loadChildAppointments]);
+
+  const loadChildSmsHistory = useCallback(async (childId) => {
+    const token = sessionStorage.getItem("mchms_session_token");
+    if (!token)
+      throw new Error("Please log in again to check child SMS history.");
+    const { data, error } = await supabase.functions.invoke("mchms-child-sms", {
+      headers: { "x-mchms-session": token },
+      body: { action: "history", child_health_record_id: childId },
+    });
+    if (error) throw error;
+    if (!data?.success)
+      throw new Error(data?.error || "Child SMS history unavailable.");
+    setChildSmsHistory((previous) => ({ ...previous, [childId]: data }));
+    return data;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const ids = [...new Set(childAppointments.map((item) => item.childId))];
+    if (!ids.length) {
+      setChildSmsHistory({});
+      return;
+    }
+    (async () => {
+      try {
+        for (let i = 0; i < ids.length && !cancelled; i += 5) {
+          await Promise.all(
+            ids.slice(i, i + 5).map(async (id) => {
+              try {
+                await loadChildSmsHistory(id);
+              } catch (error) {
+                if (!cancelled)
+                  setChildSmsHistory((prev) => ({
+                    ...prev,
+                    [id]: { error: error?.message || "History unavailable" },
+                  }));
+              }
+            }),
+          );
+        }
+      } catch (error) {
+        console.error(error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [childAppointments, loadChildSmsHistory]);
+
+  const childLogFor = (appointment) => {
+    const history = childSmsHistory[appointment.childId];
+    return (
+      history?.logs?.find(
+        (log) =>
+          log.reminder_type === appointment.kind &&
+          String(log.source_record_id) === String(appointment.sourceId) &&
+          String(log.scheduled_date).slice(0, 10) === appointment.date,
+      ) || null
+    );
+  };
+
+  const submitChildSms = async () => {
+    if (!childSmsTarget || childSending || !guardianConfirmed) return;
+    setChildSending(true);
+    setChildFeedback("");
+    setChildSuccess("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token) throw new Error("Please log in again to send child SMS.");
+      const { data, error } = await supabase.functions.invoke(
+        "mchms-child-sms",
+        {
+          headers: { "x-mchms-session": token },
+          body: {
+            action: "send",
+            child_health_record_id: childSmsTarget.childId,
+            reminder_type: childSmsTarget.kind,
+            source_record_id: childSmsTarget.sourceId,
+            guardian_confirmed: true,
+          },
+        },
+      );
+      if (error) throw error;
+      if (!data?.success)
+        throw new Error(data?.error || "SMS was not accepted.");
+      setChildSuccess(
+        `Child ${childSmsTarget.kind} reminder accepted by SMS provider; delivery is not confirmed.`,
+      );
+      await loadChildSmsHistory(childSmsTarget.childId);
+      setChildSmsTarget(null);
+      setGuardianConfirmed(false);
+    } catch (error) {
+      setChildFeedback(error?.message || "Could not send child SMS.");
+      if (childSmsTarget) {
+        try {
+          await loadChildSmsHistory(childSmsTarget.childId);
+        } catch {
+          /* keep original error */
+        }
+      }
+    } finally {
+      setChildSending(false);
+    }
+  };
+
   /* =========================================================
      LOAD CURRENT SESSION
   ========================================================= */
@@ -934,6 +1277,9 @@ function MidwifeDashboard() {
     navigate("/dashboard/midwife/pregnancy-monitoring");
 
   const openRecords = () => navigate("/dashboard/midwife/records");
+
+  const openChildMonitoring = () =>
+    navigate("/dashboard/midwife/child-monitoring");
 
   const openWorkers = () => navigate("/dashboard/midwife/workers");
 
@@ -1682,6 +2028,340 @@ function MidwifeDashboard() {
           </p>
         </section>
 
+        {/* SMS feedback stays visible without the technical SMS summary panel. */}
+        {(smsSuccess || smsFeedback) && (
+          <div
+            className="fixed right-4 top-20 z-[190] w-[min(26rem,calc(100vw-2rem))]"
+            role={smsFeedback ? "alert" : "status"}
+          >
+            <div
+              className={`flex items-start gap-3 rounded-xl border p-4 shadow-lg ${smsFeedback ? "border-red-200 bg-red-50 text-red-800" : "border-green-200 bg-green-50 text-green-800"}`}
+            >
+              {smsFeedback ? (
+                <AlertTriangle size={20} className="shrink-0" />
+              ) : (
+                <CheckCircle2 size={20} className="shrink-0" />
+              )}
+              <p className="flex-1 text-sm font-medium">
+                {smsFeedback || smsSuccess}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setSmsSuccess("");
+                  setSmsFeedback("");
+                }}
+                aria-label="Dismiss SMS notification"
+                className="rounded p-1 hover:bg-black/5"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {smsTarget && (
+          <div
+            className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm manual SMS"
+          >
+            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+              <h3 className="flex items-center gap-2 text-lg font-bold text-gray-900">
+                <ShieldAlert size={20} /> Confirm SMS reminder
+              </h3>
+              <p className="mt-3 text-sm text-gray-700">
+                Send one missed ANC reminder to{" "}
+                <strong>{getFullName(smsTarget.resident)}</strong> for the
+                appointment dated{" "}
+                <strong>{formatDate(smsTarget.next_visit_date)}</strong>?
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                Only send if the recipient has consented. The server must verify
+                your authorization, district, eligibility, and duplicate status.
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={smsSending}
+                  onClick={() => {
+                    setSmsTarget(null);
+                  }}
+                  className="rounded-lg border px-4 py-2 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={smsSending}
+                  onClick={submitManualSms}
+                  className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {smsSending ? "Sending..." : "Confirm send"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CHILD GROWTH AND IMMUNIZATION SMS REMINDERS */}
+        <section
+          id="child-sms-queue"
+          className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 p-5 sm:p-6">
+            <div>
+              <h2 className="flex items-center gap-2 text-lg font-bold text-gray-800">
+                <Baby size={21} className="text-teal-700" /> Child SMS reminders
+              </h2>
+              <p className="mt-1 text-sm text-gray-500">
+                Missed growth monitoring and immunization appointments in your
+                district. Reminders are manual only.
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={loadChildAppointments}
+                disabled={childLoading}
+                className="rounded-lg border px-3 py-2 text-sm font-semibold text-gray-700 disabled:opacity-50"
+              >
+                <RefreshCw
+                  size={15}
+                  className={childLoading ? "animate-spin" : ""}
+                />
+              </button>
+              <button
+                type="button"
+                onClick={openChildMonitoring}
+                className="rounded-lg bg-teal-700 px-3 py-2 text-sm font-semibold text-white hover:bg-teal-800"
+              >
+                Child monitoring
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 border-b border-gray-100 p-4 sm:grid-cols-3">
+            <div className="rounded-xl bg-red-50 p-3">
+              <p className="text-xs text-red-700">Missed growth visits</p>
+              <p className="mt-1 text-2xl font-bold text-red-800">
+                {childAppointments.filter((a) => a.kind === "growth").length}
+              </p>
+            </div>
+            <div className="rounded-xl bg-orange-50 p-3">
+              <p className="text-xs text-orange-700">Missed immunizations</p>
+              <p className="mt-1 text-2xl font-bold text-orange-800">
+                {
+                  childAppointments.filter((a) => a.kind === "immunization")
+                    .length
+                }
+              </p>
+            </div>
+            <div className="col-span-2 rounded-xl bg-teal-50 p-3 sm:col-span-1">
+              <p className="text-xs text-teal-700">SMS accepted</p>
+              <p className="mt-1 text-2xl font-bold text-teal-800">
+                {
+                  childAppointments.filter(
+                    (a) => childLogFor(a)?.status === "sent",
+                  ).length
+                }
+              </p>
+            </div>
+          </div>
+          {childError && (
+            <p
+              role="alert"
+              className="m-4 rounded-lg bg-red-50 p-3 text-sm text-red-700"
+            >
+              {childError}
+            </p>
+          )}
+          {childLoading ? (
+            <p className="p-6 text-sm text-gray-500">
+              Loading child appointments...
+            </p>
+          ) : childAppointments.length === 0 ? (
+            <p className="p-6 text-sm text-gray-500">
+              No missed child growth or immunization appointments found.
+            </p>
+          ) : (
+            <div className="max-h-[32rem] overflow-auto">
+              <table className="w-full min-w-[780px] text-left text-sm">
+                <thead className="sticky top-0 bg-gray-50 text-xs uppercase text-gray-500">
+                  <tr>
+                    <th className="px-4 py-3">Child / household</th>
+                    <th className="px-4 py-3">Service</th>
+                    <th className="px-4 py-3">Missed date</th>
+                    <th className="px-4 py-3">SMS status</th>
+                    <th className="px-4 py-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {childAppointments.map((appointment) => {
+                    const history = childSmsHistory[appointment.childId];
+                    const log = childLogFor(appointment);
+                    const checked = Boolean(history && !history.error);
+                    const canSend =
+                      checked &&
+                      history.has_household_mobile &&
+                      !log &&
+                      navigator.onLine;
+                    return (
+                      <tr key={appointment.id}>
+                        <td className="px-4 py-3">
+                          <p className="font-semibold text-gray-800">
+                            {appointment.name}
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {appointment.barangay} · {appointment.householdCode}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="inline-flex items-center gap-1">
+                            {appointment.kind === "growth" ? (
+                              <Ruler size={15} />
+                            ) : (
+                              <Syringe size={15} />
+                            )}
+                            {appointment.kind === "growth"
+                              ? "Growth monitoring"
+                              : "Immunization"}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 text-red-700">
+                          {formatDate(appointment.date)}
+                        </td>
+                        <td className="px-4 py-3">
+                          {history?.error ? (
+                            <span className="text-red-600">
+                              History unavailable
+                            </span>
+                          ) : !checked ? (
+                            "Checking..."
+                          ) : log ? (
+                            <span
+                              className={
+                                log.status === "sent"
+                                  ? "font-semibold text-green-700"
+                                  : "font-semibold text-amber-700"
+                              }
+                            >
+                              {formatStatus(log.status)}
+                            </span>
+                          ) : !history.has_household_mobile ? (
+                            "No valid household mobile"
+                          ) : (
+                            "Not sent"
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            disabled={!canSend}
+                            title={
+                              !navigator.onLine
+                                ? "Connect to the internet to send SMS"
+                                : !history?.has_household_mobile
+                                  ? "No valid household mobile"
+                                  : log
+                                    ? "SMS attempt already recorded"
+                                    : "Send manual reminder"
+                            }
+                            onClick={() => {
+                              setChildSmsTarget(appointment);
+                              setGuardianConfirmed(false);
+                              setChildFeedback("");
+                              setChildSuccess("");
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:bg-gray-200 disabled:text-gray-500"
+                          >
+                            <Send size={13} /> Send SMS
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="border-t border-gray-100 px-5 py-3 text-xs text-gray-500">
+            SMS is sent only after guardian confirmation. The provider's
+            acceptance does not confirm handset delivery. Failed or uncertain
+            attempts require review before retrying.
+          </p>
+        </section>
+
+        {(childFeedback || childSuccess) && (
+          <div
+            role={childFeedback ? "alert" : "status"}
+            className={`rounded-xl border p-4 text-sm ${childFeedback ? "border-red-200 bg-red-50 text-red-800" : "border-green-200 bg-green-50 text-green-800"}`}
+          >
+            {childFeedback || childSuccess}
+          </div>
+        )}
+        {childSmsTarget && (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm child SMS reminder"
+            className="fixed inset-0 z-[210] flex items-center justify-center bg-black/50 p-4"
+          >
+            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+              <h3 className="flex items-center gap-2 text-lg font-bold text-gray-900">
+                <ShieldAlert size={20} /> Confirm child SMS reminder
+              </h3>
+              <p className="mt-3 text-sm text-gray-700">
+                Send a missed{" "}
+                <strong>
+                  {childSmsTarget.kind === "growth"
+                    ? "growth monitoring"
+                    : "immunization"}
+                </strong>{" "}
+                reminder for <strong>{childSmsTarget.name}</strong> (scheduled{" "}
+                {formatDate(childSmsTarget.date)})?
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                The server uses households.contact_number, not a number entered
+                here. Verify the recipient before sending.
+              </p>
+              <label className="mt-4 flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={guardianConfirmed}
+                  onChange={(event) =>
+                    setGuardianConfirmed(event.target.checked)
+                  }
+                  className="mt-1"
+                />
+                <span>
+                  I have verified that the household mobile number belongs to
+                  the child's parent or authorized guardian and that SMS contact
+                  is permitted.
+                </span>
+              </label>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={childSending}
+                  onClick={() => setChildSmsTarget(null)}
+                  className="rounded-lg border px-4 py-2 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={childSending || !guardianConfirmed}
+                  onClick={submitChildSms}
+                  className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {childSending ? "Sending..." : "Confirm send"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* APPOINTMENT QUEUE */}
         <section
           id="appointment-queue"
@@ -1846,7 +2526,7 @@ function MidwifeDashboard() {
           ) : (
             <>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[850px] text-left text-sm">
+                <table className="w-full min-w-[1050px] text-left text-sm">
                   <thead className="bg-white text-xs uppercase tracking-wide text-gray-500">
                     <tr>
                       <th className="px-5 py-4 font-semibold">
@@ -1861,6 +2541,7 @@ function MidwifeDashboard() {
                       <th className="px-5 py-4 font-semibold">
                         Appointment status
                       </th>
+                      <th className="px-5 py-4 font-semibold">SMS reminder</th>
                       <th className="px-5 py-4 text-right font-semibold">
                         Action
                       </th>
@@ -1953,7 +2634,48 @@ function MidwifeDashboard() {
                             </span>
                           </td>
 
+                          <td className="px-5 py-4 text-xs">
+                            {checkup.key !== "missed" ? (
+                              <span className="text-gray-400">Not overdue</span>
+                            ) : smsLoading ? (
+                              <span className="text-gray-500">
+                                Checking SMS...
+                              </span>
+                            ) : smsError ? (
+                              <span className="text-red-600">
+                                Status unavailable
+                              </span>
+                            ) : smsLogFor(pregnancy)?.status === "sent" ? (
+                              <span className="font-semibold text-green-700">
+                                SMS sent
+                              </span>
+                            ) : smsLogFor(pregnancy) ? (
+                              <span className="font-semibold text-amber-700">
+                                {formatStatus(smsLogFor(pregnancy).status)}
+                              </span>
+                            ) : (
+                              <span className="font-semibold text-gray-500">
+                                Not sent
+                              </span>
+                            )}
+                          </td>
                           <td className="whitespace-nowrap px-5 py-4 text-right">
+                            {checkup.key === "missed" &&
+                              !smsLoading &&
+                              !smsError &&
+                              !smsLogFor(pregnancy) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSmsFeedback("");
+                                    setSmsSuccess("");
+                                    setSmsTarget(pregnancy);
+                                  }}
+                                  className="mr-2 inline-flex items-center gap-1 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800"
+                                >
+                                  <Send size={13} /> Send SMS
+                                </button>
+                              )}
                             <button
                               type="button"
                               onClick={openPregnancyMonitoring}

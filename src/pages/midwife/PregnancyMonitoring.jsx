@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -21,6 +21,8 @@ import {
   UserRound,
   BookOpen,
   WifiOff,
+  Send,
+  CheckCircle2,
   X,
 } from "lucide-react";
 
@@ -533,6 +535,15 @@ export default function PregnancyMonitoring() {
   const [hasNurseAuthorization, setHasNurseAuthorization] = useState(false);
   const [authorizationChecked, setAuthorizationChecked] = useState(false);
   const [pregnancies, setPregnancies] = useState([]);
+  // SMS history is loaded securely; no SMS credentials are stored in React.
+  const [smsLogs, setSmsLogs] = useState([]);
+  const [smsLoading, setSmsLoading] = useState(false);
+  const [smsError, setSmsError] = useState("");
+  const [smsTarget, setSmsTarget] = useState(null);
+  const [smsSending, setSmsSending] = useState(false);
+  const [smsFeedback, setSmsFeedback] = useState("");
+  const [smsSuccess, setSmsSuccess] = useState("");
+
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedPregnancy, setSelectedPregnancy] = useState(null);
@@ -990,6 +1001,120 @@ export default function PregnancyMonitoring() {
       );
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadSmsLogs = useCallback(async () => {
+    if (!user?.id || !navigator.onLine) return;
+    setSmsLoading(true);
+    setSmsError("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token) throw new Error("Please sign in again to check SMS history.");
+      const ids = pregnancies.map((pregnancy) => pregnancy.id).filter(Boolean);
+      if (!ids.length) {
+        setSmsLogs([]);
+        return;
+      }
+      const logs = [];
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        const { data, error } = await supabase.functions.invoke(
+          "mchms-sms-history",
+          {
+            headers: { "x-mchms-session": token },
+            body: { pregnancy_ids: ids.slice(offset, offset + 500) },
+          },
+        );
+        if (error) throw error;
+        if (!data?.success)
+          throw new Error(data?.error || "Unable to load SMS history.");
+        logs.push(...(data.logs || []));
+      }
+      setSmsLogs(logs);
+    } catch (error) {
+      console.error("SMS history error:", error);
+      setSmsError(error?.message || "SMS status unavailable.");
+    } finally {
+      setSmsLoading(false);
+    }
+  }, [user?.id, pregnancies]);
+
+  useEffect(() => {
+    if (
+      user?.id &&
+      pregnancies.length &&
+      navigator.onLine &&
+      (user.role === "midwife" || hasNurseAuthorization)
+    ) {
+      loadSmsLogs();
+    }
+  }, [user?.id, user?.role, pregnancies, hasNurseAuthorization, loadSmsLogs]);
+
+  const smsLogFor = useCallback(
+    (pregnancy) => {
+      const matches = smsLogs.filter(
+        (log) =>
+          String(log.pregnant_woman_id) === String(pregnancy.id) &&
+          String(log.scheduled_date).slice(0, 10) ===
+            String(pregnancy.next_visit_date).slice(0, 10),
+      );
+      return (
+        matches.find((log) => String(log.status).toLowerCase() === "sent") ||
+        matches.find(
+          (log) =>
+            String(log.anc_visit_id) === String(pregnancy.latest_anc_visit?.id),
+        ) ||
+        matches[0] ||
+        null
+      );
+    },
+    [smsLogs],
+  );
+
+  const submitManualSms = async () => {
+    if (!smsTarget || smsSending || user?.role !== "midwife") return;
+    setSmsSending(true);
+    setSmsFeedback("");
+    setSmsSuccess("");
+    try {
+      if (!navigator.onLine)
+        throw new Error("An internet connection is required to send SMS.");
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token)
+        throw new Error("Please sign in again to send SMS reminders.");
+      const { data, error } = await supabase.functions.invoke(
+        "send-missed-anc-sms-manual",
+        {
+          headers: { "x-mchms-session": token },
+          body: { pregnancy_id: smsTarget.id },
+        },
+      );
+      if (error) throw error;
+      if (!data?.success || data?.sent !== 1) {
+        throw new Error(
+          data?.message ||
+            "SMS was not sent. Please check the reminder status.",
+        );
+      }
+      setSmsSuccess(
+        `SMS reminder submitted for ${fullName(smsTarget.resident)}. Delivery to the recipient is not yet confirmed.`,
+      );
+      setSmsLogs((previous) => [
+        {
+          pregnant_woman_id: smsTarget.id,
+          anc_visit_id: smsTarget.latest_anc_visit?.id,
+          scheduled_date: smsTarget.next_visit_date,
+          status: "sent",
+          created_at: new Date().toISOString(),
+        },
+        ...previous,
+      ]);
+      setSmsTarget(null);
+      await loadSmsLogs();
+    } catch (error) {
+      setSmsFeedback(error?.message || "Unable to submit SMS reminder.");
+    } finally {
+      setSmsSending(false);
     }
   };
 
@@ -1837,6 +1962,73 @@ export default function PregnancyMonitoring() {
 
   return (
     <DashboardLayout>
+      {(smsSuccess || smsFeedback) && (
+        <div
+          className="fixed right-4 top-20 z-[190] w-[min(26rem,calc(100vw-2rem))]"
+          role={smsFeedback ? "alert" : "status"}
+        >
+          <div
+            className={`flex items-start gap-3 rounded-xl border p-4 shadow-lg ${smsFeedback ? "border-red-200 bg-red-50 text-red-800" : "border-green-200 bg-green-50 text-green-800"}`}
+          >
+            {smsFeedback ? (
+              <AlertTriangle size={20} />
+            ) : (
+              <CheckCircle2 size={20} />
+            )}
+            <p className="flex-1 text-sm font-medium">
+              {smsFeedback || smsSuccess}
+            </p>
+            <button
+              type="button"
+              aria-label="Dismiss SMS notification"
+              onClick={() => {
+                setSmsSuccess("");
+                setSmsFeedback("");
+              }}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+      )}
+      {smsTarget && (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Confirm SMS reminder"
+        >
+          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-xl">
+            <h3 className="text-lg font-bold text-gray-900">
+              Confirm SMS reminder
+            </h3>
+            <p className="mt-3 text-sm text-gray-600">
+              Send an SMS reminder to{" "}
+              <strong>{fullName(smsTarget.resident)}</strong> for the missed ANC
+              check-up on{" "}
+              <strong>{formatDate(smsTarget.next_visit_date)}</strong>?
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={smsSending}
+                onClick={() => setSmsTarget(null)}
+                className="rounded-lg border px-4 py-2 text-sm font-semibold"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={smsSending}
+                onClick={submitManualSms}
+                className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+              >
+                {smsSending ? "Sending..." : "Confirm send"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="space-y-6">
         <div>
           <h1 className="text-2xl font-bold text-gray-800">
@@ -2127,6 +2319,7 @@ export default function PregnancyMonitoring() {
                       <th className="px-5 py-4">ANC</th>
                       <th className="px-5 py-4">Next Check-up</th>
                       <th className="px-5 py-4">Status</th>
+                      <th className="px-5 py-4">SMS reminder</th>
                       <th className="px-5 py-4 text-right">Action</th>
                     </tr>
                   </thead>
@@ -2135,7 +2328,7 @@ export default function PregnancyMonitoring() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan="7"
+                          colSpan="8"
                           className="px-5 py-10 text-center text-gray-500"
                         >
                           Loading pregnancy records...
@@ -2144,7 +2337,7 @@ export default function PregnancyMonitoring() {
                     ) : filteredPregnancies.length === 0 ? (
                       <tr>
                         <td
-                          colSpan="7"
+                          colSpan="8"
                           className="px-5 py-10 text-center text-gray-500"
                         >
                           No pregnancy records found.
@@ -2261,7 +2454,58 @@ export default function PregnancyMonitoring() {
                               </span>
                             </td>
 
+                            <td className="px-5 py-4 text-xs">
+                              {checkupStatus.key !== "missed" ? (
+                                <span className="text-gray-400">
+                                  Not overdue
+                                </span>
+                              ) : !online ? (
+                                <span className="text-gray-500">
+                                  Offline — status unavailable
+                                </span>
+                              ) : smsLoading ? (
+                                <span className="text-gray-500">
+                                  Checking SMS...
+                                </span>
+                              ) : smsError ? (
+                                <span className="text-red-600">
+                                  Status unavailable
+                                </span>
+                              ) : smsLogFor(pregnancy)?.status === "sent" ? (
+                                <span className="font-semibold text-green-700">
+                                  SMS sent
+                                </span>
+                              ) : smsLogFor(pregnancy) ? (
+                                <span className="font-semibold text-amber-700">
+                                  {String(
+                                    smsLogFor(pregnancy).status || "Pending",
+                                  ).replaceAll("_", " ")}
+                                </span>
+                              ) : (
+                                <span className="font-semibold text-gray-500">
+                                  Not sent
+                                </span>
+                              )}
+                            </td>
                             <td className="px-5 py-4 text-right">
+                              {user?.role === "midwife" &&
+                                checkupStatus.key === "missed" &&
+                                online &&
+                                !smsLoading &&
+                                !smsError &&
+                                !smsLogFor(pregnancy) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setSmsFeedback("");
+                                      setSmsSuccess("");
+                                      setSmsTarget(pregnancy);
+                                    }}
+                                    className="mr-2 inline-flex items-center gap-1 rounded-lg bg-teal-700 px-3 py-2 text-xs font-semibold text-white hover:bg-teal-800"
+                                  >
+                                    <Send size={13} /> Send SMS
+                                  </button>
+                                )}
                               <button
                                 onClick={() => openPregnancy(pregnancy)}
                                 className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-700"

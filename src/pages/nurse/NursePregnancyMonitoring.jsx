@@ -535,6 +535,12 @@ export default function NursePregnancyMonitoring() {
   const [authorizationChecked, setAuthorizationChecked] = useState(false);
   const [nurseAccessError, setNurseAccessError] = useState("");
   const [pregnancies, setPregnancies] = useState([]);
+  // Read-only SMS reminder history; nurses cannot send reminders from this page.
+  const [smsLogs, setSmsLogs] = useState([]);
+  const [smsLoading, setSmsLoading] = useState(false);
+  const [smsError, setSmsError] = useState("");
+  const [smsVerified, setSmsVerified] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedPregnancy, setSelectedPregnancy] = useState(null);
@@ -974,6 +980,75 @@ export default function NursePregnancyMonitoring() {
       setLoading(false);
     }
   };
+
+  const smsLogFor = (pregnancyId, scheduledDate) => {
+    const matches = smsLogs.filter(
+      (log) =>
+        String(log.pregnant_woman_id) === String(pregnancyId) &&
+        String(log.scheduled_date || "").slice(0, 10) ===
+          String(scheduledDate || "").slice(0, 10),
+    );
+    return (
+      matches.find((log) => log.status === "sent") ||
+      matches.find((log) => log.status === "pending") ||
+      matches[0] ||
+      null
+    );
+  };
+
+  const loadSmsHistory = async (records) => {
+    setSmsVerified(false);
+    setSmsLogs([]);
+    if (!navigator.onLine) {
+      setSmsError("SMS history cannot be verified offline.");
+      return;
+    }
+    setSmsLoading(true);
+    setSmsError("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token) throw new Error("SMS session missing. Please sign in again.");
+      const ids = [
+        ...new Set(
+          records
+            .map((p) => Number(p.id))
+            .filter((id) => Number.isSafeInteger(id) && id > 0),
+        ),
+      ];
+      const logs = [];
+      for (let i = 0; i < ids.length; i += 500) {
+        const { data, error } = await supabase.functions.invoke(
+          "mchms-sms-history",
+          {
+            headers: { "x-mchms-session": token },
+            body: { pregnancy_ids: ids.slice(i, i + 500) },
+          },
+        );
+        if (error) throw error;
+        if (data?.error) throw new Error(data.error);
+        if (!Array.isArray(data?.logs)) {
+          throw new Error("SMS history response was incomplete.");
+        }
+        logs.push(...data.logs);
+      }
+      setSmsLogs(logs);
+      setSmsVerified(true);
+    } catch (error) {
+      console.error("Nurse SMS history:", error);
+      setSmsError(error?.message || "Unable to verify SMS history.");
+    } finally {
+      setSmsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (authorizationChecked && hasNurseAuthorization && user?.id) {
+      void loadSmsHistory(pregnancies);
+    } else {
+      setSmsLogs([]);
+      setSmsVerified(false);
+    }
+  }, [authorizationChecked, hasNurseAuthorization, user?.id, pregnancies]);
 
   const filteredPregnancies = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -1949,6 +2024,7 @@ export default function NursePregnancyMonitoring() {
                       <th className="px-5 py-4">EDC</th>
                       <th className="px-5 py-4">ANC</th>
                       <th className="px-5 py-4">Next Check-up</th>
+                      <th className="px-5 py-4">SMS Reminder</th>
                       <th className="px-5 py-4">Status</th>
                       <th className="px-5 py-4 text-right">Action</th>
                     </tr>
@@ -1958,7 +2034,7 @@ export default function NursePregnancyMonitoring() {
                     {loading ? (
                       <tr>
                         <td
-                          colSpan="7"
+                          colSpan="8"
                           className="px-5 py-10 text-center text-gray-500"
                         >
                           Loading pregnancy records...
@@ -1967,7 +2043,7 @@ export default function NursePregnancyMonitoring() {
                     ) : filteredPregnancies.length === 0 ? (
                       <tr>
                         <td
-                          colSpan="7"
+                          colSpan="8"
                           className="px-5 py-10 text-center text-gray-500"
                         >
                           No pregnancy records found.
@@ -2073,6 +2149,53 @@ export default function NursePregnancyMonitoring() {
                                 <span className="text-gray-400">
                                   No schedule
                                 </span>
+                              )}
+                            </td>
+
+                            <td className="px-5 py-4">
+                              {checkupStatus.key !== "missed" ? (
+                                <span className="text-xs text-gray-500">
+                                  Not applicable
+                                </span>
+                              ) : smsLoading ? (
+                                <span className="text-xs text-gray-500">
+                                  Checking...
+                                </span>
+                              ) : !smsVerified ? (
+                                <span
+                                  className="text-xs text-amber-700"
+                                  title={smsError}
+                                >
+                                  Status unavailable
+                                </span>
+                              ) : (
+                                (() => {
+                                  const log = smsLogFor(
+                                    pregnancy.id,
+                                    pregnancy.next_visit_date,
+                                  );
+                                  return log?.status === "sent" ? (
+                                    <div className="space-y-1">
+                                      <span className="inline-flex rounded-full bg-green-100 px-2.5 py-1 text-xs font-semibold text-green-700">
+                                        SMS sent
+                                      </span>
+                                    </div>
+                                  ) : log?.status === "pending" ? (
+                                    <span className="inline-flex rounded-full bg-yellow-100 px-2.5 py-1 text-xs font-semibold text-yellow-800">
+                                      Pending
+                                    </span>
+                                  ) : log ? (
+                                    <span className="inline-flex rounded-full bg-red-100 px-2.5 py-1 text-xs font-semibold text-red-700">
+                                      {log.status === "failed"
+                                        ? "SMS failed"
+                                        : "Not sent"}
+                                    </span>
+                                  ) : (
+                                    <span className="inline-flex rounded-full bg-gray-100 px-2.5 py-1 text-xs font-semibold text-gray-700">
+                                      Not sent
+                                    </span>
+                                  );
+                                })()
                               )}
                             </td>
 
@@ -2207,6 +2330,26 @@ export default function NursePregnancyMonitoring() {
                         <p className="mt-1 text-sm text-red-700">
                           This pregnant woman missed her scheduled ANC
                           follow-up.
+                        </p>
+                        <p className="mt-2 text-sm font-medium text-red-800">
+                          SMS reminder:{" "}
+                          {smsLoading
+                            ? "Checking..."
+                            : !smsVerified
+                              ? "Status unavailable"
+                              : (() => {
+                                  const log = smsLogFor(
+                                    selectedPregnancy.id,
+                                    selectedPregnancy.next_visit_date,
+                                  );
+                                  return log?.status === "sent"
+                                    ? "SMS sent (provider accepted; delivery unconfirmed)"
+                                    : log?.status === "pending"
+                                      ? "Pending"
+                                      : log?.status === "failed"
+                                        ? "SMS failed"
+                                        : "Not sent";
+                                })()}
                         </p>
                         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
                           <InfoItem

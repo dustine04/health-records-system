@@ -19,6 +19,8 @@ import {
   MapPin,
   Truck,
   CheckCircle2,
+  MessageSquare,
+  Send,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
@@ -220,6 +222,135 @@ function BhwPregnantMonitoring() {
   const [savingPregnancyInfo, setSavingPregnancyInfo] = useState(false);
 
   const [selectedAncVisit, setSelectedAncVisit] = useState(null);
+
+  // Shared SMS history with the BHW and Midwife dashboards.
+  const [smsLogs, setSmsLogs] = useState([]);
+  const [smsLoading, setSmsLoading] = useState(false);
+  const [smsError, setSmsError] = useState("");
+  const [smsSuccess, setSmsSuccess] = useState("");
+  const [smsTarget, setSmsTarget] = useState(null);
+  const [smsSending, setSmsSending] = useState(false);
+
+  const phToday = () =>
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).format(new Date());
+
+  const latestAnc = (records) =>
+    [...records].sort(
+      (a, b) =>
+        Number(b.visit_number || 0) - Number(a.visit_number || 0) ||
+        String(b.visit_date || "").localeCompare(String(a.visit_date || "")),
+    )[0] || null;
+
+  const missedAnc = (visit) =>
+    Boolean(
+      visit?.next_visit_date &&
+      String(visit.next_visit_date).slice(0, 10) < phToday() &&
+      (!visit.visit_date ||
+        String(visit.visit_date).slice(0, 10) <
+          String(visit.next_visit_date).slice(0, 10)),
+    );
+
+  const smsLogFor = (pregnancyId, scheduledDate) => {
+    const matches = smsLogs.filter(
+      (log) =>
+        String(log.pregnant_woman_id) === String(pregnancyId) &&
+        String(log.scheduled_date || "").slice(0, 10) ===
+          String(scheduledDate || "").slice(0, 10),
+    );
+    return (
+      matches.find((log) => log.status === "sent") ||
+      matches.find((log) => log.status === "pending") ||
+      matches[0] ||
+      null
+    );
+  };
+
+  const loadSmsHistory = async (ids) => {
+    if (!navigator.onLine) {
+      setSmsError("Connect to the internet to verify SMS status.");
+      return;
+    }
+    setSmsLoading(true);
+    setSmsError("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token) throw new Error("SMS session missing. Please log in again.");
+      const uniqueIds = [
+        ...new Set(
+          ids.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0),
+        ),
+      ];
+      const logs = [];
+      for (let i = 0; i < uniqueIds.length; i += 500) {
+        const { data, error } = await supabase.functions.invoke(
+          "mchms-sms-history",
+          {
+            headers: { "x-mchms-session": token },
+            body: { pregnancy_ids: uniqueIds.slice(i, i + 500) },
+          },
+        );
+        if (error) throw error;
+        if (data?.error) throw new Error(data.error);
+        logs.push(...(data?.logs || []));
+      }
+      setSmsLogs(logs);
+    } catch (error) {
+      console.error("BHW monitoring SMS history:", error);
+      setSmsError(error?.message || "SMS status unavailable.");
+    } finally {
+      setSmsLoading(false);
+    }
+  };
+
+  const sendManualSms = async () => {
+    if (!smsTarget || smsSending || !navigator.onLine) return;
+    setSmsSending(true);
+    setSmsError("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token) throw new Error("SMS session missing. Please log in again.");
+      const { data, error } = await supabase.functions.invoke(
+        "send-missed-anc-sms-manual",
+        {
+          headers: { "x-mchms-session": token },
+          body: { pregnancy_id: smsTarget.pregnancyId },
+        },
+      );
+      if (error) {
+        const details = await error.context?.json?.().catch(() => null);
+        throw new Error(details?.message || details?.error || error.message);
+      }
+      if (!data?.success || data.sent !== 1)
+        throw new Error(data?.message || "SMS was not accepted.");
+      setSmsLogs((previous) => [
+        {
+          pregnant_woman_id: smsTarget.pregnancyId,
+          anc_visit_id: smsTarget.visitId,
+          scheduled_date: smsTarget.scheduledDate,
+          status: "sent",
+          sent_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+        },
+        ...previous,
+      ]);
+      setSmsSuccess(
+        `SMS reminder successfully submitted for ${smsTarget.name}. The provider accepted the request; delivery is not yet confirmed.`,
+      );
+      setSmsTarget(null);
+      // Keep optimistic status even if history refresh fails.
+      await loadSmsHistory([smsTarget.pregnancyId]);
+    } catch (error) {
+      setSmsError(error?.message || "Unable to send SMS reminder.");
+    } finally {
+      setSmsSending(false);
+    }
+  };
+
   // =====================================================
   // ANC FORM
   // =====================================================
@@ -524,6 +655,11 @@ function BhwPregnantMonitoring() {
   useEffect(() => {
     if (online && user?.id) runSync();
   }, [online, user?.id]);
+  useEffect(() => {
+    if (online && selectedWoman?.pregnancy?.id) {
+      void loadSmsHistory([selectedWoman.pregnancy.id]);
+    }
+  }, [online]);
 
   const runSync = async () => {
     if (!user?.id || !navigator.onLine || syncing) return;
@@ -606,6 +742,9 @@ function BhwPregnantMonitoring() {
   const openWoman = async (woman) => {
     setSelectedWoman(woman);
     setShowDetailsModal(true);
+    setSmsLogs([]);
+    setSmsSuccess("");
+    void loadSmsHistory([woman.pregnancy.id]);
     void auditMonitoring(
       "bhw_pregnancy_monitoring_viewed",
       "pregnant_women",
@@ -1210,6 +1349,80 @@ function BhwPregnantMonitoring() {
           </p>
         </div>
 
+        {smsSuccess && (
+          <div
+            role="status"
+            className="flex items-start justify-between gap-3 rounded-xl border border-green-200 bg-green-50 p-4 text-sm text-green-800"
+          >
+            <span className="flex items-start gap-2">
+              <CheckCircle2 size={18} className="shrink-0" />
+              {smsSuccess}
+            </span>
+            <button
+              type="button"
+              onClick={() => setSmsSuccess("")}
+              aria-label="Dismiss SMS success"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        )}
+        {smsError && (
+          <div
+            role="alert"
+            className="flex items-start justify-between gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700"
+          >
+            <span>{smsError}</span>
+            <button
+              type="button"
+              onClick={() => setSmsError("")}
+              aria-label="Dismiss SMS error"
+            >
+              <X size={18} />
+            </button>
+          </div>
+        )}
+        {smsTarget && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-label="Confirm SMS reminder"
+              className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl"
+            >
+              <h3 className="text-lg font-semibold text-gray-900">
+                Send ANC SMS reminder?
+              </h3>
+              <p className="mt-3 text-sm text-gray-600">
+                Send a reminder to <strong>{smsTarget.name}</strong> for the
+                missed ANC appointment on{" "}
+                <strong>{smsTarget.scheduledDate}</strong>?
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                The message is sent through Semaphore. Acceptance does not
+                confirm delivery.
+              </p>
+              <div className="mt-5 flex justify-end gap-3">
+                <button
+                  type="button"
+                  disabled={smsSending}
+                  onClick={() => setSmsTarget(null)}
+                  className="rounded-lg border px-4 py-2 text-sm disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={smsSending || !online}
+                  onClick={sendManualSms}
+                  className="rounded-lg bg-pink-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {smsSending ? "Sending..." : "Confirm Send"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-3 shadow-sm">
           {online ? (
             <Wifi size={18} className="text-green-600" />
@@ -1865,6 +2078,94 @@ function BhwPregnantMonitoring() {
                     </div>
                   </div>
 
+                  {selectedWoman?.pregnancy?.id && (
+                    <div className="border-b border-gray-200 bg-white px-5 py-4">
+                      {(() => {
+                        const latest = latestAnc(visits);
+                        const overdue = missedAnc(latest);
+                        const closed = [
+                          "delivered",
+                          "miscarriage",
+                          "stillbirth",
+                          "inactive",
+                        ].includes(
+                          String(
+                            selectedWoman.pregnancy.status || "",
+                          ).toLowerCase(),
+                        );
+                        const log = smsLogFor(
+                          selectedWoman.pregnancy.id,
+                          latest?.next_visit_date,
+                        );
+                        return (
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 text-sm">
+                              <MessageSquare
+                                size={17}
+                                className="text-pink-600"
+                              />
+                              <span className="font-semibold text-gray-700">
+                                ANC SMS Reminder:
+                              </span>
+                              <span
+                                className={
+                                  log?.status === "sent"
+                                    ? "font-medium text-green-700"
+                                    : "text-gray-600"
+                                }
+                              >
+                                {!online
+                                  ? "Offline — status unverified"
+                                  : smsLoading
+                                    ? "Checking..."
+                                    : smsError
+                                      ? "Status unavailable"
+                                      : !latest
+                                        ? "No ANC appointment"
+                                        : !overdue || closed
+                                          ? "No missed appointment"
+                                          : log?.status === "sent"
+                                            ? "SMS Sent"
+                                            : log?.status === "pending"
+                                              ? "Sending pending"
+                                              : log?.status === "failed"
+                                                ? "Previous attempt failed"
+                                                : "Not sent"}
+                              </span>
+                              {overdue &&
+                                !closed &&
+                                latest?.next_visit_date && (
+                                  <span className="text-xs text-gray-500">
+                                    ({latest.next_visit_date})
+                                  </span>
+                                )}
+                            </div>
+                            {online &&
+                              !smsLoading &&
+                              !smsError &&
+                              overdue &&
+                              !closed &&
+                              !log && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setSmsTarget({
+                                      pregnancyId: selectedWoman.pregnancy.id,
+                                      visitId: latest.id,
+                                      scheduledDate: latest.next_visit_date,
+                                      name: getFullName(selectedWoman),
+                                    })
+                                  }
+                                  className="inline-flex items-center gap-2 rounded-lg bg-pink-600 px-3 py-2 text-sm font-medium text-white hover:bg-pink-700"
+                                >
+                                  <Send size={15} /> Send SMS
+                                </button>
+                              )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
                   {loadingVisits ? (
                     <div className="p-10 text-center text-gray-500">
                       Loading ANC visits...

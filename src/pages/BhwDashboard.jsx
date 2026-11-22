@@ -19,6 +19,8 @@ import {
   AlertCircle,
   Bell,
   BellRing,
+  MessageSquare,
+  Send,
   Check,
   X,
 } from "lucide-react";
@@ -188,6 +190,13 @@ export default function BhwDashboard() {
 
   const [missedHomeVisits, setMissedHomeVisits] = useState([]);
   const [scheduledHomeVisits, setScheduledHomeVisits] = useState([]);
+  const [missedAncVisits, setMissedAncVisits] = useState([]);
+  const [smsLogs, setSmsLogs] = useState([]);
+  const [smsLoading, setSmsLoading] = useState(false);
+  const [smsError, setSmsError] = useState("");
+  const [smsSuccess, setSmsSuccess] = useState("");
+  const [smsTarget, setSmsTarget] = useState(null);
+  const [smsSending, setSmsSending] = useState(false);
   const [notificationOpen, setNotificationOpen] = useState(false);
   const [readNotificationIds, setReadNotificationIds] = useState([]);
   const [recentReports, setRecentReports] = useState([]);
@@ -200,6 +209,101 @@ export default function BhwDashboard() {
   const [error, setError] = useState("");
 
   const today = useMemo(() => getLocalDate(), []);
+
+  const loadSmsHistory = useCallback(async (pregnancyIds) => {
+    setSmsLoading(true);
+    setSmsError("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token)
+        throw new Error("Your SMS session is missing. Please log in again.");
+      const ids = [...new Set(pregnancyIds.map(Number))];
+      const allLogs = [];
+      for (let i = 0; i < ids.length; i += 500) {
+        const { data, error: requestError } = await supabase.functions.invoke(
+          "mchms-sms-history",
+          {
+            headers: { "x-mchms-session": token },
+            body: { pregnancy_ids: ids.slice(i, i + 500) },
+          },
+        );
+        if (requestError) throw requestError;
+        if (data?.error) throw new Error(data.error);
+        allLogs.push(...(data?.logs || []));
+      }
+      setSmsLogs(allLogs);
+    } catch (err) {
+      console.error("BHW SMS history error:", err);
+      setSmsLogs([]);
+      setSmsError(err?.message || "Unable to check SMS reminders.");
+    } finally {
+      setSmsLoading(false);
+    }
+  }, []);
+
+  const smsLogFor = useCallback(
+    (visit) => {
+      const matches = smsLogs.filter(
+        (log) =>
+          String(log.pregnant_woman_id) === String(visit.pregnancyId) &&
+          String(log.scheduled_date || "").slice(0, 10) === visit.nextVisitDate,
+      );
+      return (
+        matches.find((log) => log.status === "sent") ||
+        matches.find((log) => log.status === "pending") ||
+        matches[0] ||
+        null
+      );
+    },
+    [smsLogs],
+  );
+
+  const sendManualSms = useCallback(async () => {
+    if (!smsTarget || smsSending) return;
+    setSmsSending(true);
+    setSmsError("");
+    try {
+      const token = sessionStorage.getItem("mchms_session_token");
+      if (!token)
+        throw new Error("Your SMS session is missing. Please log in again.");
+      const { data, error: requestError } = await supabase.functions.invoke(
+        "send-missed-anc-sms-manual",
+        {
+          headers: { "x-mchms-session": token },
+          body: { pregnancy_id: smsTarget.pregnancyId },
+        },
+      );
+      if (requestError) {
+        const details = await requestError.context?.json?.().catch(() => null);
+        throw new Error(
+          details?.message || details?.error || requestError.message,
+        );
+      }
+      if (!data?.success || data?.sent !== 1)
+        throw new Error(data?.message || "SMS request was not accepted.");
+      setSmsLogs((previous) => [
+        {
+          pregnant_woman_id: smsTarget.pregnancyId,
+          anc_visit_id: smsTarget.ancVisitId,
+          scheduled_date: smsTarget.nextVisitDate,
+          status: "sent",
+          sent_at: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+        },
+        ...previous,
+      ]);
+      setSmsSuccess(
+        `SMS reminder successfully submitted for ${smsTarget.residentName}.`,
+      );
+      setSmsTarget(null);
+      // Refresh authoritative records across the BHW's ANC appointments.
+      await loadSmsHistory(missedAncVisits.map((visit) => visit.pregnancyId));
+    } catch (err) {
+      setSmsError(err?.message || "Unable to send SMS reminder.");
+    } finally {
+      setSmsSending(false);
+    }
+  }, [smsTarget, smsSending, missedAncVisits, loadSmsHistory]);
 
   const loadDashboard = useCallback(
     async (currentUser, isRefresh = false) => {
@@ -437,7 +541,56 @@ export default function BhwDashboard() {
           allScheduledVisits.filter((visit) => visit.nextVisitDate < today),
         );
 
-        // 7. Load this BHW's monthly reports.
+        // 7. Missed ANC appointments (separate from missed BHW home visits).
+        let ancRows = [];
+        if (pregnancyIds.length > 0) {
+          // Fetch in batches to avoid excessively large IN filters.
+          for (let i = 0; i < pregnancyIds.length; i += 500) {
+            const { data: visitsData, error: ancError } = await supabase
+              .from("pregnant_woman_visits")
+              .select(
+                "id, pregnant_woman_id, visit_number, visit_date, next_visit_date",
+              )
+              .in("pregnant_woman_id", pregnancyIds.slice(i, i + 500))
+              .order("visit_number", { ascending: false })
+              .order("visit_date", { ascending: false });
+            if (ancError) throw ancError;
+            ancRows.push(...(visitsData || []));
+          }
+        }
+        const latestAncByPregnancy = new Map();
+        for (const visit of ancRows) {
+          if (!latestAncByPregnancy.has(String(visit.pregnant_woman_id))) {
+            latestAncByPregnancy.set(String(visit.pregnant_woman_id), visit);
+          }
+        }
+        const overdueAnc = pregnancyRows
+          .map((pregnancy) => {
+            const anc = latestAncByPregnancy.get(String(pregnancy.id));
+            const due = String(anc?.next_visit_date || "").slice(0, 10);
+            const visitDate = String(anc?.visit_date || "").slice(0, 10);
+            if (!due || due >= today || (visitDate && visitDate >= due))
+              return null;
+            const resident = residentById.get(String(pregnancy.resident_id));
+            if (!resident) return null;
+            const household = getRelation(resident.households);
+            const area = getRelation(household?.local_areas);
+            return {
+              pregnancyId: pregnancy.id,
+              ancVisitId: anc.id,
+              residentName: getResidentName(resident),
+              nextVisitDate: due,
+              daysOverdue: getDaysOverdue(due),
+              localAreaId: String(household?.local_area_id || ""),
+              localAreaName: area?.name || "N/A",
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => b.daysOverdue - a.daysOverdue);
+        setMissedAncVisits(overdueAnc);
+        await loadSmsHistory(overdueAnc.map((v) => v.pregnancyId));
+
+        // 8. Load this BHW's monthly reports.
         // The dashboard no longer queries health_records or submissions.
         const { data: reportsData, error: reportsError } = await supabase
           .from("bhw_monthly_reports")
@@ -486,7 +639,7 @@ export default function BhwDashboard() {
         setRefreshing(false);
       }
     },
-    [today],
+    [today, loadSmsHistory],
   );
 
   // Restore the logged-in user from localStorage.
@@ -1491,6 +1644,178 @@ export default function BhwDashboard() {
             </div>
           )}
         </section>
+
+        {/* Missed ANC appointments and SMS reminders */}
+        <section className="overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+          <div className="border-b border-gray-100 px-5 py-4">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-pink-50 p-2.5 text-pink-600">
+                <MessageSquare size={22} />
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-gray-900">
+                  Missed ANC Check-ups
+                </h2>
+                <p className="mt-1 text-sm text-gray-500">
+                  Check reminder status for pregnant residents in your assigned
+                  areas.
+                </p>
+              </div>
+            </div>
+          </div>
+          {smsSuccess && (
+            <div
+              role="status"
+              className="m-4 flex items-start justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800"
+            >
+              <span>
+                <CheckCircle2 size={16} className="mr-2 inline" />
+                {smsSuccess}
+              </span>
+              <button
+                type="button"
+                aria-label="Dismiss SMS success"
+                onClick={() => setSmsSuccess("")}
+              >
+                <X size={17} />
+              </button>
+            </div>
+          )}
+          {smsError && (
+            <div
+              role="alert"
+              className="m-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700"
+            >
+              {smsError}
+            </div>
+          )}
+          {loading ? (
+            <p className="px-5 py-10 text-center text-sm text-gray-500">
+              Loading ANC appointments...
+            </p>
+          ) : missedAncVisits.length === 0 ? (
+            <p className="px-5 py-10 text-center text-sm text-gray-500">
+              No missed ANC appointments found in your assigned areas.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-100 text-sm">
+                <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
+                  <tr>
+                    <th className="px-5 py-3">Pregnant Resident</th>
+                    <th className="px-5 py-3">Missed ANC Date</th>
+                    <th className="px-5 py-3">SMS Reminder</th>
+                    <th className="px-5 py-3 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {missedAncVisits
+                    .filter(
+                      (v) =>
+                        selectedAreaId === "all" ||
+                        v.localAreaId === selectedAreaId,
+                    )
+                    .map((visit) => {
+                      const log = smsLogFor(visit);
+                      const sent = log?.status === "sent";
+                      return (
+                        <tr key={visit.pregnancyId}>
+                          <td className="px-5 py-4">
+                            <p className="font-semibold text-gray-900">
+                              {visit.residentName}
+                            </p>
+                            <p className="text-xs text-gray-500">
+                              {visit.localAreaName}
+                            </p>
+                          </td>
+                          <td className="px-5 py-4">
+                            {formatDate(visit.nextVisitDate)}
+                            <p className="text-xs text-rose-600">
+                              {visit.daysOverdue} days overdue
+                            </p>
+                          </td>
+                          <td className="px-5 py-4">
+                            {smsLoading ? (
+                              <span className="text-gray-500">Checking...</span>
+                            ) : smsError ? (
+                              <span className="text-amber-700">
+                                Status unavailable
+                              </span>
+                            ) : sent ? (
+                              <span className="font-semibold text-emerald-700">
+                                SMS sent
+                              </span>
+                            ) : log ? (
+                              <span className="text-amber-700">
+                                {log.status === "failed"
+                                  ? "Previous attempt failed"
+                                  : "Reminder recorded"}
+                              </span>
+                            ) : (
+                              <span className="text-gray-500">Not sent</span>
+                            )}
+                          </td>
+                          <td className="px-5 py-4 text-right">
+                            {!smsLoading && !smsError && !log && (
+                              <button
+                                type="button"
+                                onClick={() => setSmsTarget(visit)}
+                                className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 font-semibold text-white hover:bg-blue-700"
+                              >
+                                <Send size={14} /> Send SMS
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+
+        {smsTarget && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm SMS reminder"
+          >
+            <div className="w-full max-w-md rounded-2xl bg-white p-6 shadow-xl">
+              <h3 className="text-lg font-bold text-gray-900">
+                Send ANC SMS Reminder?
+              </h3>
+              <p className="mt-3 text-sm leading-6 text-gray-600">
+                Send a reminder for <strong>{smsTarget.residentName}</strong>{" "}
+                regarding the missed ANC appointment on{" "}
+                <strong>{formatDate(smsTarget.nextVisitDate)}</strong>?
+              </p>
+              <p className="mt-2 text-xs text-gray-500">
+                The SMS will be sent to the mobile number saved in the
+                resident's record.
+              </p>
+              <div className="mt-6 flex justify-end gap-3">
+                <button
+                  type="button"
+                  disabled={smsSending}
+                  onClick={() => setSmsTarget(null)}
+                  className="rounded-lg border px-4 py-2 text-sm font-semibold"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={smsSending}
+                  onClick={sendManualSms}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  {smsSending ? "Sending..." : "Confirm Send"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Recent monthly reports */}
         <section className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm sm:p-6">

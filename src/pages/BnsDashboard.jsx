@@ -23,6 +23,8 @@ import {
   Search,
   Bell,
   BellRing,
+  MessageSquare,
+  Send,
   X,
 } from "lucide-react";
 
@@ -303,6 +305,13 @@ function BnsDashboard() {
 
   const [growthRecords, setGrowthRecords] = useState([]);
   const [immunizationRecords, setImmunizationRecords] = useState([]);
+  const [childSms, setChildSms] = useState({});
+  const [smsLoading, setSmsLoading] = useState(false);
+  const [smsError, setSmsError] = useState("");
+  const [smsNotice, setSmsNotice] = useState("");
+  const [smsTarget, setSmsTarget] = useState(null);
+  const [guardianConfirmed, setGuardianConfirmed] = useState(false);
+  const [smsSending, setSmsSending] = useState(false);
 
   const [selectedAreaId, setSelectedAreaId] = useState("all");
   const [appointmentFilter, setAppointmentFilter] = useState("all");
@@ -652,6 +661,7 @@ function BnsDashboard() {
 
       result.push({
         id: `growth-${record.id}`,
+        sourceRecordId: record.id,
         ...child,
         type: "growth",
         typeLabel: "Growth Check-up",
@@ -680,6 +690,7 @@ function BnsDashboard() {
 
       result.push({
         id: `immunization-${record.id}`,
+        sourceRecordId: record.id,
         ...child,
         type: "immunization",
         typeLabel: "Immunization",
@@ -819,6 +830,138 @@ function BnsDashboard() {
         .some((value) => String(value).toLowerCase().includes(search));
     });
   }, [appointments, appointmentFilter, appointmentSearch]);
+
+  // SMS history and sending are authorized by the Edge Function, not by this UI.
+  // Only server-synchronized, overdue appointments can be sent reminders.
+  const smsStatus = (appointment) => {
+    const state = childSms[String(appointment.childId)];
+    if (!state || state.error) return "unavailable";
+    const log = (state.logs || []).find(
+      (entry) =>
+        entry.reminder_type === appointment.type &&
+        String(entry.source_record_id) === String(appointment.sourceRecordId) &&
+        entry.scheduled_date === appointment.nextVisitDate,
+    );
+    return log?.status || "not_sent";
+  };
+
+  const loadChildSms = useCallback(async (childIds) => {
+    if (!navigator.onLine || !childIds.length) {
+      if (!navigator.onLine)
+        setSmsError("SMS status requires an internet connection.");
+      return;
+    }
+    const token = sessionStorage.getItem("mchms_session_token");
+    if (!token) {
+      setSmsError("SMS session unavailable. Please sign in again.");
+      return;
+    }
+    setSmsLoading(true);
+    setSmsError("");
+    const results = {};
+    try {
+      // Limit concurrent requests to avoid flooding the Edge Function.
+      for (let i = 0; i < childIds.length; i += 5) {
+        const batch = childIds.slice(i, i + 5);
+        await Promise.all(
+          batch.map(async (id) => {
+            try {
+              const { data, error } = await supabase.functions.invoke(
+                "mchms-child-sms",
+                {
+                  headers: { "x-mchms-session": token },
+                  body: { action: "history", child_health_record_id: id },
+                },
+              );
+              if (error || !data?.success)
+                throw new Error(
+                  data?.error || error?.message || "History unavailable",
+                );
+              results[String(id)] = {
+                logs: data.logs || [],
+                hasMobile: data.has_household_mobile === true,
+              };
+            } catch (error) {
+              console.warn("Child SMS history:", error);
+              results[String(id)] = { error: true, logs: [] };
+            }
+          }),
+        );
+      }
+      setChildSms((previous) => ({ ...previous, ...results }));
+      if (Object.values(results).some((value) => value.error)) {
+        setSmsError(
+          "Some SMS statuses could not be loaded. Refresh to try again.",
+        );
+      }
+    } finally {
+      setSmsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!loading && !scheduleError && appointments.length) {
+      const ids = [
+        ...new Set(
+          appointments
+            .filter((a) => a.status === "missed")
+            .map((a) => a.childId),
+        ),
+      ];
+      void loadChildSms(ids);
+    }
+  }, [loading, scheduleError, appointments, loadChildSms]);
+
+  async function sendChildSms() {
+    if (!smsTarget || !guardianConfirmed || smsSending || !navigator.onLine)
+      return;
+    const token = sessionStorage.getItem("mchms_session_token");
+    if (!token) {
+      setSmsError("SMS session unavailable. Please sign in again.");
+      return;
+    }
+    setSmsSending(true);
+    setSmsError("");
+    setSmsNotice("");
+    try {
+      const { data, error } = await supabase.functions.invoke(
+        "mchms-child-sms",
+        {
+          headers: { "x-mchms-session": token },
+          body: {
+            action: "send",
+            child_health_record_id: smsTarget.childId,
+            reminder_type: smsTarget.type,
+            source_record_id: smsTarget.sourceRecordId,
+            guardian_confirmed: true,
+          },
+        },
+      );
+      if (error || !data?.success) {
+        let detail = data?.error || error?.message || "Unable to send SMS";
+        if (error?.context && typeof error.context.json === "function") {
+          const payload = await error.context.json().catch(() => null);
+          if (payload?.error) detail = payload.error;
+        }
+        throw new Error(detail);
+      }
+      setSmsNotice(
+        `Semaphore accepted the ${smsTarget.typeLabel.toLowerCase()} SMS request. Delivery is not confirmed.`,
+      );
+      const childId = smsTarget.childId;
+      setSmsTarget(null);
+      setGuardianConfirmed(false);
+      await loadChildSms([childId]);
+    } catch (error) {
+      const failureMessage =
+        error.message ||
+        "Unable to send SMS. Check the history before retrying.";
+      await loadChildSms([smsTarget.childId]);
+      setSmsError(failureMessage);
+    } finally {
+      setSmsSending(false);
+    }
+  }
 
   /* =======================================================
      COMMUNITY CHART
@@ -1122,7 +1265,7 @@ function BnsDashboard() {
                     className="fixed inset-0 z-40 cursor-default bg-transparent"
                     onClick={() => setNotificationsOpen(false)}
                   />
-                  <div className="absolute right-0 top-14 z-50 w-[min(90vw,420px)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
+                  <div className="fixed left-4 right-4 top-24 z-50 max-h-[calc(100dvh-7rem)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl sm:absolute sm:left-auto sm:right-0 sm:top-14 sm:w-[min(90vw,420px)] sm:max-h-none">
                     <div className="flex items-center justify-between border-b border-gray-100 px-4 py-3">
                       <div>
                         <h3 className="font-bold text-gray-900">
@@ -1513,6 +1656,10 @@ function BnsDashboard() {
                       Status
                     </th>
 
+                    <th className="px-4 py-3 text-xs font-semibold uppercase text-gray-500">
+                      SMS Reminder
+                    </th>
+
                     <th className="px-4 py-3 text-right text-xs font-semibold uppercase text-gray-500">
                       Action
                     </th>
@@ -1597,6 +1744,65 @@ function BnsDashboard() {
                           </span>
                         </td>
 
+                        <td className="px-4 py-4">
+                          {appointment.status !== "missed" ? (
+                            <span className="text-xs text-gray-500">
+                              Not applicable
+                            </span>
+                          ) : (
+                            <div className="flex flex-col items-start gap-2">
+                              <span
+                                className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                                  smsStatus(appointment) === "sent"
+                                    ? "bg-emerald-100 text-emerald-700"
+                                    : smsStatus(appointment) === "not_sent"
+                                      ? "bg-amber-100 text-amber-800"
+                                      : smsStatus(appointment) === "failed"
+                                        ? "bg-rose-100 text-rose-700"
+                                        : "bg-gray-100 text-gray-600"
+                                }`}
+                              >
+                                {smsLoading &&
+                                !childSms[String(appointment.childId)]
+                                  ? "Loading..."
+                                  : {
+                                      sent: "SMS sent",
+                                      not_sent: "Not sent",
+                                      pending: "Pending",
+                                      failed: "SMS failed",
+                                      unavailable: "Unavailable",
+                                    }[smsStatus(appointment)] || "Unavailable"}
+                              </span>
+                              {smsStatus(appointment) === "not_sent" && (
+                                <button
+                                  type="button"
+                                  disabled={
+                                    !navigator.onLine ||
+                                    smsLoading ||
+                                    !childSms[String(appointment.childId)]
+                                      ?.hasMobile
+                                  }
+                                  onClick={() => {
+                                    setSmsTarget(appointment);
+                                    setGuardianConfirmed(false);
+                                    setSmsError("");
+                                  }}
+                                  className="inline-flex items-center gap-1 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  <Send size={13} /> Send SMS
+                                </button>
+                              )}
+                              {smsStatus(appointment) === "not_sent" &&
+                                !childSms[String(appointment.childId)]
+                                  ?.hasMobile && (
+                                  <span className="text-xs text-rose-600">
+                                    Valid household mobile required
+                                  </span>
+                                )}
+                            </div>
+                          )}
+                        </td>
+
                         <td className="px-4 py-4 text-right">
                           <button
                             type="button"
@@ -1615,6 +1821,22 @@ function BnsDashboard() {
             </div>
           )}
 
+          {smsError && (
+            <p
+              role="alert"
+              className="mt-4 rounded-lg bg-rose-50 p-3 text-sm text-rose-700"
+            >
+              {smsError}
+            </p>
+          )}
+          {smsNotice && (
+            <p
+              role="status"
+              className="mt-4 rounded-lg bg-emerald-50 p-3 text-sm text-emerald-700"
+            >
+              {smsNotice}
+            </p>
+          )}
           <p className="mt-4 text-xs leading-5 text-gray-500">
             Appointment status is calculated from the latest saved monitoring or
             immunization record. An overdue date indicates a follow-up is
@@ -1623,6 +1845,79 @@ function BnsDashboard() {
             Supabase.
           </p>
         </section>
+
+        {smsTarget && (
+          <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/60 p-4">
+            <div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="child-sms-confirm"
+              className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <h3
+                    id="child-sms-confirm"
+                    className="text-lg font-bold text-gray-900"
+                  >
+                    Confirm Child SMS Reminder
+                  </h3>
+                  <p className="mt-2 text-sm text-gray-600">
+                    {smsTarget.childName} · {smsTarget.typeLabel} ·{" "}
+                    {formatDate(smsTarget.nextVisitDate)}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={smsSending}
+                  onClick={() => setSmsTarget(null)}
+                  aria-label="Close"
+                  className="rounded-lg p-2 hover:bg-gray-100"
+                >
+                  <X size={19} />
+                </button>
+              </div>
+              <p className="mt-4 text-sm text-gray-700">
+                A missed-appointment reminder will be sent to the household
+                contact number stored in MCHMS. No child name or medical details
+                are included in the SMS.
+              </p>
+              <label className="mt-5 flex cursor-pointer items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+                <input
+                  type="checkbox"
+                  checked={guardianConfirmed}
+                  onChange={(e) => setGuardianConfirmed(e.target.checked)}
+                  disabled={smsSending}
+                  className="mt-1"
+                />
+                <span>
+                  I have verified that the household contact number belongs to
+                  the child's parent or authorized guardian, and that this
+                  person may receive appointment reminders.
+                </span>
+              </label>
+              <div className="mt-5 flex justify-end gap-3">
+                <button
+                  type="button"
+                  disabled={smsSending}
+                  onClick={() => setSmsTarget(null)}
+                  className="rounded-lg border px-4 py-2 text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!guardianConfirmed || smsSending}
+                  onClick={sendChildSms}
+                  className="inline-flex items-center gap-2 rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
+                >
+                  <MessageSquare size={16} />
+                  {smsSending ? "Sending..." : "Confirm & Send SMS"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* QUICK ACTIONS */}
 

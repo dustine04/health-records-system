@@ -421,21 +421,36 @@ function Sidebar({ collapsed, setCollapsed, mobileOpen, setMobileOpen }) {
 
     setLoggingOut(true);
 
+    // Capture the token before clearing browser storage.
+    const sessionToken = sessionStorage.getItem("mchms_session_token");
+
     try {
-      // Record logout while the user identity is available.
-      // A failed audit insert must not prevent sign-out.
+      // Best-effort audit logging; failure must not block logout.
       await logLogoutAudit(user);
+
+      // Revoke the custom MCHMS session on the server.
+      // If offline or unavailable, local sign-out still proceeds.
+      if (sessionToken) {
+        const { error } = await supabase.functions.invoke("mchms-logout", {
+          body: { session_token: sessionToken },
+        });
+        if (error) {
+          console.warn("Could not revoke server session:", error.message);
+        }
+      }
+    } catch (error) {
+      console.warn("Logout cleanup encountered an error:", error);
     } finally {
       try {
         localStorage.removeItem("user");
+        sessionStorage.removeItem("mchms_session_token");
       } catch (error) {
-        console.warn("Unable to clear local session:", error);
+        console.warn("Unable to clear browser session:", error);
       }
 
       setShowLogoutModal(false);
       setMobileOpen(false);
       setLoggingOut(false);
-
       navigate("/", { replace: true });
     }
   };

@@ -156,8 +156,13 @@ function Login() {
         return;
       }
 
+      const { session_token: sessionToken, ...accountWithoutToken } = account;
+      if (!sessionToken) {
+        setError("Unable to establish a secure session. Please try again.");
+        return;
+      }
       const authenticatedUser = {
-        ...account,
+        ...accountWithoutToken,
         role: normalizedRole,
       };
 
@@ -170,6 +175,7 @@ function Login() {
         }
 
         localStorage.setItem("user", JSON.stringify(authenticatedUser));
+        sessionStorage.setItem("mchms_session_token", sessionToken);
       } catch {
         await logAuthEvent({
           actorId: authenticatedUser.id,

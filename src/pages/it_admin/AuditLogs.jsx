@@ -15,6 +15,8 @@ import {
   Filter,
   Loader2,
   Clock3,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 
 import DashboardLayout from "../../components/DashboardLayout";
@@ -257,6 +259,8 @@ export default function AuditLogs() {
   const [dateFilter, setDateFilter] = useState("");
 
   const [selectedLog, setSelectedLog] = useState(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
 
   /* ==========================================
      LOAD AUDIT LOGS
@@ -383,6 +387,19 @@ export default function AuditLogs() {
     });
   }, [logs, users, search, actionFilter, statusFilter, dateFilter]);
 
+  // Pagination happens after search and filters so each page is consistent.
+  const totalPages = Math.max(1, Math.ceil(filteredLogs.length / pageSize));
+  const safePage = Math.min(currentPage, totalPages);
+  const firstRow = (safePage - 1) * pageSize;
+  const paginatedLogs = useMemo(
+    () => filteredLogs.slice(firstRow, firstRow + pageSize),
+    [filteredLogs, firstRow, pageSize],
+  );
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [search, actionFilter, statusFilter, dateFilter, pageSize]);
+
   /* ==========================================
      STATISTICS
   ========================================== */
@@ -410,6 +427,7 @@ export default function AuditLogs() {
     setActionFilter("all");
     setStatusFilter("all");
     setDateFilter("");
+    setCurrentPage(1);
   };
 
   /* ==========================================
@@ -643,7 +661,7 @@ export default function AuditLogs() {
 
                 {!loading &&
                   !notConfigured &&
-                  filteredLogs.map((log) => {
+                  paginatedLogs.map((log) => {
                     const actor = users[String(log.actor_id)];
 
                     const result = getStatus(log);
@@ -752,6 +770,79 @@ export default function AuditLogs() {
               </tbody>
             </table>
           </div>
+
+          {/* PAGINATION */}
+          {!notConfigured && !loading && (
+            <div className="flex flex-col gap-3 border-t border-slate-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-wrap items-center gap-3 text-sm text-slate-600">
+                <span>
+                  {filteredLogs.length === 0
+                    ? "Showing 0 events"
+                    : `Showing ${firstRow + 1}–${Math.min(firstRow + pageSize, filteredLogs.length)} of ${filteredLogs.length} events`}
+                </span>
+                <label className="inline-flex items-center gap-2">
+                  Rows per page
+                  <select
+                    aria-label="Rows per page"
+                    value={pageSize}
+                    onChange={(event) =>
+                      setPageSize(Number(event.target.value))
+                    }
+                    className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm"
+                  >
+                    {[10, 20, 50, 100].map((size) => (
+                      <option key={size} value={size}>
+                        {size}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(1)}
+                  disabled={safePage === 1}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  First
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCurrentPage((page) => Math.max(1, page - 1))
+                  }
+                  disabled={safePage === 1}
+                  aria-label="Previous page"
+                  className="rounded-lg border border-slate-200 p-2 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ChevronLeft size={17} />
+                </button>
+                <span className="px-2 text-sm text-slate-600">
+                  Page {safePage} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCurrentPage((page) => Math.min(totalPages, page + 1))
+                  }
+                  disabled={safePage === totalPages}
+                  aria-label="Next page"
+                  className="rounded-lg border border-slate-200 p-2 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ChevronRight size={17} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCurrentPage(totalPages)}
+                  disabled={safePage === totalPages}
+                  className="rounded-lg border border-slate-200 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Last
+                </button>
+              </div>
+            </div>
+          )}
         </section>
 
         {/* FOOTER NOTE */}
