@@ -956,112 +956,125 @@ export default function BhwDashboard() {
               </button>
 
               {notificationOpen && (
-                <div className="absolute right-0 top-14 z-50 w-[min(90vw,390px)] overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl">
-                  <div className="flex items-center justify-between border-b border-gray-100 p-4">
-                    <div>
-                      <h3 className="font-bold text-gray-900">
-                        Pregnancy Notifications
-                      </h3>
-                      <p className="text-xs text-gray-500">
-                        {unreadNotifications} unread · Overdue, today and next 7
-                        days
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => setNotificationOpen(false)}
-                      aria-label="Close notifications"
-                      className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
-                    >
-                      <X size={17} />
-                    </button>
-                  </div>
-                  {notifications.length > 0 && (
-                    <div className="flex justify-end border-b border-gray-100 px-4 py-2">
+                <>
+                  <div
+                    className="fixed inset-0 z-[90] bg-black/30 lg:hidden"
+                    aria-hidden="true"
+                    onClick={() => setNotificationOpen(false)}
+                  />
+                  <div
+                    role="region"
+                    aria-label="Pregnancy notifications"
+                    className="fixed inset-x-3 top-[max(1rem,env(safe-area-inset-top))] z-[100] mx-auto flex max-h-[calc(100dvh-2rem)] max-w-[390px] flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-xl lg:absolute lg:inset-x-auto lg:right-0 lg:top-14 lg:mx-0 lg:w-[390px]"
+                  >
+                    <div className="flex shrink-0 items-center justify-between gap-2 border-b border-gray-100 p-4">
+                      <div>
+                        <h3 className="font-bold text-gray-900">
+                          Pregnancy Notifications
+                        </h3>
+                        <p className="text-xs text-gray-500">
+                          {unreadNotifications} unread · Overdue, today and next
+                          7 days
+                        </p>
+                      </div>
                       <button
                         type="button"
-                        onClick={() =>
-                          saveReadNotifications([
-                            ...new Set([
-                              ...readNotificationIds,
-                              ...notifications.map((n) => n.id),
-                            ]),
-                          ])
-                        }
-                        className="text-xs font-semibold text-blue-700 hover:underline"
+                        onClick={() => setNotificationOpen(false)}
+                        aria-label="Close notifications"
+                        className="rounded-lg p-2 text-gray-500 hover:bg-gray-100"
                       >
-                        Mark all as read
+                        <X size={17} />
                       </button>
                     </div>
-                  )}
-                  <div className="max-h-96 overflow-y-auto">
-                    {notifications.length === 0 ? (
-                      <div className="p-8 text-center text-sm text-gray-500">
-                        No upcoming or overdue pregnancy follow-ups in this
-                        area.
+                    {notifications.length > 0 && (
+                      <div className="flex shrink-0 justify-end border-b border-gray-100 px-4 py-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            saveReadNotifications([
+                              ...new Set([
+                                ...readNotificationIds,
+                                ...notifications.map((n) => n.id),
+                              ]),
+                            ])
+                          }
+                          className="text-xs font-semibold text-blue-700 hover:underline"
+                        >
+                          Mark all as read
+                        </button>
                       </div>
-                    ) : (
-                      notifications.map((notice) => {
-                        const unread = !readNotificationIds.includes(notice.id);
-                        return (
-                          <div
-                            key={notice.id}
-                            className={`border-b border-gray-100 p-4 last:border-b-0 ${unread ? "bg-blue-50/50" : "bg-white"}`}
-                          >
-                            <div className="flex items-start gap-3">
-                              <span
-                                className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${unread ? "bg-blue-600" : "bg-gray-200"}`}
-                              />
-                              <div className="min-w-0 flex-1">
-                                <p
-                                  className={`text-sm font-semibold ${notice.priority === 0 ? "text-rose-700" : "text-gray-900"}`}
-                                >
-                                  {notice.title}
-                                </p>
-                                <p className="mt-1 text-sm font-medium text-gray-800">
-                                  {notice.residentName}
-                                </p>
-                                <p className="mt-1 text-xs text-gray-500">
-                                  {notice.localAreaName} ·{" "}
-                                  {formatDate(notice.nextVisitDate)}
-                                </p>
-                                <p className="mt-1 text-xs text-gray-600">
-                                  {notice.description}
-                                </p>
-                                <div className="mt-3 flex items-center gap-4">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      markNotificationRead(notice.id);
-                                      setNotificationOpen(false);
-                                      navigate(
-                                        "/dashboard/bhw/pregnant-monitoring",
-                                      );
-                                    }}
-                                    className="text-xs font-semibold text-blue-700 hover:underline"
+                    )}
+                    <div className="min-h-0 max-h-96 overflow-y-auto overscroll-contain">
+                      {notifications.length === 0 ? (
+                        <div className="p-8 text-center text-sm text-gray-500">
+                          No upcoming or overdue pregnancy follow-ups in this
+                          area.
+                        </div>
+                      ) : (
+                        notifications.map((notice) => {
+                          const unread = !readNotificationIds.includes(
+                            notice.id,
+                          );
+                          return (
+                            <div
+                              key={notice.id}
+                              className={`border-b border-gray-100 p-4 last:border-b-0 ${unread ? "bg-blue-50/50" : "bg-white"}`}
+                            >
+                              <div className="flex items-start gap-3">
+                                <span
+                                  className={`mt-1 h-2.5 w-2.5 shrink-0 rounded-full ${unread ? "bg-blue-600" : "bg-gray-200"}`}
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <p
+                                    className={`text-sm font-semibold ${notice.priority === 0 ? "text-rose-700" : "text-gray-900"}`}
                                   >
-                                    Open Monitoring
-                                  </button>
-                                  {unread && (
+                                    {notice.title}
+                                  </p>
+                                  <p className="mt-1 text-sm font-medium text-gray-800">
+                                    {notice.residentName}
+                                  </p>
+                                  <p className="mt-1 text-xs text-gray-500">
+                                    {notice.localAreaName} ·{" "}
+                                    {formatDate(notice.nextVisitDate)}
+                                  </p>
+                                  <p className="mt-1 text-xs text-gray-600">
+                                    {notice.description}
+                                  </p>
+                                  <div className="mt-3 flex flex-wrap items-center gap-4">
                                     <button
                                       type="button"
-                                      onClick={() =>
-                                        markNotificationRead(notice.id)
-                                      }
-                                      className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900"
+                                      onClick={() => {
+                                        markNotificationRead(notice.id);
+                                        setNotificationOpen(false);
+                                        navigate(
+                                          "/dashboard/bhw/pregnant-monitoring",
+                                        );
+                                      }}
+                                      className="text-xs font-semibold text-blue-700 hover:underline"
                                     >
-                                      <Check size={13} /> Mark read
+                                      Open Monitoring
                                     </button>
-                                  )}
+                                    {unread && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          markNotificationRead(notice.id)
+                                        }
+                                        className="inline-flex items-center gap-1 text-xs font-medium text-gray-600 hover:text-gray-900"
+                                      >
+                                        <Check size={13} /> Mark read
+                                      </button>
+                                    )}
+                                  </div>
                                 </div>
                               </div>
                             </div>
-                          </div>
-                        );
-                      })
-                    )}
+                          );
+                        })
+                      )}
+                    </div>
                   </div>
-                </div>
+                </>
               )}
             </div>
             <button

@@ -50,6 +50,17 @@ const today = () => {
 };
 
 const emptyForm = () => ({
+  registration_mode: "existing",
+  household_code: "",
+  household_head: "",
+  local_area_id: "",
+  address: "",
+  household_contact: "",
+  first_name: "",
+  middle_name: "",
+  last_name: "",
+  birth_date: "",
+  contact_number: "",
   resident_id: "",
   family_record_no: "",
   date_of_registration: today(),
@@ -834,9 +845,44 @@ export default function BhwPregnantWomen() {
   const handleSubmit = async (event) => {
     event.preventDefault();
 
-    if (!user?.id || saving) return;
+    if (!user?.id || saving || savingRef.current) return;
+    const combined = !editingRecord && form.registration_mode === "new";
+    if (combined && !navigator.onLine) {
+      alert("Connect to the internet to register a new household.");
+      return;
+    }
+    if (combined) {
+      const errors = [];
+      const selectedAreaId = String(form.local_area_id ?? "").trim();
+      const validArea = localAreas.some(
+        (area) => String(area.id).trim() === selectedAreaId,
+      );
+      if (!selectedAreaId) errors.push("Please select a Purok / Sitio.");
+      else if (!validArea)
+        errors.push(
+          "The selected Purok / Sitio is not assigned to your account.",
+        );
+      if (!String(form.household_code ?? "").trim())
+        errors.push("Household code is required.");
+      if (!String(form.household_head ?? "").trim())
+        errors.push("Household head is required.");
+      if (!String(form.first_name ?? "").trim())
+        errors.push("First name is required.");
+      if (!String(form.last_name ?? "").trim())
+        errors.push("Last name is required.");
+      if (!form.birth_date) errors.push("Date of birth is required.");
+      else if (form.birth_date > today())
+        errors.push("Date of birth cannot be in the future.");
+      if (errors.length) {
+        alert(
+          "Please correct the following information:\n\n" +
+            errors.map((error, index) => `${index + 1}. ${error}`).join("\n"),
+        );
+        return;
+      }
+    }
 
-    if (!form.resident_id) {
+    if (!combined && !form.resident_id) {
       alert("Please select a woman.");
       return;
     }
@@ -847,6 +893,7 @@ export default function BhwPregnantWomen() {
     }
 
     if (
+      !combined &&
       !editingRecord &&
       pregnantWomen.some(
         (record) =>
@@ -861,7 +908,7 @@ export default function BhwPregnantWomen() {
     }
 
     const payload = {
-      resident_id: Number(form.resident_id),
+      resident_id: combined ? null : Number(form.resident_id),
       family_record_no: form.family_record_no.trim() || null,
       date_of_registration: form.date_of_registration,
 
@@ -903,20 +950,49 @@ export default function BhwPregnantWomen() {
 
       // Queueing is the submission point.
       // The queue itself persists the submitted record locally.
-      await queuePregnancySave(user.id, editingRecord, payload);
-      recordAudit(
-        editingRecord
-          ? "bhw_pregnancy_registration_update_queued"
-          : "bhw_pregnancy_registration_create_queued",
-        "success",
-        editingRecord?.id ?? null,
-        {
-          operation: editingRecord ? "update" : "create",
-          resident_id: payload.resident_id,
-        },
-      );
-
-      // Delete the unfinished draft only after queueing succeeds.
+      if (combined) {
+        const token = sessionStorage.getItem("mchms_session_token");
+        if (!token) throw new Error("Please sign in again.");
+        const { data, error } = await supabase.rpc(
+          "register_bhw_household_pregnancy",
+          {
+            p_token: token,
+            p_household: {
+              household_code: form.household_code.trim(),
+              household_head: form.household_head.trim(),
+              local_area_id: Number(form.local_area_id),
+              address: form.address.trim() || null,
+              contact_number: form.household_contact.trim() || null,
+            },
+            p_resident: {
+              first_name: form.first_name.trim(),
+              middle_name: form.middle_name.trim() || null,
+              last_name: form.last_name.trim(),
+              birth_date: form.birth_date,
+              contact_number: form.contact_number.trim() || null,
+            },
+            p_pregnancy: payload,
+          },
+        );
+        if (error) throw error;
+        recordAudit("bhw_household_pregnancy_created", "success", data, {
+          operation: "combined_create",
+        });
+      } else {
+        await queuePregnancySave(user.id, editingRecord, payload);
+        recordAudit(
+          editingRecord
+            ? "bhw_pregnancy_registration_update_queued"
+            : "bhw_pregnancy_registration_create_queued",
+          "success",
+          editingRecord?.id ?? null,
+          {
+            operation: editingRecord ? "update" : "create",
+            resident_id: payload.resident_id,
+          },
+        );
+      }
+      // Delete the unfinished draft only after submission succeeds.
       if (draftKey) {
         try {
           await deleteBhwPregnancyDraft(draftKey);
@@ -940,6 +1016,11 @@ export default function BhwPregnantWomen() {
       setShowModal(false);
       setEditingRecord(null);
 
+      if (combined) {
+        alert("Household, woman and pregnancy registered successfully.");
+        await loadData();
+        return;
+      }
       applyCache(await getPregnancyCache(user.id));
 
       alert(
@@ -1464,67 +1545,142 @@ export default function BhwPregnantWomen() {
                     title="Woman Information"
                     description="Select a female resident from your assigned area."
                   >
-                    <label className={labelClass}>Woman *</label>
-
-                    <select
-                      name="resident_id"
-                      value={form.resident_id}
-                      onChange={handleChange}
-                      disabled={!!editingRecord}
-                      required
-                      className={`${inputClass} disabled:bg-gray-100`}
-                    >
-                      <option value="">Select woman</option>
-
-                      {availableWomen.map((resident) => (
-                        <option key={resident.id} value={resident.id}>
-                          {getFullName(resident)}
-                          {" — "}
-                          {resident.birth_date || "No birth date"}
-                          {" — "}
-                          {resident.households?.household_code || ""}
-                        </option>
-                      ))}
-                    </select>
-
-                    {form.resident_id &&
-                      (() => {
-                        const resident = eligibleResidents.find(
-                          (item) =>
-                            String(item.id) === String(form.resident_id),
-                        );
-
-                        if (!resident) return null;
-
-                        return (
-                          <div className="mt-4 grid grid-cols-1 gap-4 rounded-lg border border-teal-100 bg-teal-50 p-4 sm:grid-cols-3">
-                            <DetailItem
-                              label="Date of Birth"
-                              value={formatDate(resident.birth_date)}
-                            />
-
-                            <DetailItem
-                              label="Age"
-                              value={calculateAge(resident.birth_date)}
-                            />
-
-                            <DetailItem
-                              label="Household"
-                              value={resident.households?.household_code}
-                            />
-
-                            <DetailItem
-                              label="Address"
-                              value={resident.households?.address}
-                            />
-
-                            <DetailItem
-                              label="Purok / Sitio"
-                              value={resident.households?.local_areas?.name}
-                            />
+                    {!editingRecord && (
+                      <div className="mb-4 grid gap-2 sm:grid-cols-2">
+                        {[
+                          ["existing", "Select Existing Woman"],
+                          ["new", "Register New Woman and Household"],
+                        ].map(([mode, label]) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() =>
+                              setForm((prev) => ({
+                                ...prev,
+                                registration_mode: mode,
+                                resident_id: "",
+                                household_code:
+                                  prev.household_code ||
+                                  "HH-" + crypto.randomUUID(),
+                              }))
+                            }
+                            className={`rounded-lg border p-3 text-sm font-medium ${(form.registration_mode || "existing") === mode ? "border-teal-500 bg-teal-50 text-teal-800" : "bg-white"}`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    {!editingRecord && form.registration_mode === "new" ? (
+                      <div className="space-y-4">
+                        <div className="grid gap-4 sm:grid-cols-2">
+                          <div>
+                            <label className={labelClass}>
+                              Assigned Purok / Sitio *
+                            </label>
+                            <select
+                              required
+                              name="local_area_id"
+                              value={String(form.local_area_id ?? "")}
+                              onChange={handleChange}
+                              className={inputClass}
+                            >
+                              <option value="">Select area</option>
+                              {localAreas.map((a) => (
+                                <option key={a.id} value={String(a.id)}>
+                                  {a.name}
+                                </option>
+                              ))}
+                            </select>
                           </div>
-                        );
-                      })()}
+                          {[
+                            ["household_code", "Household Code", true],
+                            ["household_head", "Household Head", true],
+                            ["address", "Address", false],
+                            ["household_contact", "Household Contact", false],
+                            ["first_name", "First Name", true],
+                            ["middle_name", "Middle Name", false],
+                            ["last_name", "Last Name", true],
+                            ["birth_date", "Date of Birth", true],
+                            ["contact_number", "Woman's Contact Number", false],
+                          ].map(([name, label, required]) => (
+                            <FormField
+                              key={name}
+                              name={name}
+                              label={label}
+                              required={required}
+                              type={name === "birth_date" ? "date" : "text"}
+                              value={form[name]}
+                              onChange={handleChange}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <>
+                        <label className={labelClass}>Woman *</label>
+
+                        <select
+                          name="resident_id"
+                          value={form.resident_id}
+                          onChange={handleChange}
+                          disabled={!!editingRecord}
+                          required
+                          className={`${inputClass} disabled:bg-gray-100`}
+                        >
+                          <option value="">Select woman</option>
+
+                          {availableWomen.map((resident) => (
+                            <option key={resident.id} value={resident.id}>
+                              {getFullName(resident)}
+                              {" — "}
+                              {resident.birth_date || "No birth date"}
+                              {" — "}
+                              {resident.households?.household_code || ""}
+                            </option>
+                          ))}
+                        </select>
+
+                        {form.resident_id &&
+                          (() => {
+                            const resident = eligibleResidents.find(
+                              (item) =>
+                                String(item.id) === String(form.resident_id),
+                            );
+
+                            if (!resident) return null;
+
+                            return (
+                              <div className="mt-4 grid grid-cols-1 gap-4 rounded-lg border border-teal-100 bg-teal-50 p-4 sm:grid-cols-3">
+                                <DetailItem
+                                  label="Date of Birth"
+                                  value={formatDate(resident.birth_date)}
+                                />
+
+                                <DetailItem
+                                  label="Age"
+                                  value={calculateAge(resident.birth_date)}
+                                />
+
+                                <DetailItem
+                                  label="Household"
+                                  value={resident.households?.household_code}
+                                />
+
+                                <DetailItem
+                                  label="Address"
+                                  value={resident.households?.address}
+                                />
+
+                                <DetailItem
+                                  label="Purok / Sitio"
+                                  value={resident.households?.local_areas?.name}
+                                />
+                              </div>
+                            );
+                          })()}
+                      </>
+                    )}
                   </FormSection>
 
                   {/* REGISTRATION INFORMATION */}
@@ -1693,7 +1849,13 @@ export default function BhwPregnantWomen() {
                   <div className="flex flex-wrap justify-end gap-3 border-t pt-4">
                     <button
                       type="submit"
-                      disabled={saving || !draftReady}
+                      disabled={
+                        saving ||
+                        !draftReady ||
+                        (!editingRecord &&
+                          form.registration_mode === "new" &&
+                          !online)
+                      }
                       className="inline-flex items-center gap-2 rounded-lg bg-teal-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-teal-700 disabled:opacity-50"
                     >
                       <Save size={17} />
@@ -1702,7 +1864,9 @@ export default function BhwPregnantWomen() {
                         ? "Saving..."
                         : editingRecord
                           ? "Update Registration"
-                          : "Register Pregnancy"}
+                          : form.registration_mode === "new"
+                            ? "Register Household and Pregnancy"
+                            : "Register Pregnancy"}
                     </button>
                   </div>
                 </form>
